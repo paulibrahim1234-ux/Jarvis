@@ -1,0 +1,508 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-geist-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.5);      /* 5px  chips */
+  --radius-md: calc(var(--radius) * 0.6);      /* 6px  chips */
+  --radius-lg: calc(var(--radius) * 0.8);      /* 8px  inner */
+  --radius-xl: var(--radius);                  /* 12px card */
+  --radius-2xl: calc(var(--radius) * 1.3);     /* 16px */
+  --radius-3xl: calc(var(--radius) * 1.7);     /* 20px */
+  --radius-4xl: calc(var(--radius) * 2.2);     /* 26px */
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.75rem;                           /* 12px card radius */
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  /* ---- Surfaces ---- */
+  --background: oklch(0.13 0.005 260);
+  --foreground: oklch(0.93 0 0);
+  --card: oklch(0.175 0.005 260);
+  --card-foreground: oklch(0.93 0 0);
+  --popover: oklch(0.19 0.005 260);
+  --popover-foreground: oklch(0.93 0 0);
+
+  --primary: oklch(0.65 0.18 250);
+  --primary-foreground: oklch(0.98 0 0);
+  --secondary: oklch(0.22 0.008 260);
+  --secondary-foreground: oklch(0.93 0 0);
+  --muted: oklch(0.22 0.008 260);
+  --muted-foreground: oklch(0.62 0 0);
+  --accent: oklch(0.22 0.012 250);
+  --accent-foreground: oklch(0.93 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 10%);
+  --ring: oklch(0.65 0.18 250);
+
+  --chart-1: oklch(0.65 0.18 250);
+  --chart-2: oklch(0.7 0.15 160);
+  --chart-3: oklch(0.65 0.15 300);
+  --chart-4: oklch(0.75 0.12 80);
+  --chart-5: oklch(0.6 0.2 30);
+
+  --sidebar: oklch(0.16 0.005 260);
+  --sidebar-foreground: oklch(0.93 0 0);
+  --sidebar-primary: oklch(0.65 0.18 250);
+  --sidebar-primary-foreground: oklch(0.98 0 0);
+  --sidebar-accent: oklch(0.22 0.008 260);
+  --sidebar-accent-foreground: oklch(0.93 0 0);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.65 0.18 250);
+
+  /* =========================================================
+   * SEMANTIC DESIGN TOKENS (Jarvis)
+   * Open-source consumers theme the whole dashboard by
+   * overriding just these variables.
+   * =======================================================*/
+
+  /* Surfaces — elevation scale */
+  --surface-0: oklch(0.13 0.005 260);      /* page bg */
+  --surface-1: oklch(0.175 0.005 260);     /* widget card */
+  --surface-2: oklch(0.22 0.008 260);      /* inner chip/row */
+  --surface-raised: oklch(0.21 0.008 260); /* hover / panel */
+
+  /* Borders — hairline hierarchy */
+  --border-subtle: oklch(1 0 0 / 6%);
+  --border-default: oklch(1 0 0 / 10%);
+  --border-strong: oklch(1 0 0 / 16%);
+  --border-accent: oklch(0.65 0.18 250 / 40%);
+
+  /* Ink — text scale */
+  --ink-primary: oklch(0.96 0 0);
+  --ink-secondary: oklch(0.82 0 0);
+  --ink-tertiary: oklch(0.62 0 0);
+  --ink-muted: oklch(0.48 0 0);
+
+  /* Brand / accent */
+  --brand: oklch(0.65 0.18 250);
+  --brand-soft: oklch(0.65 0.18 250 / 15%);
+  --brand-border: oklch(0.65 0.18 250 / 35%);
+
+  /* Status — used consistently across widgets */
+  --status-live: oklch(0.72 0.17 155);       /* green dot */
+  --status-live-soft: oklch(0.72 0.17 155 / 15%);
+  --status-warn: oklch(0.78 0.16 80);        /* amber */
+  --status-warn-soft: oklch(0.78 0.16 80 / 15%);
+  --status-error: oklch(0.68 0.19 25);       /* red */
+  --status-error-soft: oklch(0.68 0.19 25 / 15%);
+  --status-loading: oklch(0.58 0 0);         /* neutral grey */
+
+  /* Typography scale (px) */
+  --text-2xs: 10px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+
+  /* Spacing scale (4px base grid) */
+  --space-1: 4px;
+  --space-2: 8px;    /* tight   */
+  --space-3: 12px;
+  --space-4: 16px;   /* normal  */
+  --space-5: 20px;
+  --space-6: 24px;   /* generous */
+  --space-8: 32px;
+
+  /* Radii */
+  --radius-card: 12px;
+  --radius-chip: 6px;
+  --radius-pill: 999px;
+
+  /* Elevation */
+  --shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.02) inset;
+  --shadow-card-hover:
+    0 8px 24px rgba(0, 0, 0, 0.35),
+    0 1px 0 rgba(255, 255, 255, 0.03) inset;
+  --shadow-card-drag:
+    0 24px 64px rgba(0, 0, 0, 0.55),
+    0 0 0 1px oklch(0.65 0.18 250 / 22%),
+    0 0 40px oklch(0.65 0.18 250 / 10%);
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1.2);
+  --dur-fast: 120ms;
+  --dur-med: 220ms;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.005em;
+  }
+  html {
+    @apply font-sans;
+  }
+  /* Consistent focus ring using the brand accent */
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+    border-radius: var(--radius-chip);
+  }
+}
+
+/* =========================================================
+ * Primitives: .jv-card, .jv-chip, .jv-live-dot, .jv-mock-badge
+ * Reusable, token-backed classes. Widgets can adopt them
+ * gradually without breaking existing layouts.
+ * =======================================================*/
+
+/* Card — one consistent surface */
+.jv-card {
+  background-color: var(--surface-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  transition:
+    border-color var(--dur-med) var(--ease-standard),
+    box-shadow var(--dur-med) var(--ease-standard),
+    background-color var(--dur-med) var(--ease-standard);
+}
+.jv-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* Inner row / chip / pill */
+.jv-chip {
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--border-subtle);
+  background-color: color-mix(in oklch, var(--surface-2) 60%, transparent);
+}
+
+/* Live indicator — unified component:
+ * <span class="jv-live-dot" data-state="live|warn|error|loading"></span>
+ * - live  → pulsing green
+ * - warn  → static amber
+ * - error → static red
+ * - loading/no state → hidden
+ */
+.jv-live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background-color: var(--status-loading);
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.jv-live-dot[data-state="live"] {
+  background-color: var(--status-live);
+  box-shadow: 0 0 0 0 var(--status-live);
+  animation: pulse-live 2.4s ease-in-out infinite;
+}
+.jv-live-dot[data-state="warn"] {
+  background-color: var(--status-warn);
+}
+.jv-live-dot[data-state="error"] {
+  background-color: var(--status-error);
+}
+.jv-live-dot[data-state="loading"] {
+  background-color: transparent;
+  width: 0;
+  height: 0;
+}
+
+/* Mock/offline badge — consistent styling widgets should use */
+.jv-mock-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--border-subtle);
+  background-color: color-mix(in oklch, var(--surface-2) 70%, transparent);
+  color: var(--ink-tertiary);
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+/* Section title style used across widget headers */
+.jv-section-title {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-tertiary);
+}
+
+/* Loading skeleton */
+@keyframes jv-skeleton-shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: calc(200px + 100%) 0; }
+}
+.jv-skeleton {
+  background:
+    linear-gradient(
+      90deg,
+      var(--surface-2) 0%,
+      color-mix(in oklch, var(--surface-2) 70%, var(--border-strong)) 50%,
+      var(--surface-2) 100%
+    );
+  background-size: 200px 100%;
+  background-repeat: no-repeat;
+  border-radius: var(--radius-chip);
+  animation: jv-skeleton-shimmer 1.4s linear infinite;
+}
+
+/* =========================================================
+ * react-grid-layout overrides — premium feel
+ * =======================================================*/
+
+.react-grid-item {
+  overflow: visible !important;
+  transition:
+    transform 180ms var(--ease-standard),
+    opacity 180ms var(--ease-standard) !important;
+}
+
+.react-grid-item > div {
+  height: 100%;
+  width: 100%;
+}
+
+.react-grid-item.react-grid-placeholder {
+  background: var(--brand) !important;
+  opacity: 0.12 !important;
+  border-radius: var(--radius-card) !important;
+  border: 1px dashed var(--border-accent) !important;
+  transition: all 160ms var(--ease-standard) !important;
+}
+
+/* Resize handle — invisible until hover, tasteful chevron */
+.react-resizable-handle.react-resizable-handle-se {
+  position: absolute !important;
+  width: 22px !important;
+  height: 22px !important;
+  bottom: 0 !important;
+  right: 0 !important;
+  z-index: 99 !important;
+  cursor: se-resize !important;
+  opacity: 0 !important;
+  background-image: none !important;
+  background: transparent !important;
+  padding: 0 !important;
+  pointer-events: auto !important;
+  transition: opacity 160ms var(--ease-standard);
+}
+
+.react-grid-item:hover > .react-resizable-handle.react-resizable-handle-se {
+  opacity: 0.9 !important;
+}
+
+.react-resizable-handle.react-resizable-handle-se::after {
+  content: "" !important;
+  position: absolute !important;
+  right: 5px !important;
+  bottom: 5px !important;
+  width: 8px !important;
+  height: 8px !important;
+  border-right: 1.5px solid oklch(0.75 0 0 / 70%) !important;
+  border-bottom: 1.5px solid oklch(0.75 0 0 / 70%) !important;
+  background: none !important;
+  background-image: none !important;
+  border-radius: 1px !important;
+}
+
+/* Widget outer / inner stacking */
+.widget-outer { z-index: 1; }
+.widget-content { border-radius: inherit; }
+
+/* Card hover / dragging border + shadow — applies to every widget card
+ * (each widget's Card renders as the first div child of .react-grid-item > div) */
+.react-grid-item > div > [data-slot="card"],
+.react-grid-item > div > div:not(.widget-outer) {
+  transition:
+    border-color var(--dur-med) var(--ease-standard),
+    box-shadow var(--dur-med) var(--ease-standard),
+    transform var(--dur-med) var(--ease-standard);
+}
+
+.react-grid-item:hover > div > [data-slot="card"],
+.react-grid-item:hover > div > div > [data-slot="card"] {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* Card polish — applied to all shadcn Cards (used by every widget) */
+[data-slot="card"] {
+  background-color: var(--surface-1);
+  border-radius: var(--radius-card) !important;
+  box-shadow: var(--shadow-card);
+}
+
+/* Dragging — elevated glass effect, whole grid item */
+.react-grid-item.react-draggable-dragging {
+  z-index: 100;
+  opacity: 0.96;
+  transition: none !important;
+}
+.react-grid-item.react-draggable-dragging > div > [data-slot="card"],
+.react-grid-item.react-draggable-dragging > div > div > [data-slot="card"] {
+  box-shadow: var(--shadow-card-drag);
+  border-color: var(--border-accent);
+}
+
+/* Resizing — same treatment, subtler */
+.react-grid-item.resizing > div > [data-slot="card"],
+.react-grid-item.resizing > div > div > [data-slot="card"] {
+  box-shadow: var(--shadow-card-drag);
+  border-color: var(--border-accent);
+}
+
+/* =========================================================
+ * Animations
+ * =======================================================*/
+
+/* Animated vertical gradient for morning briefing left border */
+@keyframes gradient-y {
+  0%, 100% { background-position: 0% 0%; }
+  50%      { background-position: 0% 100%; }
+}
+
+/* Animated gradient border keyframe for briefing card */
+@keyframes border-flow {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.border-flow {
+  background: linear-gradient(
+    90deg,
+    var(--brand) 0%,
+    oklch(0.7 0.15 300 / 80%) 50%,
+    var(--brand) 100%
+  );
+  background-size: 200% 200%;
+  animation: border-flow 4s ease infinite;
+}
+
+/* Typing indicator bouncing dots */
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30%           { transform: translateY(-4px); opacity: 1; }
+}
+.typing-dot { animation: typing-bounce 1.4s ease-in-out infinite; }
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.3s; }
+
+/* Live pulse — used by .jv-live-dot AND the legacy .pulse-live class */
+@keyframes pulse-live {
+  0%, 100% { opacity: 1;   box-shadow: 0 0 0 0   var(--status-live, oklch(0.72 0.17 155)); }
+  50%      { opacity: 0.5; box-shadow: 0 0 0 4px oklch(0.72 0.17 155 / 0%); }
+}
+.pulse-live { animation: pulse-live 2.4s ease-in-out infinite; }
+
+/* Chat input glow on focus */
+.chat-input-glow:focus-within {
+  box-shadow:
+    0 0 0 1px var(--border-accent),
+    0 0 12px oklch(0.65 0.18 250 / 15%);
+  border-color: var(--border-accent);
+  transition:
+    box-shadow var(--dur-med) var(--ease-standard),
+    border-color var(--dur-med) var(--ease-standard);
+}
+
+/* Subtle scrollbar everywhere dark */
+.dark *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.dark *::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 6%);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.dark *::-webkit-scrollbar-thumb:hover {
+  background: oklch(1 0 0 / 12%);
+  background-clip: padding-box;
+}
+.dark *::-webkit-scrollbar-track {
+  background: transparent;
+}
