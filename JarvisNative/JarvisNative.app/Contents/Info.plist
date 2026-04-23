@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>JarvisNative</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jarvis.native</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>JarvisNative</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Jarvis reads your calendar to show upcoming events and rotation schedule in your dashboard.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Jarvis reads your calendar to show upcoming events and rotation schedule in your dashboard.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Jarvis uses your contacts to label Messages conversations with real names.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Jarvis can read reminders to sync your to-do list.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Jarvis may need to send Apple events for certain app integrations.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

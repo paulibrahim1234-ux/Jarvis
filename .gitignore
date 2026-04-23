@@ -1,0 +1,33 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.egg-info/
+backend/.pytest_cache/
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/.env.local
+frontend/.env*.local
+frontend/tsconfig.tsbuildinfo
+
+# macOS
+.DS_Store
+
+# Personal config (never commit)
+jarvis.config.ts
+*.local.ts
+JarvisNative/.build/
+
+# Claude Code worktrees (top-level workspace state)
+.claude/worktrees/
+
+# Generic secret files — belt + suspenders
+*.pem
+*.key
+*_token.txt
+.jarvis/

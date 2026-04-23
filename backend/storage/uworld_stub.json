@@ -1,0 +1,31 @@
+{
+  "_comment": "Mock UWorld incorrect questions. Replace with scraped UWorld data later. Each entry maps a UWorld QID to the Anki tag used to find related suspended cards.",
+  "_tag_format": "tag:uworld_qid_<qid>  (widgets.py queries AnkiConnect findCards with this)",
+  "incorrect": [
+    {
+      "uworld_qid": "12345",
+      "uworld_topic": "Heart failure — diastolic vs systolic",
+      "missed_at": "2026-04-15"
+    },
+    {
+      "uworld_qid": "12346",
+      "uworld_topic": "Aortic stenosis murmur characteristics",
+      "missed_at": "2026-04-15"
+    },
+    {
+      "uworld_qid": "23901",
+      "uworld_topic": "Loop diuretics — mechanism and side effects",
+      "missed_at": "2026-04-14"
+    },
+    {
+      "uworld_qid": "30412",
+      "uworld_topic": "ACE inhibitor contraindications",
+      "missed_at": "2026-04-14"
+    },
+    {
+      "uworld_qid": "41055",
+      "uworld_topic": "Atrial fibrillation — rate vs rhythm control",
+      "missed_at": "2026-04-13"
+    }
+  ]
+}
