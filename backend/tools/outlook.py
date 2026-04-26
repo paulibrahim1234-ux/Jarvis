@@ -133,7 +133,8 @@ def run_outlook_tool(name: str, inp: dict):
         events = calendar.get_events(limit=20, include_recurring=True)
         return {"events": [
             {"title": e.subject, "start": str(e.start), "end": str(e.end),
-             "location": str(e.location) if e.location else ""}
+             "location": str(e.location) if e.location else "",
+             "calendar": "Outlook"}
             for e in events
         ], "date": d}
 
