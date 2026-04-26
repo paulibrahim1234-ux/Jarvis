@@ -391,16 +391,17 @@ async def dashboard_snapshot_async() -> str:
 
     lines = [f"Now: {now_label}."]
 
-    # calendar
-    _ROTATION_CALENDARS = {"Rotation", "Subscribed Calendar", "Work"}
+    # calendar — skip events from any HIPAA-sensitive calendar (rotations,
+    # subscribed clinical feeds, Outlook). Title text from those events must
+    # never reach the LLM context.
+    from hipaa import LLM_HIDDEN_CALENDARS, is_hidden
     _UPPERCASE_TOKEN_RE = re.compile(r"\b[A-Z]{2,3}\b")
     events = cal.get("events") or []
     if events:
-        # Find first non-rotation event
+        # Find first non-redacted event
         e0 = None
         for e in events:
-            cal_name = (e.get("calendar") or "").strip()
-            if cal_name not in _ROTATION_CALENDARS:
+            if not is_hidden(e.get("calendar"), LLM_HIDDEN_CALENDARS):
                 e0 = e
                 break
         if e0:

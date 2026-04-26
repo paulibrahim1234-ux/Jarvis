@@ -7,6 +7,7 @@ import threading
 import time
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
+from hipaa import redact_events_in_place
 from tools.anki import _invoke as anki_invoke
 from tools.imessage import get_conversations
 from tools.desktop_apps import (
@@ -451,19 +452,17 @@ def _compute_calendar():
             seen.add(k)
             deduped.append(e)
     deduped.sort(key=lambda e: e.get("start", ""))
-    # HIPAA: hide clinical/rotation titles and room-allocation location strings
-    _HIDDEN_CALS = {"Rotation", "Subscribed Calendar", "Work"}
-    for e in deduped:
-        if e.get("calendar") in _HIDDEN_CALS:
-            e["title"] = "(hidden)"
-            e["location"] = ""
+    # HIPAA: hide clinical/rotation titles and room-allocation location strings.
+    redact_events_in_place(deduped)
     if deduped:
         return {"events": deduped, "available": True, "source": "desktop"}
     try:
         from tools.outlook import run_outlook_tool as _outlook_api, is_authenticated as outlook_authed
         if outlook_authed():
             data = _outlook_api("outlook_get_calendar", {})
-            return {"events": data.get("events", []), "available": True, "source": "graph_api"}
+            graph_events = data.get("events", []) or []
+            redact_events_in_place(graph_events)
+            return {"events": graph_events, "available": True, "source": "graph_api"}
     except Exception:
         pass
     return None
