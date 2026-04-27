@@ -1,5 +1,6 @@
-<img width="919" height="419" alt="IMG_6642" src="https://github.com/user-attachments/assets/d2ab51a6-9387-4d29-b2c6-8f991cc38b0c" />
 <img width="970" height="1508" alt="PNG image" src="https://github.com/user-attachments/assets/f6169621-b40b-43bb-9bf7-3db38fb3c9bc" />
+<img width="919" height="419" alt="IMG_6642" src="https://github.com/user-attachments/assets/d2ab51a6-9387-4d29-b2c6-8f991cc38b0c" />
+
 # Jarvis
 
 **A local-first AI dashboard for med students.** Lives on your Mac. Drives your apps. Knows your week.
