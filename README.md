@@ -63,6 +63,8 @@ Built for one med student. Open-sourced because the pattern works.
 
 ## Getting started
 
+> **Don't write code? Follow the [foolproof walkthrough in SETUP.md](SETUP.md)** — every step is a prompt you copy-paste into Claude Code (or Codex). Your job is to click links and answer questions; Claude does the work.
+
 **Prereqs**: macOS, Node 18+, Python 3.11+, [Anki](https://apps.ankiweb.net/) + [AnkiConnect](https://ankiweb.net/shared/info/2055492159), an Anthropic API key (or Claude Code OAuth token), Outlook Classic (not "New Outlook").
 
 ```bash
