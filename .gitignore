@@ -22,6 +22,8 @@ frontend/tsconfig.tsbuildinfo
 jarvis.config.ts
 *.local.ts
 JarvisNative/.build/
+# Compiled .app bundle — rebuild from `swift build` locally; never commit binaries.
+JarvisNative/JarvisNative.app/
 
 # Claude Code worktrees (top-level workspace state)
 .claude/worktrees/
