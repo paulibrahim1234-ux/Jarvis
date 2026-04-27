@@ -134,7 +134,7 @@ function cleanLocation(loc: string | null | undefined): string {
     .replace(/\s{2,}/g, " ")
     .trim();
   // If the cleaned string is just a separator or empty, return ""
-  return cleaned === "·" || cleaned === "·" ? "" : cleaned;
+  return cleaned === "·" || cleaned === "" ? "" : cleaned;
 }
 
 function formatEvent(
@@ -263,17 +263,24 @@ export function CalendarWidget() {
   const hasScrolledRef = useRef(false);
 
   const [containerWidth, setContainerWidth] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(0);
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [status, setStatus] = useState<"loading" | "live" | "error">("loading");
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [calendarCounts, setCalendarCounts] = useState<Record<string, number>>({});
   const [selectedCal, setSelectedCal] = useState<string>("All");
+  // Ref tracks whether we have any events loaded — avoids stale-closure reads
+  // of `events` state inside the polling useEffect (which has [] deps).
+  const hasEventsRef = useRef(false);
 
   useEffect(() => {
     const el = contentRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) setContainerWidth(entry.contentRect.width);
+      for (const entry of entries) {
+        setContainerWidth(entry.contentRect.width);
+        setContainerHeight(entry.contentRect.height);
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -295,8 +302,10 @@ export function CalendarWidget() {
           // failure (Calendar.app wedged, AppleScript timeout, etc).
           // Only flip to "error" when we have NOTHING to show; otherwise
           // keep the live data and surface the issue with a small badge.
+          // Use hasEventsRef (not `events` state) to avoid the stale-closure
+          // bug where events.length is always 0 inside this [] dep effect.
           setErrorMsg(data.error || "Calendar unavailable");
-          if (events.length === 0) setStatus("error");
+          if (!hasEventsRef.current) setStatus("error");
           // status stays "live" with stale data otherwise
           return;
         }
@@ -310,12 +319,13 @@ export function CalendarWidget() {
         for (const ev of mapped) counts[ev.calendar] = (counts[ev.calendar] || 0) + 1;
         setCalendarCounts(counts);
         setEvents(mapped);
+        hasEventsRef.current = mapped.length > 0;
         setStatus("live");
         setErrorMsg("");
       } catch (err) {
         // Same rule: don't wipe events on transient network errors.
         setErrorMsg(err instanceof Error ? err.message : "network error");
-        if (events.length === 0) setStatus("error");
+        if (!hasEventsRef.current) setStatus("error");
       }
     };
     load();
@@ -351,6 +361,13 @@ export function CalendarWidget() {
   }, [status, events.length, groups]);
 
   const isWide = containerWidth > 500;
+  // Landscape mode: widget is wider than tall (pulled to a horizontal slot).
+  // Threshold 1.4 catches most wide-short configurations without false-positives
+  // on squarish widgets. Requires a minimum width so tiny containers don't flip.
+  const isLandscape =
+    containerWidth > 400 &&
+    containerHeight > 0 &&
+    containerWidth / containerHeight > 1.4;
   const isLive = status === "live";
 
   // Index of the first group that is today-or-later (the "now" line).
@@ -438,7 +455,10 @@ export function CalendarWidget() {
             No upcoming events in the next 30 days.
           </div>
         )}
-        {isLive && events.length > 0 && (
+        {isLive && events.length > 0 && isLandscape && (
+          <WeekGrid groups={groups} nowIdx={nowIdx} />
+        )}
+        {isLive && events.length > 0 && !isLandscape && (
           <ScrollArea className="h-full">
             <div className="space-y-4 pr-1">
               {groups.map((g, gi) => (
@@ -481,6 +501,109 @@ export function CalendarWidget() {
     </Card>
   );
 }
+
+// ── Horizontal week-grid (landscape mode) ────────────────────────────────────
+// Shows the next 7 days as side-by-side columns. Each column has a day header
+// and lists up to ~4 events; overflow is scrollable per-column.
+
+const WEEK_DAYS = 7;
+
+function WeekGrid({ groups, nowIdx }: { groups: DayGroup[]; nowIdx: number }) {
+  // Take the slice of groups that are today-or-later, up to 7 days.
+  const startSlice = nowIdx >= 0 ? nowIdx : 0;
+  const slice = groups.slice(startSlice, startSlice + WEEK_DAYS);
+
+  // If we have fewer than 7 days with events, pad with empty day buckets
+  // so the grid always shows 7 columns.
+  const today0 = new Date();
+  today0.setHours(0, 0, 0, 0);
+
+  const columns: DayGroup[] = [];
+  for (let i = 0; i < WEEK_DAYS; i++) {
+    const target = new Date(today0);
+    target.setDate(target.getDate() + i);
+    const targetKey = dayKey(target);
+    const found = slice.find((g) => g.key === targetKey);
+    if (found) {
+      columns.push(found);
+    } else {
+      columns.push({
+        key: targetKey,
+        label: dayLabel(target, today0),
+        date: target,
+        events: [],
+      });
+    }
+  }
+
+  return (
+    <div className="h-full grid gap-1" style={{ gridTemplateColumns: `repeat(${WEEK_DAYS}, 1fr)` }}>
+      {columns.map((col, ci) => {
+        const isToday = ci === 0;
+        return (
+          <div key={col.key} className="flex flex-col min-h-0 overflow-hidden">
+            {/* Day header */}
+            <div
+              className={`shrink-0 px-1 py-0.5 mb-1 border-b text-center ${
+                isToday ? "border-emerald-500/40" : "border-white/5"
+              }`}
+            >
+              <div
+                className={`text-[10px] font-semibold uppercase tracking-wide ${
+                  isToday ? "text-emerald-400" : "text-foreground/70"
+                }`}
+              >
+                {col.label}
+              </div>
+              <div className="text-[9px] text-muted-foreground/50">
+                {col.date.toLocaleDateString([], { month: "short", day: "numeric" })}
+              </div>
+            </div>
+            {/* Events */}
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-0.5 pr-0.5">
+              {col.events.length === 0 ? (
+                <div className="text-[9px] text-muted-foreground/30 text-center pt-2">—</div>
+              ) : (
+                col.events.map((ev) => (
+                  <WeekEventChip key={ev.bucketKey} event={ev} />
+                ))
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function WeekEventChip({ event }: { event: BucketedEvent }) {
+  const typeCls = typeColors[event.type];
+  const timeLabel = event.ongoing ? "all-day" : event.startLabel;
+
+  const handleClick = async () => {
+    try {
+      await openInApp({
+        app: "outlook-calendar",
+        ref: event.id,
+        context: { start: event.start.toISOString() },
+      });
+    } catch {
+      // fire-and-forget
+    }
+  };
+
+  return (
+    <div
+      onClick={handleClick}
+      className={`cursor-pointer rounded px-1.5 py-1 text-[10px] leading-snug hover:bg-white/10 transition-colors ${typeCls} bg-transparent`}
+    >
+      <div className="font-medium truncate">{event.title}</div>
+      <div className="text-[9px] opacity-70 truncate">{timeLabel}</div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function EventRow({ event, wide }: { event: BucketedEvent; wide: boolean }) {
   const calCls = calendarColor(event.calendar);

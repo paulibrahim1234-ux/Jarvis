@@ -31,3 +31,9 @@ JarvisNative/.build/
 *.key
 *_token.txt
 .jarvis/
+
+# Personal scraped data — academic records, AnKing card content, etc.
+# uworld_stub.json is the shipped placeholder; everything else in storage/ is private.
+backend/storage/uworld_history.json
+backend/storage/anki_qid_index.json
+backend/storage/anki_qid_cache.json

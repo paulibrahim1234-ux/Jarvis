@@ -140,12 +140,17 @@ export function EmailWidget() {
       .then((data) => {
         if (folderGen.current !== launchedFor) return;
 
-        if (data.auth_needed) {
+        // auth_needed: backend explicitly says OAuth token required.
+        // needs_account: Outlook desktop app isn't open / signed in — also
+        //   treat as "needs connection" so the Connect CTA shows instead of
+        //   a generic error message that gives the user nothing to click.
+        if (data.auth_needed || data.needs_account) {
           setEmails([]);
+          setErrorMsg(null);
           setAuthUrl(data.auth_url ?? `${BACKEND}/auth/microsoft`);
           return;
         }
-        if (data.needs_account || (!data.available && data.error)) {
+        if (!data.available && data.error) {
           setEmails([]);
           setErrorMsg(data.error as string);
           return;

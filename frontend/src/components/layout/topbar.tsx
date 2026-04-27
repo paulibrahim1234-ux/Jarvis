@@ -45,12 +45,9 @@ export function Topbar() {
       })
     : "";
 
-  const secondsStr = now
-    ? now.toLocaleTimeString("en-US", {
-        second: "2-digit",
-        hour12: false,
-      })
-    : "";
+  // Extract seconds directly — toLocaleTimeString with only `second` is
+  // inconsistent across browsers (Safari may return "HH:MM:SS" instead of "SS").
+  const secondsStr = now ? String(now.getSeconds()).padStart(2, "0") : "";
 
   const weekdayStr = now
     ? now.toLocaleDateString("en-US", { weekday: "long" })

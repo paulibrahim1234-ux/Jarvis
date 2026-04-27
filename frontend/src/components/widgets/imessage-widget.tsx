@@ -34,6 +34,7 @@ type Conversation = {
   last_message: string;
   last_message_from_me: boolean;
   last_time: string;
+  last_time_iso: string | null; // ISO timestamp for reliable sort; may be absent on old entries
   messages: ThreadMessage[];
 };
 
@@ -155,6 +156,17 @@ export function IMessageWidget() {
     const u: Conversation[] = [];
     const r: Conversation[] = [];
     for (const c of convos) (c.unread_count > 0 ? u : r).push(c);
+    // Sort each bucket newest-first using the ISO timestamp when available.
+    // The backend returns conversations sorted by last_date DESC already, but
+    // the unread/read split can reorder them — re-sort to preserve recency.
+    const byTime = (a: Conversation, b: Conversation) => {
+      const ta = a.last_time_iso ?? "";
+      const tb = b.last_time_iso ?? "";
+      if (ta && tb) return tb.localeCompare(ta); // ISO strings compare correctly
+      return 0; // preserve backend order when ISO is absent
+    };
+    u.sort(byTime);
+    r.sort(byTime);
     return { unread: u, read: r };
   }, [convos]);
 
@@ -374,7 +386,7 @@ function ThreadView({ convo, isWide }: { convo: Conversation; isWide: boolean })
       <div className={isWide ? "space-y-3" : "space-y-2"}>
         {convo.messages.map((m, idx) => (
           <div
-            key={idx}
+            key={`${m.time}-${idx}`}
             className={`flex ${m.isFromMe ? "justify-end" : "justify-start"}`}
           >
             <div className={`${isWide ? "max-w-[75%]" : "max-w-[80%]"} space-y-1`}>

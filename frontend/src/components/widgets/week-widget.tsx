@@ -4,7 +4,7 @@ import { useRef, useState, useEffect, useMemo } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { fetchCalendar } from "@/lib/api";
+import { fetchCalendar, BACKEND } from "@/lib/api";
 import { openInApp } from "@/lib/open-apps";
 import {
   groupByDay,
@@ -56,7 +56,7 @@ export function WeekWidget() {
     fetchCalendar(range)
       .then((data) => {
         if (data.auth_needed) {
-          setAuthUrl(data.auth_url ?? "http://localhost:8000/auth/microsoft");
+          setAuthUrl(data.auth_url ?? `${BACKEND}/auth/microsoft`);
         } else if (data.available && Array.isArray(data.events)) {
           setEvents(data.events as RawCalendarEvent[]);
           setLive(true);

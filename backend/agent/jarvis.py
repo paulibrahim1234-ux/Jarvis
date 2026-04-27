@@ -13,14 +13,22 @@ from agent import memory
 
 # OAuth tokens (sk-ant-oat...) need Bearer auth + oauth beta header.
 # API keys (sk-ant-api...) use x-api-key.
+# We use AsyncAnthropic so that chat_async can await the API call without
+# blocking the FastAPI event loop. The sync `client` is kept for the
+# backwards-compatible sync wrapper and for memory.extract_facts_async.
 _raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or ""
 if _raw.startswith("sk-ant-oat"):
     client = anthropic.Anthropic(
         auth_token=_raw,
         default_headers={"anthropic-beta": "oauth-2025-04-20"},
     )
+    async_client = anthropic.AsyncAnthropic(
+        auth_token=_raw,
+        default_headers={"anthropic-beta": "oauth-2025-04-20"},
+    )
 else:
     client = anthropic.Anthropic(api_key=_raw)
+    async_client = anthropic.AsyncAnthropic(api_key=_raw)
 
 BASE_SYSTEM_PROMPT = """You are Jarvis, a personal AI assistant for a medical student (MS3, surgery rotation). You control their Mac directly — no OAuth or Azure setup needed for most things.
 
@@ -56,7 +64,7 @@ BASE_SYSTEM_PROMPT = """You are Jarvis, a personal AI assistant for a medical st
 - run_shell(command) — safe shell commands
 - save_credential(key, value) — write to .env
 
-## Browser (Chrome via AppleScript)
+## Browser (Comet/configurable via JARVIS_BROWSER env var, via AppleScript)
 - browser_navigate / browser_read_page / browser_run_js / browser_click / browser_fill
 - fetch_spotify_credentials() — auto-extract Spotify Client ID + Secret from dashboard
 - fetch_azure_client_id() — auto-extract Azure client ID
@@ -125,9 +133,13 @@ async def chat_async(
 
     model = model_override or os.getenv("JARVIS_MODEL", "claude-haiku-4-5-20251001")
 
+    import asyncio
+
     final_text = ""
     for _ in range(25):  # max 25 tool-use rounds
-        response = client.messages.create(
+        # Use async_client so this await yields the event loop to other
+        # requests instead of blocking the entire FastAPI worker thread.
+        response = await async_client.messages.create(
             model=model,
             max_tokens=2048,
             system=system_prompt,
@@ -147,7 +159,9 @@ async def chat_async(
             for block in response.content:
                 if block.type == "tool_use":
                     try:
-                        result = dispatch(block.name, block.input)
+                        # Tool dispatch is sync (subprocess/AppleScript) — run
+                        # in a thread so we don't block the event loop here.
+                        result = await asyncio.to_thread(dispatch, block.name, block.input)
                     except Exception as e:
                         result = {"error": str(e)}
 
@@ -178,7 +192,8 @@ async def chat_async(
     # Refresh last_used_at on surfaced facts.
     memory.touch_facts([])  # no-op placeholder; facts are touched when created
 
-    # Fire-and-forget fact extraction.
+    # Fire-and-forget fact extraction — run in a thread so the sync
+    # Anthropic call inside doesn't block the event loop.
     try:
         last_user = ""
         if messages:
@@ -187,16 +202,15 @@ async def chat_async(
                 c = lu.get("content") or ""
                 last_user = c if isinstance(c, str) else str(c)
         if last_user:
-            memory.extract_facts_async(client, last_user, final_text)
+            asyncio.ensure_future(
+                asyncio.to_thread(memory.extract_facts_async, client, last_user, final_text)
+            )
     except Exception:
         pass
 
     return final_text, conversation_id
 
 
-def chat(messages: list[dict]) -> str:
-    """Backwards-compatible sync wrapper (no conversation_id)."""
-    import asyncio
-
-    reply, _ = asyncio.run(chat_async(messages))
-    return reply
+# Sync chat() wrapper removed — it called asyncio.run() which raises
+# RuntimeError when invoked from a context with a running event loop.
+# No callers exist; all call sites use chat_async directly.

@@ -63,7 +63,7 @@ def _run_warmup():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Kick off cache warmup without blocking server startup.
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(_WARMUP_EXECUTOR, _run_warmup)
     yield
     _WARMUP_EXECUTOR.shutdown(wait=False)
@@ -119,20 +119,33 @@ async def health():
     except Exception:
         pass
 
-    # Auth checks are pure token-file reads — fast. Run them in a threadpool
-    # so any accidental I/O doesn't touch the event loop, and cap at 400ms.
+    # Auth checks run in a threadpool so I/O doesn't touch the event loop.
+    # Outlook check: prefer desktop AppleScript account count (fast, no OAuth
+    # needed) so health reflects Outlook Classic being open and signed in.
+    # Falls back to MS Graph token check when desktop call fails.
     def _auth_checks():
-        from tools.outlook import is_authenticated as _ms_ok
         from tools.spotify import is_authenticated as _sp_ok
-        return bool(_ms_ok()), bool(_sp_ok())
+        outlook_ok = False
+        try:
+            from tools.desktop_apps import _count_outlook_accounts
+            counts = _count_outlook_accounts()
+            total = sum(counts.get(k, 0) for k in ("exchange", "imap", "pop"))
+            outlook_ok = total > 0
+        except Exception:
+            try:
+                from tools.outlook import is_authenticated as _ms_ok
+                outlook_ok = bool(_ms_ok())
+            except Exception:
+                pass
+        return outlook_ok, bool(_sp_ok())
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     outlook_ok = False
     spotify_ok = False
     try:
         outlook_ok, spotify_ok = await asyncio.wait_for(
             loop.run_in_executor(None, _auth_checks),
-            timeout=0.4,
+            timeout=1.0,
         )
     except Exception:
         pass

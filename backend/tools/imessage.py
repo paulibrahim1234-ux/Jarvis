@@ -38,7 +38,7 @@ def _mac_ns_to_dt(ts: int) -> datetime | None:
 
 
 def _fmt_time(dt: datetime | None) -> str:
-    """Year-aware relative time formatter.
+    """Year-aware relative time formatter for conversation list preview.
 
     today           → 10:42 AM
     yesterday       → Yesterday
@@ -59,6 +59,27 @@ def _fmt_time(dt: datetime | None) -> str:
         return dt.strftime("%a")
     if d.year == today.year:
         return dt.strftime("%b %-d")
+    return dt.strftime("%b %-d, %Y")
+
+
+def _fmt_time_in_thread(dt: datetime | None) -> str:
+    """Formatter for per-message timestamps inside a conversation thread.
+
+    same day        → 3:16 PM
+    this week       → Fri 3:16 PM
+    this year       → Apr 24, 3:16 PM
+    older           → Apr 24, 2025
+    """
+    if dt is None:
+        return ""
+    today = date.today()
+    d = dt.date()
+    if d == today:
+        return dt.strftime("%-I:%M %p")
+    if (today - d).days < 7:
+        return dt.strftime("%a %-I:%M %p")
+    if d.year == today.year:
+        return dt.strftime("%b %-d, %-I:%M %p")
     return dt.strftime("%b %-d, %Y")
 
 
@@ -175,7 +196,8 @@ def get_conversations(
             JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
             JOIN message m             ON m.ROWID    = cmj.message_id
             WHERE {style_filter}
-              AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
+              AND m.text IS NOT NULL
+              AND m.text != ''
             GROUP BY c.ROWID
             ORDER BY last_date DESC
             LIMIT ?
@@ -265,7 +287,7 @@ def get_conversations(
                 dt = _mac_ns_to_dt(mr["date"])
                 messages.append({
                     "text": _scrub(mr["text"]),
-                    "time": _fmt_time(dt),
+                    "time": _fmt_time_in_thread(dt),
                     "time_iso": dt.isoformat() if dt else None,
                     "isFromMe": bool(mr["is_from_me"]),
                 })

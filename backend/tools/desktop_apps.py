@@ -68,6 +68,58 @@ DESKTOP_TOOLS = [
             "required": ["to", "subject", "body"],
         },
     },
+    {
+        "name": "outlook_search_inbox",
+        "description": (
+            "Search Outlook Classic inbox for messages whose subject or sender contains a query. "
+            "Returns lightweight metadata (id, subject, sender, time). "
+            "Pair with outlook_read_email to fetch the full body once you've narrowed it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Substring to match in subject or sender (case-insensitive)"},
+                "max_results": {"type": "integer", "description": "Cap on hits (default 10)", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "outlook_read_email",
+        "description": (
+            "Read the full PLAIN-TEXT BODY of one Outlook Classic email. "
+            "Use this when subject/sender metadata isn't enough — e.g. to find a "
+            "time, address, or instruction inside the email body. Provide either "
+            "message_id (preferred, exact) or subject_query (newest match wins)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Outlook integer ID of the message (from outlook_search_inbox or outlook_get_inbox)"},
+                "subject_query": {"type": "string", "description": "Substring of the subject line; newest matching email is used"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "calendar_create_event",
+        "description": (
+            "Create a new event in Apple Calendar. Use after extracting a date/time "
+            "from an email body (outlook_read_email) or chat. Calendar must already exist."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Event title (e.g. 'OIER Orientation')"},
+                "start_iso": {"type": "string", "description": "ISO 8601 start time (e.g. '2026-04-27T07:30:00')"},
+                "end_iso": {"type": "string", "description": "ISO 8601 end time. Defaults to start + 60 minutes."},
+                "calendar_name": {"type": "string", "description": "Target calendar name (default: 'School')", "default": "School"},
+                "location": {"type": "string", "description": "Optional location"},
+                "notes": {"type": "string", "description": "Optional notes/description"},
+            },
+            "required": ["title", "start_iso"],
+        },
+    },
     # ── Spotify ──
     {
         "name": "spotify_get_track",
@@ -164,6 +216,22 @@ def run_desktop_tool(name: str, inp: dict):
         return _outlook_calendar(inp.get("days", 30))
     if name == "outlook_send_email":
         return _outlook_send(inp["to"], inp["subject"], inp["body"])
+    if name == "outlook_search_inbox":
+        return _outlook_search_inbox(inp["query"], inp.get("max_results", 10))
+    if name == "outlook_read_email":
+        return _outlook_read_email(
+            message_id=inp.get("message_id", ""),
+            subject_query=inp.get("subject_query", ""),
+        )
+    if name == "calendar_create_event":
+        return _calendar_create_event(
+            title=inp["title"],
+            start_iso=inp["start_iso"],
+            end_iso=inp.get("end_iso", ""),
+            calendar_name=inp.get("calendar_name", "School"),
+            location=inp.get("location", ""),
+            notes=inp.get("notes", ""),
+        )
     if name == "spotify_get_track":
         return _spotify_now_playing()
     if name == "spotify_play_pause":
@@ -294,7 +362,7 @@ tell application "Microsoft Outlook"
             set isRead to is read of m
         end try
         try
-            set entryId to entry id of m
+            set entryId to id of m as string
         end try
         set out to out & subj & "|||" & sName & "|||" & sEmail & "|||" & rcvd & "|||" & (isRead as string) & "|||" & entryId & "###ROW###"
     end repeat
@@ -610,6 +678,237 @@ end tell
     return {"status": "sent", "to": to, "subject": subject}
 
 
+def _outlook_search_inbox(query: str, max_results: int = 10) -> dict:
+    """Search Outlook Classic for messages whose subject or sender contains `query`.
+
+    Returns lightweight metadata (id, subject, sender, time, preview, has_body).
+    Use `_outlook_read_email` to fetch the full body once you've narrowed it.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return {"messages": [], "error": "empty query"}
+    q_s = q.replace('"', '\\"')
+    script = f"""
+tell application "Microsoft Outlook"
+    set q to "{q_s}"
+    set out to ""
+    set hits to 0
+    repeat with acct in exchange accounts
+        try
+            set inb to inbox of acct
+            set msgs to messages of inb
+            repeat with m in msgs
+                if hits ≥ {max_results} then exit repeat
+                try
+                    set subj to subject of m as string
+                on error
+                    set subj to ""
+                end try
+                try
+                    set fromAddr to address of (sender of m) as string
+                on error
+                    set fromAddr to ""
+                end try
+                try
+                    set fromName to name of (sender of m) as string
+                on error
+                    set fromName to ""
+                end try
+                set bag to (subj & " " & fromAddr & " " & fromName) as string
+                if bag contains q then
+                    set hits to hits + 1
+                    try
+                        set mid to id of m as string
+                    on error
+                        set mid to ""
+                    end try
+                    try
+                        set ts to time received of m as string
+                    on error
+                        set ts to ""
+                    end try
+                    set out to out & mid & "|||" & subj & "|||" & fromName & "|||" & fromAddr & "|||" & ts & "###ROW###"
+                end if
+            end repeat
+        end try
+    end repeat
+    return out
+end tell
+"""
+    result = _osascript(script, timeout=20)
+    if "error" in result:
+        return result
+    messages = []
+    for line in result.get("output", "").split("###ROW###"):
+        line = line.strip().lstrip(",").strip()
+        parts = line.split("|||")
+        if len(parts) >= 5 and parts[0]:
+            messages.append({
+                "id": parts[0],
+                "subject": parts[1].strip(),
+                "sender_name": parts[2].strip(),
+                "sender_email": parts[3].strip(),
+                "received_at": parts[4].strip(),
+            })
+    return {"messages": messages, "count": len(messages), "query": query}
+
+
+def _outlook_read_email(message_id: str = "", subject_query: str = "") -> dict:
+    """Read the full plain-text body of one Outlook Classic message.
+
+    Provide either `message_id` (preferred — exact) or `subject_query` (newest match).
+    Returns: {subject, sender_name, sender_email, received_at, body, html, id}
+    """
+    if not message_id and not subject_query:
+        return {"error": "Provide message_id or subject_query"}
+    safe_id = (message_id or "").replace('"', '').strip()
+    safe_q = (subject_query or "").replace('"', '\\"').strip()
+    if safe_id and safe_id.isdigit():
+        finder = f"set m to first message of inbox of acct whose id is {safe_id}"
+    elif safe_q:
+        finder = (
+            f'set hits to (messages of inbox of acct whose subject contains "{safe_q}")\n'
+            "        if (count of hits) is 0 then error \"no match\"\n"
+            "        set m to first item of hits"
+        )
+    else:
+        finder = "error \"need id or query\""
+    script = f"""
+tell application "Microsoft Outlook"
+    set found to false
+    set body_t to ""
+    set html_t to ""
+    set subj_t to ""
+    set sn_t to ""
+    set sa_t to ""
+    set ts_t to ""
+    set id_t to ""
+    repeat with acct in exchange accounts
+        try
+            {finder}
+            try
+                set body_t to plain text content of m
+            end try
+            try
+                set html_t to content of m
+            end try
+            try
+                set subj_t to subject of m as string
+            end try
+            try
+                set sn_t to name of (sender of m) as string
+            end try
+            try
+                set sa_t to address of (sender of m) as string
+            end try
+            try
+                set ts_t to time received of m as string
+            end try
+            try
+                set id_t to id of m as string
+            end try
+            set found to true
+            exit repeat
+        end try
+    end repeat
+    if not found then return "NOTFOUND"
+    return id_t & "|||" & subj_t & "|||" & sn_t & "|||" & sa_t & "|||" & ts_t & "|||BODY|||" & body_t & "|||HTML|||" & html_t
+end tell
+"""
+    result = _osascript(script, timeout=20)
+    if "error" in result:
+        return result
+    out = result.get("output", "")
+    if out.strip() == "NOTFOUND":
+        return {"error": "no match"}
+    head, _, rest = out.partition("|||BODY|||")
+    body, _, html = rest.partition("|||HTML|||")
+    parts = head.split("|||")
+    return {
+        "id": parts[0].strip() if len(parts) > 0 else "",
+        "subject": parts[1].strip() if len(parts) > 1 else "",
+        "sender_name": parts[2].strip() if len(parts) > 2 else "",
+        "sender_email": parts[3].strip() if len(parts) > 3 else "",
+        "received_at": parts[4].strip() if len(parts) > 4 else "",
+        "body": body.strip(),
+        "html": html.strip(),
+    }
+
+
+def _calendar_create_event(
+    title: str,
+    start_iso: str,
+    end_iso: str = "",
+    calendar_name: str = "School",
+    location: str = "",
+    notes: str = "",
+) -> dict:
+    """Create an event in Apple Calendar.
+
+    `start_iso` / `end_iso` are ISO 8601 ('2026-04-27T07:30:00'). If end omitted,
+    defaults to start + 60 minutes. `calendar_name` must match a calendar that
+    exists in Calendar.app.
+    """
+    import datetime as _dt
+    if not title or not start_iso:
+        return {"error": "title and start_iso required"}
+    try:
+        sdt = _dt.datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+        if sdt.tzinfo:
+            sdt = sdt.astimezone().replace(tzinfo=None)
+    except ValueError as e:
+        return {"error": f"bad start_iso: {e}"}
+    if end_iso:
+        try:
+            edt = _dt.datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+            if edt.tzinfo:
+                edt = edt.astimezone().replace(tzinfo=None)
+        except ValueError as e:
+            return {"error": f"bad end_iso: {e}"}
+    else:
+        edt = sdt + _dt.timedelta(minutes=60)
+    title_s = title.replace('"', '\\"')
+    cal_s = calendar_name.replace('"', '\\"')
+    loc_s = (location or "").replace('"', '\\"')
+    notes_s = (notes or "").replace('"', '\\"').replace("\n", "\\n")
+    # AppleScript constructs date by component to avoid locale ambiguity.
+    s = (sdt.year, sdt.month, sdt.day, sdt.hour, sdt.minute)
+    e = (edt.year, edt.month, edt.day, edt.hour, edt.minute)
+    script = f"""
+tell application "Calendar"
+    set startD to current date
+    set year of startD to {s[0]}
+    set month of startD to {s[1]}
+    set day of startD to {s[2]}
+    set hours of startD to {s[3]}
+    set minutes of startD to {s[4]}
+    set seconds of startD to 0
+    set endD to current date
+    set year of endD to {e[0]}
+    set month of endD to {e[1]}
+    set day of endD to {e[2]}
+    set hours of endD to {e[3]}
+    set minutes of endD to {e[4]}
+    set seconds of endD to 0
+    tell calendar "{cal_s}"
+        set newEv to make new event with properties {{summary:"{title_s}", start date:startD, end date:endD, location:"{loc_s}", description:"{notes_s}"}}
+        return uid of newEv as string
+    end tell
+end tell
+"""
+    result = _osascript(script, timeout=15)
+    if "error" in result:
+        return result
+    return {
+        "status": "created",
+        "event_id": result.get("output", "").strip(),
+        "title": title,
+        "calendar": calendar_name,
+        "start": sdt.isoformat(timespec="minutes"),
+        "end": edt.isoformat(timespec="minutes"),
+    }
+
+
 # ── Spotify ───────────────────────────────────────────────────────────────────
 
 def _spotify_now_playing() -> dict:
@@ -684,7 +983,7 @@ def _spotify_play_uri(uri: str) -> dict:
 def _spotify_fetch_artwork_from_url(spotify_url: str) -> str | None:
     """Scrape album art from open.spotify.com/track/... via og:image meta."""
     import re
-    import urllib.request
+    import httpx
     try:
         if not spotify_url:
             return None
@@ -695,9 +994,9 @@ def _spotify_fetch_artwork_from_url(spotify_url: str) -> str | None:
                 spotify_url = f"https://open.spotify.com/{parts[1]}/{parts[2]}"
         if "open.spotify.com" not in spotify_url:
             return None
-        req = urllib.request.Request(spotify_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=4) as r:
-            html = r.read(50000).decode("utf-8", errors="ignore")
+        with httpx.Client(timeout=4.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            r = client.get(spotify_url)
+            html = r.text[:50000]
         m = re.search(r'<meta property="og:image" content="([^"]+)"', html)
         return m.group(1) if m else None
     except Exception:
@@ -858,16 +1157,37 @@ end tell
         parts = line.split("|||")
         if len(parts) >= 2 and parts[0].strip():
             raw_cal = parts[3].strip() if len(parts) > 3 else ""
+            start_iso = _applescript_dt_to_iso(parts[1].strip())
+            end_iso = _applescript_dt_to_iso(parts[2].strip()) if len(parts) > 2 else ""
             events.append({
                 "title": _clean_event_title(parts[0].strip()),
-                "start": parts[1].strip(),
-                "end": parts[2].strip() if len(parts) > 2 else "",
+                "start": start_iso,
+                "end": end_iso,
                 "calendar": _normalize_calendar_name(raw_cal),
                 "location": parts[4].strip() if len(parts) > 4 else "",
                 "event_id": parts[5].strip() if len(parts) > 5 else None,
             })
     events.sort(key=lambda e: e["start"])
     return {"events": events, "count": len(events)}
+
+
+def _applescript_dt_to_iso(s: str) -> str:
+    """Parse 'Saturday, May 2, 2026 at 10:45:00 AM' → '2026-05-02T10:45:00'.
+    Returns the original string on parse failure so callers still see something."""
+    if not s:
+        return ""
+    import datetime as _dt
+    cleaned = s.strip().replace(" ", " ").replace(" ", " ")
+    for fmt in (
+        "%A, %B %d, %Y at %I:%M:%S %p",
+        "%A, %B %d, %Y at %I:%M %p",
+        "%A, %B %d, %Y",
+    ):
+        try:
+            return _dt.datetime.strptime(cleaned, fmt).isoformat()
+        except ValueError:
+            continue
+    return cleaned
 
 
 def _normalize_calendar_name(name: str) -> str:
@@ -998,28 +1318,33 @@ def _extract_app_name(script: str) -> str:
 # ── Open-in-App endpoints ─────────────────────────────────────────────────────
 
 def open_outlook_email(email_id: str) -> dict:
-    """Open a specific email in Microsoft Outlook by entry ID, fallback to inbox.
+    """Open a specific email in Microsoft Outlook by message id, fallback to inbox.
 
-    email_id should be the Outlook message's entry ID from the backend.
+    email_id should be the Outlook message's integer id (as string) from the backend.
     Falls back to opening Outlook inbox if ID is empty or opening fails.
     """
     if email_id and email_id.strip():
-        # Try to open by entry ID using the correct Outlook AppleScript idiom:
+        # Try to open by integer id using the correct Outlook AppleScript idiom:
+        # Outlook's `id` property is an integer, not a string.
         # 1. Search inbox first (most common case)
         # 2. If not found, iterate all mail folders
         # 3. If still not found, just activate Outlook
+        safe_id = email_id.strip()
+        # Only use numeric IDs; non-numeric means legacy entry ID string that won't work
+        if not safe_id.isdigit():
+            safe_id = ""
         script = f"""
 tell application "Microsoft Outlook"
     activate
     try
-        set theMsg to first message of inbox whose id is "{email_id}"
+        set theMsg to first message of inbox whose id is {safe_id or 0}
         open theMsg
         return "opened_by_id"
     on error
         try
             repeat with f in mail folders
                 try
-                    set theMsg to first message of f whose id is "{email_id}"
+                    set theMsg to first message of f whose id is {safe_id or 0}
                     open theMsg
                     return "opened_by_id"
                 end try
@@ -1143,10 +1468,12 @@ end tell
 
 
 def open_uworld() -> dict:
-    """Open UWorld login page in default browser."""
+    """Open UWorld in the default browser.
+    The /login path returns 404; the homepage redirects to login when not authenticated.
+    """
     try:
         subprocess.run(
-            ["open", "https://www.uworld.com/login"],
+            ["open", "https://www.uworld.com/"],
             timeout=10,
             check=False
         )

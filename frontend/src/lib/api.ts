@@ -99,6 +99,79 @@ export interface AnkiSuggestion {
   missed_at: string;
 }
 
+export interface UWorldSession {
+  id: string;
+  platform: "uworld" | "truelearn";
+  date: string;
+  score: number;
+  total: number | null;
+  correct: number | null;
+  topics: string[];
+  test_id?: string | null;
+}
+
+export interface UWorldWeakTopic {
+  topic: string;
+  score: number;
+  trend: "improving" | "declining" | "stable";
+}
+
+export interface UWorldIncorrect {
+  uworld_qid: string;
+  uworld_topic: string;
+  uworld_system: string;
+  uworld_category: string;
+  uworld_topic_name: string;
+  missed_at: string;
+  test_id: string | null;
+  test_seq: number | null;
+}
+
+export async function fetchUWorldData(): Promise<{
+  sessions: UWorldSession[];
+  weak_topics: UWorldWeakTopic[];
+  incorrect: UWorldIncorrect[];
+  available: boolean;
+  source?: string;
+  scraped_at?: string | null;
+  stale_data?: boolean;
+  error?: string;
+}> {
+  try {
+    const r = await fetch(`${BACKEND}/widgets/uworld`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return { sessions: [], weak_topics: [], incorrect: [], available: false, error: `HTTP ${r.status}` };
+    return r.json();
+  } catch (e) {
+    return { sessions: [], weak_topics: [], incorrect: [], available: false, error: String(e) };
+  }
+}
+
+export async function refreshUWorld(): Promise<{
+  available: boolean;
+  status: string;
+  sessions: UWorldSession[];
+  weak_topics: UWorldWeakTopic[];
+  source?: string;
+  message?: string;
+  scraped_at?: string;
+}> {
+  try {
+    const r = await fetch(`${BACKEND}/widgets/uworld/refresh`, {
+      method: "POST",
+      signal: AbortSignal.timeout(300000), // scrape can take up to 5min with Results pages
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ message: `HTTP ${r.status}` }));
+      return { available: false, status: "error", sessions: [], weak_topics: [], message: err.message ?? `HTTP ${r.status}` };
+    }
+    return r.json();
+  } catch (e) {
+    return { available: false, status: "error", sessions: [], weak_topics: [], message: String(e) };
+  }
+}
+
 export async function fetchAnkiSuggestions(): Promise<{
   suggestions: AnkiSuggestion[];
   available: boolean;
@@ -213,8 +286,7 @@ export async function playSpotifyURI(uri: string) {
 }
 
 export async function controlSpotify(cmd: "play" | "pause" | "next" | "previous") {
-  const action =
-    cmd === "play" || cmd === "pause" ? "toggle" : cmd === "previous" ? "prev" : cmd;
+  const action = cmd === "previous" ? "prev" : cmd;
   const r = await fetch(`${BACKEND}/widgets/spotify/control`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -251,7 +323,7 @@ export async function fetchCalendar(range?: { start: string; end: string }) {
 // Morning briefing aggregator (anki + events + unread + greeting).
 export async function fetchBriefing() {
   const r = await fetch(`${BACKEND}/widgets/briefing`, {
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(20000),
   });
   if (!r.ok) throw new Error(`briefing ${r.status}`);
   return r.json();
@@ -296,9 +368,14 @@ export async function deleteNBMEScore(id: string): Promise<void> {
   if (!r.ok) throw new Error(`nbme delete ${r.status}`);
 }
 
-export async function fetchAuthStatus() {
-  const r = await fetch(`${BACKEND}/auth/status`, {
-    signal: AbortSignal.timeout(3000),
-  });
-  return r.json();
+export async function fetchAuthStatus(): Promise<Record<string, boolean>> {
+  try {
+    const r = await fetch(`${BACKEND}/auth/status`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!r.ok) return { claude: false, outlook: false, spotify: false, anki: false };
+    return r.json();
+  } catch {
+    return { claude: false, outlook: false, spotify: false, anki: false };
+  }
 }

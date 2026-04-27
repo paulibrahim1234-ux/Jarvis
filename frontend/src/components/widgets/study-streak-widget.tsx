@@ -353,9 +353,16 @@ export function StudyStreakWidget() {
     const totalMin = studiedDays.reduce((s, d) => s + (d.minutes ?? 0), 0);
     const avgMin = daysStudied > 0 ? Math.round(totalMin / daysStudied) : 0;
 
-    // Current streak: count backwards from today (last element)
+    // Current streak: count backwards from today (last element).
+    // If today has no study data yet (null / 0), start counting from
+    // yesterday — the streak shouldn't break just because the day isn't
+    // over. A streak of N means "studied the last N completed days."
     let currentStreak = 0;
-    for (let i = studyData.length - 1; i >= 0; i--) {
+    const lastIdx = studyData.length - 1;
+    // Determine the starting index: skip today if it has no minutes yet.
+    const startIdx =
+      (studyData[lastIdx]?.minutes ?? 0) > 0 ? lastIdx : lastIdx - 1;
+    for (let i = startIdx; i >= 0; i--) {
       if ((studyData[i].minutes ?? 0) > 0) currentStreak++;
       else break;
     }

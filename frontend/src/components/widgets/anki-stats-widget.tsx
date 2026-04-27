@@ -191,8 +191,14 @@ export function AnkiStatsWidget() {
   const streak = stats?.streak ?? 0;
   const newCards = stats?.newCards ?? 0;
   const retention = stats?.retention ?? 0;
+  // When due=0 and reviewedToday>0, the session is done → 100%.
+  // When both are 0 (no activity), stay at 0%.
   const progressPct =
-    due > 0 ? Math.min(100, Math.round((reviewedToday / due) * 100)) : 0;
+    due > 0
+      ? Math.min(100, Math.round((reviewedToday / (due + reviewedToday)) * 100))
+      : reviewedToday > 0
+        ? 100
+        : 0;
 
   const contentRef = useRef<HTMLDivElement>(null);
   const container = useContainerSize(contentRef);
@@ -325,7 +331,7 @@ export function AnkiStatsWidget() {
                   cards due
                 </div>
                 <div className="mt-1.5 text-[11px] text-muted-foreground/70">
-                  {due} due now &middot; {newCards} new today
+                  {reviewedToday} reviewed &middot; {newCards} new
                 </div>
                 {isVeryLarge && liveStatus === "live" && (
                   <div className="mt-1 text-[10px] text-muted-foreground/50">

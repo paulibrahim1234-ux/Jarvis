@@ -13,7 +13,11 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
+
+# Serialise all .env writes so concurrent tool calls don't race each other.
+_ENV_WRITE_LOCK = threading.Lock()
 
 # Allowed credential keys (prevents arbitrary env manipulation via chat)
 _ALLOWED_CRED_KEYS = {
@@ -265,17 +269,18 @@ def _safe_shell(command: str, cwd: str | None = None) -> dict:
 
 
 def _write_env(key: str, value: str):
-    """Write or update KEY="value" in .env file."""
-    _ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    found = False
-    if _ENV_FILE.exists():
-        for line in _ENV_FILE.read_text().splitlines():
-            if re.match(rf"^{re.escape(key)}\s*=", line):
-                lines.append(f'{key}="{value}"')
-                found = True
-            else:
-                lines.append(line)
-    if not found:
-        lines.append(f'{key}="{value}"')
-    _ENV_FILE.write_text("\n".join(lines) + "\n")
+    """Write or update KEY="value" in .env file (thread-safe)."""
+    with _ENV_WRITE_LOCK:
+        _ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        found = False
+        if _ENV_FILE.exists():
+            for line in _ENV_FILE.read_text().splitlines():
+                if re.match(rf"^{re.escape(key)}\s*=", line):
+                    lines.append(f'{key}="{value}"')
+                    found = True
+                else:
+                    lines.append(line)
+        if not found:
+            lines.append(f'{key}="{value}"')
+        _ENV_FILE.write_text("\n".join(lines) + "\n")

@@ -150,7 +150,7 @@ def get_playlists(limit: int = 20) -> list[dict] | None:
                 "uri": p.get("uri"),
                 "id": p.get("id"),
                 "cover": (p.get("images") or [{}])[0].get("url"),
-                "track_count": (p.get("items") or {}).get("total", 0),
+                "track_count": (p.get("tracks") or {}).get("total", 0),
                 "owner": (p.get("owner") or {}).get("display_name"),
             }
             for p in items

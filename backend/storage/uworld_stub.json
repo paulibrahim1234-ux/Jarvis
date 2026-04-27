@@ -1,31 +1,85 @@
 {
-  "_comment": "Mock UWorld incorrect questions. Replace with scraped UWorld data later. Each entry maps a UWorld QID to the Anki tag used to find related suspended cards.",
+  "_comment": "QBank data for the UWorld widget. sessions[] feeds the session list; weak_topics[] feeds the weak topics section. incorrect[] feeds Anki card suggestions.",
   "_tag_format": "tag:uworld_qid_<qid>  (widgets.py queries AnkiConnect findCards with this)",
+  "sessions": [
+    {
+      "id": "s1",
+      "platform": "uworld",
+      "date": "Apr 25",
+      "score": 72,
+      "total": 40,
+      "correct": 29,
+      "topics": ["Internal Medicine", "Cardiology"]
+    },
+    {
+      "id": "s2",
+      "platform": "uworld",
+      "date": "Apr 24",
+      "score": 68,
+      "total": 40,
+      "correct": 27,
+      "topics": ["Pulmonology"]
+    },
+    {
+      "id": "s3",
+      "platform": "uworld",
+      "date": "Apr 23",
+      "score": 80,
+      "total": 40,
+      "correct": 32,
+      "topics": ["GI", "Hepatology"]
+    },
+    {
+      "id": "s4",
+      "platform": "truelearn",
+      "date": "Apr 22",
+      "score": 74,
+      "total": 30,
+      "correct": 22,
+      "topics": ["Surgery Shelf"]
+    },
+    {
+      "id": "s5",
+      "platform": "truelearn",
+      "date": "Apr 21",
+      "score": 67,
+      "total": 30,
+      "correct": 20,
+      "topics": ["Surgery Shelf"]
+    }
+  ],
+  "weak_topics": [
+    { "topic": "Pulmonology", "score": 68, "trend": "declining" },
+    { "topic": "Biostatistics", "score": 52, "trend": "stable" },
+    { "topic": "Renal Physiology", "score": 58, "trend": "improving" },
+    { "topic": "Pharmacology", "score": 63, "trend": "stable" },
+    { "topic": "Cardiology", "score": 72, "trend": "improving" }
+  ],
   "incorrect": [
     {
       "uworld_qid": "12345",
       "uworld_topic": "Heart failure — diastolic vs systolic",
-      "missed_at": "2026-04-15"
+      "missed_at": "2026-04-25"
     },
     {
       "uworld_qid": "12346",
       "uworld_topic": "Aortic stenosis murmur characteristics",
-      "missed_at": "2026-04-15"
+      "missed_at": "2026-04-25"
     },
     {
       "uworld_qid": "23901",
       "uworld_topic": "Loop diuretics — mechanism and side effects",
-      "missed_at": "2026-04-14"
+      "missed_at": "2026-04-24"
     },
     {
       "uworld_qid": "30412",
       "uworld_topic": "ACE inhibitor contraindications",
-      "missed_at": "2026-04-14"
+      "missed_at": "2026-04-24"
     },
     {
       "uworld_qid": "41055",
       "uworld_topic": "Atrial fibrillation — rate vs rhythm control",
-      "missed_at": "2026-04-13"
+      "missed_at": "2026-04-23"
     }
   ]
 }

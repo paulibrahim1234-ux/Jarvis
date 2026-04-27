@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +36,22 @@ def read_json(path: str | Path, default: Any) -> Any:
 
 
 def write_json(path: str | Path, obj: Any) -> None:
-    """Write `obj` as JSON to `path` (creates parent dirs if needed)."""
+    """Write `obj` as JSON to `path` atomically (creates parent dirs if needed).
+
+    Uses a tempfile + os.replace() so a crash mid-write never leaves a
+    partially-written file that would corrupt the stored state.
+    """
     p = Path(path)
     _ensure_dir(p)
-    with p.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
+    dir_ = p.parent
+    fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+        os.replace(tmp_path, p)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise

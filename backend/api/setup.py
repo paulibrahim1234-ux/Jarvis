@@ -18,6 +18,7 @@ _ENV_FILE = Path(__file__).parent.parent / ".env"
 _ALLOWED = {
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REDIRECT_URI",
     "MS_CLIENT_ID", "MS_TENANT_ID",
+    "UWORLD_USERNAME", "UWORLD_PASSWORD",
 }
 
 
@@ -28,6 +29,8 @@ def setup_page():
     sp_id = bool(os.getenv("SPOTIFY_CLIENT_ID"))
     sp_sec = bool(os.getenv("SPOTIFY_CLIENT_SECRET"))
     ms_id = bool(os.getenv("MS_CLIENT_ID"))
+    uw_user = bool(os.getenv("UWORLD_USERNAME"))
+    uw_pass = bool(os.getenv("UWORLD_PASSWORD"))
 
     try:
         from tools.spotify import is_authenticated as sp_auth
@@ -71,6 +74,8 @@ def setup_page():
         sp_id_val="" if not sp_id else "••••••••",
         sp_sec_val="" if not sp_sec else "••••••••",
         ms_id_val="" if not ms_id else "••••••••",
+        uw_user_badge=badge(uw_user),
+        uw_pass_badge=badge(uw_pass),
     ))
 
 
@@ -83,6 +88,8 @@ def save_credentials(
     spotify_client_secret: str = Form(""),
     ms_client_id: str = Form(""),
     ms_tenant_id: str = Form(""),
+    uworld_username: str = Form(""),
+    uworld_password: str = Form(""),
 ):
     saved = []
 
@@ -109,6 +116,18 @@ def save_credentials(
             saved.append("MS_TENANT_ID")
         if saved:
             return RedirectResponse("/auth/microsoft", status_code=303)
+
+    if service == "uworld":
+        if uworld_username.strip():
+            _write_env("UWORLD_USERNAME", uworld_username.strip())
+            os.environ["UWORLD_USERNAME"] = uworld_username.strip()
+            saved.append("UWORLD_USERNAME")
+        if uworld_password.strip():
+            _write_env("UWORLD_PASSWORD", uworld_password.strip())
+            os.environ["UWORLD_PASSWORD"] = uworld_password.strip()
+            saved.append("UWORLD_PASSWORD")
+        # Always redirect back to setup (no separate OAuth flow needed)
+        return RedirectResponse("/setup", status_code=303)
 
     return RedirectResponse("/setup", status_code=303)
 
@@ -297,6 +316,39 @@ _PAGE = """<!DOCTYPE html>
       <li>System Settings → Privacy &amp; Security → Full Disk Access</li>
       <li>Add Terminal (or your Python interpreter) to the list</li>
     </ol>
+  </div>
+
+  <!-- UWorld -->
+  <div class="card">
+    <h2>📚 UWorld QBank</h2>
+    <p>
+      <strong>Preferred:</strong> log into UWorld in Comet (your default browser) — the scraper will reuse your session.
+      No password stored.<br>
+      <strong>Fallback:</strong> enter credentials below so Jarvis can log in automatically
+      if your Comet session expires.
+    </p>
+    <div style="background:#1e293b;border:1px solid #f59e0b44;border-radius:.5rem;padding:.75rem 1rem;margin-bottom:1rem;font-size:.82rem">
+      <strong style="color:#f59e0b">One-time browser setup:</strong>
+      In Comet, go to <strong>View → Developer → Allow JavaScript from Apple Events</strong>.
+      Without this, the scraper cannot read page data from UWorld.
+    </div>
+    <div class="status-row">
+      <span>Username: {uw_user_badge}</span>
+      <span>Password: {uw_pass_badge}</span>
+    </div>
+    <form method="post" action="/setup/credentials">
+      <input type="hidden" name="service" value="uworld">
+      <label>UWorld Username / Email</label>
+      <input type="password" name="uworld_username" placeholder="your@email.com" autocomplete="off">
+      <p class="hint">Used only if Comet is not logged in. Stored in <code>backend/.env</code> — never sent anywhere.</p>
+      <label>UWorld Password</label>
+      <input type="password" name="uworld_password" placeholder="UWorld password" autocomplete="new-password">
+      <button type="submit">Save UWorld Credentials</button>
+    </form>
+    <p style="margin-top:1rem;font-size:.8rem;color:#475569">
+      After saving, log into UWorld in Comet and click <strong>Refresh</strong> in the QBank widget
+      to pull your real test history.
+    </p>
   </div>
 
 </div>

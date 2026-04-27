@@ -77,6 +77,7 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=5.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -428,7 +429,7 @@ async def dashboard_snapshot_async() -> str:
     # email
     if email.get("available"):
         emails = email.get("emails", []) or []
-        unread = sum(1 for e in emails if e.get("unread") or e.get("is_unread"))
+        unread = sum(1 for e in emails if not e.get("read", True))
         lines.append(f"Inbox: {unread} unread (of {len(emails)} loaded).")
     else:
         lines.append("Inbox: not available.")

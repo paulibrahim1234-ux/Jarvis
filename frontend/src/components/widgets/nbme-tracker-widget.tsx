@@ -49,14 +49,19 @@ type DraftState = {
   notes: string;
 };
 
-const EMPTY_DRAFT: DraftState = {
-  exam_name: "NBME 28",
-  custom_exam_name: "",
-  date_taken: new Date().toISOString().slice(0, 10),
-  raw_score: "",
-  percentile: "",
-  notes: "",
-};
+function makeEmptyDraft(): DraftState {
+  return {
+    exam_name: "NBME 28",
+    custom_exam_name: "",
+    // Use local date (en-CA = YYYY-MM-DD). toISOString() uses UTC and can
+    // give yesterday's date for users west of UTC before midnight UTC.
+    date_taken: new Date().toLocaleDateString("en-CA"),
+    raw_score: "",
+    percentile: "",
+    notes: "",
+  };
+}
+const EMPTY_DRAFT = makeEmptyDraft();
 
 /** Format "2024-04-17" -> "Apr 17" */
 function fmtDate(iso: string): string {
@@ -145,7 +150,7 @@ export function NBMETrackerWidget() {
   const recentList = showAll ? sortedDesc : sortedDesc.slice(0, 5);
 
   const resetForm = () => {
-    setDraft(EMPTY_DRAFT);
+    setDraft(makeEmptyDraft());
     setIsAdding(false);
   };
 
@@ -229,7 +234,10 @@ export function NBMETrackerWidget() {
               </div>
             )}
             <button
-              onClick={() => setIsAdding((v) => !v)}
+              onClick={() => {
+                if (!isAdding) setDraft(makeEmptyDraft());
+                setIsAdding((v) => !v);
+              }}
               className="text-xs px-2 py-1 rounded-md border border-white/10 hover:border-white/30 hover:bg-white/5 text-muted-foreground transition-colors"
             >
               {isAdding ? "Cancel" : "+ Add"}

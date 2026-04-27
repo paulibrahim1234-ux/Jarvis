@@ -94,20 +94,54 @@ def anki_stats():
         return {"error": str(e), "available": False}
 
 
+def _date_to_review_id(d) -> int:
+    """Convert a date to the AnkiConnect cardReviews startID format.
+
+    AnkiConnect's cardReviews uses the review timestamp in *seconds* (not ms,
+    not YYYYMMDD) as startID. Passing a YYYYMMDD integer (e.g. 20260426) was
+    treated as a very old timestamp (~1970) and returned all reviews ever —
+    making the streak always appear as 365.
+    """
+    import calendar as _cal
+    from datetime import datetime, timezone
+    dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+    return int(_cal.timegm(dt.timetuple()))
+
+
 def _compute_streak() -> int:
     from datetime import date, timedelta
     today = date.today()
-    streak = 0
-    for i in range(365):
-        d = today - timedelta(days=i)
-        epoch = int(d.strftime("%Y%m%d"))
+    # Fetch all reviews since 364 days ago in one call, then bucket by date.
+    start = today - timedelta(days=364)
+    start_id = _date_to_review_id(start)
+    try:
+        reviews = anki_invoke("cardReviews", deck="*", startID=start_id) or []
+    except Exception:
+        return 0
+    # Build set of dates with at least one review.
+    import time as _time
+    reviewed_dates: set[str] = set()
+    for r in reviews:
+        if not isinstance(r, (list, tuple)) or len(r) < 1:
+            continue
         try:
-            reviews = anki_invoke("cardReviews", deck="*", startID=epoch)
-            if reviews:
-                streak += 1
-            else:
-                break
+            # r[0] is review timestamp in milliseconds (Mac Anki) or seconds
+            ts = int(r[0])
+            # Detect ms vs s: ms timestamps are > 1e12
+            secs = ts / 1000.0 if ts > 1e12 else float(ts)
+            reviewed_dates.add(
+                __import__("datetime").date.fromtimestamp(secs).isoformat()
+            )
         except Exception:
+            continue
+    # Count consecutive days backwards from today (skip today if not done yet).
+    streak = 0
+    start_i = 0 if today.isoformat() in reviewed_dates else 1
+    for i in range(start_i, 365):
+        d = today - timedelta(days=i)
+        if d.isoformat() in reviewed_dates:
+            streak += 1
+        else:
             break
     return streak
 
@@ -115,9 +149,9 @@ def _compute_streak() -> int:
 def _compute_retention() -> int:
     from datetime import date, timedelta
     start = date.today() - timedelta(days=30)
-    epoch = int(start.strftime("%Y%m%d"))
+    start_id = _date_to_review_id(start)
     try:
-        reviews = anki_invoke("cardReviews", deck="*", startID=epoch)
+        reviews = anki_invoke("cardReviews", deck="*", startID=start_id)
         if not reviews:
             return 0
         correct = sum(1 for r in reviews if r[3] > 1)
@@ -140,7 +174,7 @@ def _compute_study_streak_days() -> dict:
     from datetime import date, datetime, timedelta
     today = date.today()
     start = today - timedelta(days=364)
-    epoch_param = int(start.strftime("%Y%m%d"))
+    epoch_param = _date_to_review_id(start)
     try:
         reviews = anki_invoke("cardReviews", deck="*", startID=epoch_param) or []
     except Exception as e:
@@ -185,77 +219,391 @@ from pathlib import Path as _Path
 import json as _json
 
 _UWORLD_STUB_PATH = _Path(__file__).resolve().parent.parent / "storage" / "uworld_stub.json"
+_UWORLD_HISTORY_PATH = _Path(__file__).resolve().parent.parent / "storage" / "uworld_history.json"
 
 
-def _load_uworld_incorrect() -> list[dict]:
+def _load_uworld_incorrect() -> tuple[list[dict], str]:
+    """Return (incorrect_items, source_label) — source is "scraped" or "stub"."""
+    for path, label in ((_UWORLD_HISTORY_PATH, "scraped"), (_UWORLD_STUB_PATH, "stub")):
+        try:
+            with path.open() as f:
+                data = _json.load(f)
+            items = data.get("incorrect", []) if isinstance(data, dict) else []
+            found = [i for i in items if isinstance(i, dict) and i.get("uworld_qid")]
+            if found:
+                return found, label
+        except Exception:
+            continue
+    return [], "stub_empty"
+
+
+def _load_uworld_data() -> dict:
+    """Load UWorld sessions + weak topics from storage.
+
+    Priority:
+    1. uworld_history.json — written by the real scraper (_uworld_scrape_history)
+    2. uworld_stub.json   — fallback stub data (shipped with the repo)
+
+    Both files share the same schema:
+      - sessions:    list of QBankSession objects
+      - weak_topics: list of {topic, score, trend}
+      - incorrect:   list of {uworld_qid, uworld_topic, missed_at}
+    """
+    data: dict = {}
+    source_label = "stub"
+
+    # Try real scraped history first
+    if _UWORLD_HISTORY_PATH.exists():
+        try:
+            with _UWORLD_HISTORY_PATH.open() as f:
+                data = _json.load(f)
+            if isinstance(data, dict) and data.get("sessions"):
+                source_label = "scraped"
+        except Exception:
+            data = {}
+
+    # Fall back to stub if history is empty or missing
+    if not data or not (isinstance(data, dict) and data.get("sessions")):
+        try:
+            with _UWORLD_STUB_PATH.open() as f:
+                data = _json.load(f)
+            source_label = "stub"
+        except Exception:
+            data = {}
+
+    sessions = data.get("sessions", []) if isinstance(data, dict) else []
+    weak_topics = data.get("weak_topics", []) if isinstance(data, dict) else []
+
+    # Derive weak_topics from incorrect list when not explicitly stored.
+    if not weak_topics:
+        incorrects = data.get("incorrect", []) if isinstance(data, dict) else []
+        topic_counts: dict = {}
+        for item in incorrects:
+            topic = (item.get("uworld_topic") or "Unknown").strip()
+            if topic:
+                topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        for topic, count in topic_counts.items():
+            score = max(10, 75 - (count - 1) * 15)
+            weak_topics.append({"topic": topic, "score": score, "trend": "declining"})
+
+    # Detect bogus totals written by the old stub scraper (s1=98, s2=97, …).
+    # Real QBank sessions have at most 40 questions; any session with total≥80
+    # is clearly bogus stub data.  Null out total/correct per-session so the
+    # UI shows "—" instead of a misleading count.  score % is real and kept.
+    stale_data = False
+    for s in sessions:
+        t = s.get("total")
+        if isinstance(t, int) and t >= 80:
+            s["total"] = None
+            s["correct"] = None
+            stale_data = True
+
+    return {
+        "sessions": sessions,
+        "weak_topics": weak_topics,
+        "incorrect": data.get("incorrect", []) if isinstance(data, dict) else [],
+        "available": True,
+        "source": source_label,
+        "scraped_at": data.get("scraped_at") if isinstance(data, dict) else None,
+        "stale_data": stale_data,
+    }
+
+
+@router.get("/widgets/uworld")
+def uworld_widget():
+    """QBank performance widget data — sessions + weak topics.
+
+    Reads from uworld_history.json (real scrape) when available,
+    falls back to uworld_stub.json otherwise.
+    """
+    return _load_uworld_data()
+
+
+@router.post("/widgets/uworld/refresh")
+def uworld_refresh():
+    """Trigger a live UWorld scrape from the logged-in browser session (default: Comet).
+
+    Calls _uworld_scrape_history() from tools/browser.py, persists results
+    to uworld_history.json, and returns the fresh payload.
+    Accepts both logged-in (returns sessions) and logged-out (returns
+    helpful message) as valid responses.
+    Browser not running = returns logged_out state with clear message.
+    """
+    import datetime as _dt
     try:
-        with _UWORLD_STUB_PATH.open() as f:
-            data = _json.load(f)
-        items = data.get("incorrect", []) if isinstance(data, dict) else []
-        return [i for i in items if isinstance(i, dict) and i.get("uworld_qid")]
+        from tools.browser import _uworld_scrape_history
+        result = _uworld_scrape_history()
+        # Merge with existing data format for the widget
+        return {
+            "available": True,
+            "status": result.get("status", "ok"),
+            "sessions": result.get("sessions", []),
+            "weak_topics": result.get("weak_topics", []),
+            "incorrect": result.get("incorrect", []),
+            "incorrect_count": result.get("incorrect_count", len(result.get("incorrect", []))),
+            "partial": result.get("partial", False),
+            "source": result.get("source", "scraped"),
+            "message": result.get("message", ""),
+            "scraped_at": _dt.datetime.now().isoformat(timespec="seconds"),
+        }
+    except RuntimeError as e:
+        # AppleScript errors (browser not running, no window, JS disabled, etc.)
+        from tools.browser import BROWSER_APP as _BA
+        err_str = str(e)
+        if "JavaScript from Apple Events" in err_str or "Allow JavaScript from Apple Events" in err_str:
+            return {
+                "available": False,
+                "status": "js_disabled",
+                "sessions": [],
+                "weak_topics": [],
+                "source": "none",
+                "message": (
+                    f"{_BA} has JavaScript from Apple Events disabled. "
+                    f"To fix: in {_BA}, go to View > Developer > Allow JavaScript from Apple Events, "
+                    f"then click Refresh."
+                ),
+            }
+        if "Can't get application" in err_str or "AppleScript" in err_str or "browser" in err_str.lower():
+            return {
+                "available": True,
+                "status": "logged_out",
+                "sessions": [],
+                "weak_topics": [],
+                "source": "none",
+                "message": (
+                    f"{_BA} is not open or has no active window. "
+                    f"Open {_BA} and log into UWorld, then click Refresh."
+                ),
+            }
+        return {
+            "available": False,
+            "status": "error",
+            "sessions": [],
+            "weak_topics": [],
+            "source": "error",
+            "message": err_str,
+        }
+    except Exception as e:
+        return {
+            "available": False,
+            "status": "error",
+            "sessions": [],
+            "weak_topics": [],
+            "source": "error",
+            "message": str(e),
+        }
+
+
+_ANKI_QID_INDEX_PATH = _Path(__file__).resolve().parent.parent / "storage" / "anki_qid_index.json"
+
+
+def _load_anki_qid_index() -> dict:
+    """qid (str) → list of {card_id, front, tag} — built by /widgets/anki/build-index."""
+    try:
+        if _ANKI_QID_INDEX_PATH.exists():
+            with _ANKI_QID_INDEX_PATH.open() as f:
+                return _json.load(f)
     except Exception:
-        return []
+        return {}
+    return {}
 
 
 @router.get("/widgets/anki/suggestions")
-def anki_suggestions():
-    """Return suspended Anki cards tagged to UWorld questions the user missed.
+def anki_suggestions(limit: int = 50):
+    """Suspended AnKing cards mapped to UWorld wrong-question QIDs.
 
-    For each mock UWorld incorrect entry, queries AnkiConnect for suspended
-    cards tagged `uworld_qid_<qid>`. Returns an empty list with available=False
-    if AnkiConnect is unreachable.
+    SAFE BY DEFAULT — never queries AnkiConnect at request time.
+    Reads from a pre-built `anki_qid_index.json` (built by POST /widgets/anki/build-index).
+
+    Why: large OR-queries against `tag:#AK_…` patterns crash Anki itself
+    (verified twice this session — Anki goes "Application Not Responding").
+    The index is built ONCE in the background; lookups are instant dict reads.
+    If the index is missing, return empty + a hint.
     """
-    mock_incorrects = _load_uworld_incorrect()
-    if not mock_incorrects:
-        return {"suggestions": [], "available": True, "source": "stub_empty"}
+    incorrects, source = _load_uworld_incorrect()
+    if not incorrects:
+        return {"suggestions": [], "available": True, "source": "stub_empty", "qid_count": 0}
 
+    index = _load_anki_qid_index()
+    qids = sorted({str(i.get("uworld_qid", "")) for i in incorrects if i.get("uworld_qid")})
+    if not index:
+        return {
+            "suggestions": [],
+            "available": False,
+            "qid_count": len(qids),
+            "error": "Anki QID index not built yet. POST /widgets/anki/build-index to populate (one-time, runs in background; safe — doesn't crash Anki).",
+            "needs_index_build": True,
+        }
+
+    qid_meta = {str(i.get("uworld_qid", "")): i for i in incorrects}
     suggestions: list[dict] = []
-    try:
-        for item in mock_incorrects:
-            qid = str(item.get("uworld_qid", ""))
-            if not qid:
-                continue
-            query = f"tag:uworld_qid_{qid} is:suspended"
+    matched_qids = 0
+    for q in qids:
+        cards = index.get(q) or []
+        if cards:
+            matched_qids += 1
+        meta = qid_meta.get(q, {})
+        for card in cards:
+            suggestions.append({
+                "card_id": card.get("card_id"),
+                "front": card.get("front", "")[:120],
+                "tag": card.get("tag", ""),
+                "uworld_qid": q,
+                "uworld_topic": meta.get("uworld_topic", "") or meta.get("uworld_system", ""),
+                "uworld_topic_name": meta.get("uworld_topic_name", ""),
+                "uworld_system": meta.get("uworld_system", ""),
+                "missed_at": meta.get("missed_at", ""),
+            })
+            if len(suggestions) >= limit:
+                break
+        if len(suggestions) >= limit:
+            break
+
+    return {
+        "suggestions": suggestions,
+        "available": True,
+        "source": source,
+        "qid_count": len(qids),
+        "matched_qid_count": matched_qids,
+        "index_size": len(index),
+        "index_built_at": index.get("__built_at__") if isinstance(index, dict) else None,
+    }
+
+
+_ANKI_INDEX_BUILD_STATE: dict = {"running": False, "progress": 0, "total": 0, "started_at": None, "error": None}
+
+
+@router.post("/widgets/anki/build-index")
+def anki_build_index_start():
+    """Kick off a background build of the QID → cards index.
+
+    Strategy that does NOT crash Anki:
+      1. ONE findCards on the AnKing UWorld root tag prefix → all suspended UWorld card IDs.
+      2. cardsInfo in chunks of 100 (sequential, gentle on Anki).
+      3. For each card, parse `Step::<qid>` from its tags → bucket by qid.
+      4. Persist to anki_qid_index.json.
+
+    Returns immediately with status; subsequent calls to /widgets/anki/build-index/status
+    report progress. On completion, /widgets/anki/suggestions becomes instant.
+    """
+    import threading
+
+    if _ANKI_INDEX_BUILD_STATE["running"]:
+        return {"status": "already_running", **_ANKI_INDEX_BUILD_STATE}
+
+    def _run():
+        import time as _time
+        import re as _re
+        _ANKI_INDEX_BUILD_STATE.update({"running": True, "progress": 0, "total": 0,
+                                         "started_at": __import__("datetime").datetime.utcnow().isoformat(), "error": None})
+        # Resume from existing partial index if present.
+        index: dict = _load_anki_qid_index()
+        if "__built_at__" in index:
+            del index["__built_at__"]
+        already_indexed_card_ids = {
+            c.get("card_id") for cards in index.values() if isinstance(cards, list) for c in cards
+        }
+        qid_in_tag = _re.compile(r"Step::(\d+)")
+
+        def _persist():
+            snapshot = dict(index)
+            snapshot["__built_at__"] = __import__("datetime").datetime.utcnow().isoformat()
+            _ANKI_QID_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with _ANKI_QID_INDEX_PATH.open("w") as f:
+                _json.dump(snapshot, f)
+
+        def _retry(action: str, **params):
+            """Retry per AnkiConnect call: Anki transiently returns 'collection is
+            not available' during internal DB refreshes. Backoff 2s, 4s, 8s."""
+            last_err: Exception | None = None
+            for attempt in range(4):
+                try:
+                    return anki_invoke(action, **params) or []
+                except Exception as e:
+                    last_err = e
+                    msg = str(e).lower()
+                    if "collection is not available" in msg or "timed out" in msg:
+                        _time.sleep(2 ** attempt)
+                        continue
+                    raise
+            raise last_err or RuntimeError(f"{action} failed after retries")
+
+        try:
+            # 1. Get all suspended UWorld card IDs (one cheap call).
+            card_ids_all = _retry(
+                "findCards",
+                query="tag:#AK_Step2_v12::#UWorld::Step::* is:suspended",
+            )
+            # Skip cards already in the partial index.
+            card_ids = [i for i in card_ids_all if i not in already_indexed_card_ids]
+            _ANKI_INDEX_BUILD_STATE["total"] = len(card_ids)
+
+            # 2. Map cards → notes (one batch call, returns parallel list).
+            note_ids_parallel = _retry("cardsToNotes", cards=card_ids)
+            # Deduplicate notes since multiple cards share a note (front/back).
+            note_to_first_card: dict = {}
+            for cid, nid in zip(card_ids, note_ids_parallel):
+                if nid not in note_to_first_card:
+                    note_to_first_card[nid] = cid
+            unique_note_ids = list(note_to_first_card.keys())
+            _ANKI_INDEX_BUILD_STATE["total"] = len(unique_note_ids)
+
+            CHUNK = 100
+            for i in range(0, len(unique_note_ids), CHUNK):
+                chunk = unique_note_ids[i : i + CHUNK]
+                # 3. notesInfo for tags + fields (chunked, gentle on Anki).
+                info = _retry("notesInfo", notes=chunk)
+                for note in info:
+                    tags = note.get("tags", []) or []
+                    qid_match = next(
+                        (m.group(1) for t in tags for m in [qid_in_tag.search(t)] if m),
+                        None,
+                    )
+                    if not qid_match:
+                        continue
+                    fields = note.get("fields", {}) or {}
+                    front_raw = ""
+                    for _, v in fields.items():
+                        if isinstance(v, dict) and isinstance(v.get("value"), str):
+                            front_raw = v["value"]
+                            break
+                    front = _re.sub(r"<[^>]+>", "", front_raw).strip()
+                    primary_tag = next(
+                        (t for t in tags if "Step::" not in t and "UWorld" not in t and "AK_Step" in t),
+                        next((t for t in tags if "Step::" not in t), tags[0] if tags else ""),
+                    )
+                    index.setdefault(qid_match, []).append({
+                        "card_id": note_to_first_card.get(note.get("noteId")),
+                        "note_id": note.get("noteId"),
+                        "front": front[:120],
+                        "tag": primary_tag,
+                    })
+                _ANKI_INDEX_BUILD_STATE["progress"] = min(i + CHUNK, len(unique_note_ids))
+                # Persist every 10 chunks so a crash doesn't lose work.
+                if (i // CHUNK) % 10 == 9:
+                    _persist()
+                _time.sleep(0.1)  # be gentle to Anki
+            _persist()
+        except Exception as e:
+            _ANKI_INDEX_BUILD_STATE["error"] = str(e)
             try:
-                card_ids = anki_invoke("findCards", query=query) or []
+                _persist()  # keep what we have so far
             except Exception:
-                # Any AnkiConnect failure at this point = not available overall
-                raise
-            if not card_ids:
-                continue
-            # Pull card fronts + tag for up to first 5 matches per qid.
-            card_ids = card_ids[:5]
-            try:
-                info = anki_invoke("cardsInfo", cards=card_ids) or []
-            except Exception:
-                info = []
-            for card in info:
-                fields = card.get("fields", {}) or {}
-                # Anki field names vary; pick first string-valued field.
-                front_raw = ""
-                for _, v in fields.items():
-                    if isinstance(v, dict) and isinstance(v.get("value"), str):
-                        front_raw = v["value"]
-                        break
-                # Strip basic HTML tags for preview.
-                import re as _re
-                front_text = _re.sub(r"<[^>]+>", "", front_raw).strip()
-                tags = card.get("tags", []) or []
-                primary_tag = next(
-                    (t for t in tags if not t.startswith("uworld_qid_")),
-                    tags[0] if tags else "",
-                )
-                suggestions.append({
-                    "card_id": card.get("cardId"),
-                    "front": front_text[:100],
-                    "tag": primary_tag,
-                    "uworld_qid": qid,
-                    "uworld_topic": item.get("uworld_topic", ""),
-                    "missed_at": item.get("missed_at", ""),
-                })
-        return {"suggestions": suggestions, "available": True, "source": "stub"}
-    except Exception as e:
-        return {"suggestions": [], "available": False, "error": str(e)}
+                pass
+        finally:
+            _ANKI_INDEX_BUILD_STATE["running"] = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started"}
+
+
+@router.get("/widgets/anki/build-index/status")
+def anki_build_index_status():
+    pct = 0
+    if _ANKI_INDEX_BUILD_STATE["total"]:
+        pct = round(100 * _ANKI_INDEX_BUILD_STATE["progress"] / _ANKI_INDEX_BUILD_STATE["total"])
+    index = _load_anki_qid_index()
+    return {**_ANKI_INDEX_BUILD_STATE, "percent": pct, "index_size": len(index)}
 
 
 class AnkiUnsuspendBody(BaseModel):
@@ -394,8 +742,11 @@ def email_widget(
     folder: str = Query("", description="Optional mail folder name"),
     account: str = Query("", description="Optional account name/email filter"),
 ):
-    # Cache per (folder, account) pair; 60s TTL matches the default.
-    cache_key = f"email::{folder}::{account}"
+    # Cache per (folder, account) pair; 60s TTL.
+    # Canonical default key (both empty) must match what warm_widgets and
+    # briefing_widget use: "email::::".  The formula is:
+    #   "email::" + folder + "::" + account  → for defaults → "email::::"
+    cache_key = "email::" + folder + "::" + account
     return _cached(cache_key, 60, lambda: _compute_email(folder=folder, account=account), _SEM_EMAIL)
 
 
@@ -451,12 +802,6 @@ def _compute_calendar():
             seen.add(k)
             deduped.append(e)
     deduped.sort(key=lambda e: e.get("start", ""))
-    # HIPAA: hide clinical/rotation titles and room-allocation location strings
-    _HIDDEN_CALS = {"Rotation", "Subscribed Calendar", "Work"}
-    for e in deduped:
-        if e.get("calendar") in _HIDDEN_CALS:
-            e["title"] = "(hidden)"
-            e["location"] = ""
     if deduped:
         return {"events": deduped, "available": True, "source": "desktop"}
     try:
@@ -480,11 +825,10 @@ def calendar_widget(start: str = "", end: str = ""):
     cached = _cached("calendar", 600, _compute_calendar)
     if cached:
         # Apply date-range filtering when both start and end are provided.
-        # Event "start" fields from AppleScript are human-formatted strings
-        # (e.g. "Wednesday, April 22, 2026 at 1:00:00 PM") — not ISO dates —
-        # so we can only filter on events that carry an ISO "start_iso" field.
-        # If the cache lacks that field we silently return all events so the
-        # endpoint never 422s.
+        # Events now carry ISO 8601 in `start` (parsed from AppleScript human
+        # strings inside _calendar_events). Older cache entries may still hold
+        # human-formatted strings — try `start` first, then fall back to
+        # legacy aliases. Events that fail to parse pass through.
         if start and end:
             try:
                 start_dt = datetime.fromisoformat(start.rstrip("Z"))
@@ -492,7 +836,7 @@ def calendar_widget(start: str = "", end: str = ""):
                 events = cached.get("events", [])
                 filtered = []
                 for e in events:
-                    iso = e.get("start_iso") or e.get("start_dt") or ""
+                    iso = e.get("start") or e.get("start_iso") or e.get("start_dt") or ""
                     if not iso:
                         # No parseable ISO field — include the event to avoid
                         # silently dropping things we can't classify.
@@ -530,7 +874,7 @@ def warm_widgets():
     import concurrent.futures
 
     tasks = {
-        "calendar": ("calendar", 90, _compute_calendar, _SEM_CALENDAR),
+        "calendar": ("calendar", 600, _compute_calendar, _SEM_CALENDAR),
         "email": ("email::::", 60, lambda: _compute_email(), _SEM_EMAIL),
         "email_folders": ("email_folders", 300, _compute_email_folders, _SEM_EMAIL_FOLDERS),
         "study_streak": ("study_streak", 1800, _compute_study_streak_days, _SEM_STUDY_STREAK),
@@ -765,12 +1109,6 @@ def apple_calendar_widget():
         if data.get("error"):
             return {"available": False, "error": data["error"]}
         events = data.get("events", [])
-        # HIPAA: hide clinical/rotation titles and room-allocation location strings
-        _HIDDEN_CALS = {"Rotation", "Subscribed Calendar", "Work"}
-        for e in events:
-            if e.get("calendar") in _HIDDEN_CALS:
-                e["title"] = "(hidden)"
-                e["location"] = ""
         return {"events": events, "available": True}
     except Exception as e:
         return {"available": False, "error": str(e)}
@@ -805,11 +1143,14 @@ NBME_STORE = CACHE_DIR / "nbme_scores.json"
 
 
 def _format_briefing_time(iso: str) -> str:
-    """Format an ISO datetime as '7:00 AM'. Returns '' if unparsable."""
+    """Format an ISO datetime as '7:00 AM' in local time. Returns '' if unparsable."""
     if not iso or len(iso) < 16:
         return ""
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        # Convert tz-aware datetimes to local time before formatting.
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
     except Exception:
         try:
             dt = datetime.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")
@@ -863,7 +1204,7 @@ def briefing_widget():
         try:
             cached = _CACHE.get("calendar")
             raw = []
-            if cached:
+            if cached and cached[0] > time.time():
                 _, payload = cached
                 raw = payload.get("events", []) if isinstance(payload, dict) else []
             today = now.date().isoformat()
@@ -884,8 +1225,12 @@ def briefing_widget():
                 start_iso = e.get("start") or ""
                 try:
                     dt = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+                    # Convert to local naive datetime so the delta comparison
+                    # with local `now` is correct. Without this, UTC events
+                    # were compared against local time causing off-by-offset.
                     if dt.tzinfo is not None:
-                        dt = dt.replace(tzinfo=None)
+                        from datetime import timezone as _tz
+                        dt = dt.astimezone().replace(tzinfo=None)
                 except Exception:
                     continue
                 delta = (dt - now).total_seconds() / 60.0

@@ -186,7 +186,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
       if (!activeId) setActiveId(conversation_id);
       setMessages((prev) => [
         ...prev,
-        { id: nextId + 1, role: "jarvis", text: reply },
+        { id: prev.length + 1, role: "jarvis", text: reply },
       ]);
       refreshConversations();
     } catch (err: unknown) {
@@ -194,7 +194,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
       const errText = isOffline
         ? "⚠️ Can't reach the Jarvis backend."
         : `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`;
-      setMessages((prev) => [...prev, { id: nextId + 1, role: "jarvis", text: errText }]);
+      setMessages((prev) => [...prev, { id: prev.length + 1, role: "jarvis", text: errText }]);
     } finally {
       setIsTyping(false);
       setNextId((n) => n + 2);

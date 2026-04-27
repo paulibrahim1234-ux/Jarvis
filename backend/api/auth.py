@@ -31,7 +31,12 @@ def microsoft_auth():
             """,
         ))
     except Exception as e:
-        return HTMLResponse(_page(f"⚠️ {e}", success=False))
+        err_str = str(e)
+        setup_hint = (
+            '<p style="margin-top:1rem">Visit <a href="/setup">/setup</a> to enter your Microsoft Client ID.</p>'
+            if "MS_CLIENT_ID" in err_str else ""
+        )
+        return HTMLResponse(_page(f"⚠️ {err_str}", body=setup_hint, success=False))
 
 
 @router.get("/microsoft/status")
@@ -78,8 +83,23 @@ def spotify_status():
 @router.get("/status")
 def all_status():
     import os
-    from tools.outlook import is_authenticated as ms_ok
     from tools.spotify import is_authenticated as sp_ok
+
+    def _outlook_ok():
+        """Check Outlook Classic desktop first; fall back to MS Graph token."""
+        try:
+            from tools.desktop_apps import _count_outlook_accounts
+            counts = _count_outlook_accounts()
+            total = sum(counts.get(k, 0) for k in ("exchange", "imap", "pop"))
+            if total > 0:
+                return True
+        except Exception:
+            pass
+        try:
+            from tools.outlook import is_authenticated as ms_ok
+            return bool(ms_ok())
+        except Exception:
+            return False
 
     def _anki_ok():
         try:
@@ -94,7 +114,7 @@ def all_status():
 
     return {
         "claude": bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")),
-        "outlook": ms_ok(),
+        "outlook": _outlook_ok(),
         "spotify": sp_ok(),
         "anki": _anki_ok(),
     }

@@ -48,7 +48,19 @@ async def chat_endpoint(
         )
         return ChatResponse(reply=reply, conversation_id=cid)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return a 200 with an error reply instead of a 500 so the UI
+        # renders the error inline as a Jarvis message rather than crashing.
+        # Only escalate to 500 for infrastructure failures (DB, auth config).
+        err_str = str(e)
+        is_infra = any(k in err_str.lower() for k in ("database", "sqlite", "no such table", "connection refused"))
+        if is_infra:
+            raise HTTPException(status_code=500, detail=err_str)
+        # Fallback: surface as a Jarvis message so the chat panel doesn't break.
+        cid = req.conversation_id or ""
+        return ChatResponse(
+            reply=f"Sorry, I ran into an error: {err_str}. Please try again.",
+            conversation_id=cid,
+        )
 
 
 @router.get("/chat/conversations")
