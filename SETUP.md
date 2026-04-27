@@ -3,7 +3,7 @@
 This guide is for someone who just bought Claude Code (or Codex) and wants Jarvis running on their Mac. **You don't need to know how to code.** Your job is to copy-paste prompts and click links. Claude does the work.
 
 > **Time required:** 15–25 minutes the first time. Maybe 5 minutes if you've done it before.
-> **What you need:** A Mac, Claude Code installed (or Codex), and an Anthropic API key (or active Claude subscription).
+> **What you need:** A Mac, Claude Code installed (or Codex), and **either** an active Claude subscription **or** a separate Anthropic API key. Most people have the subscription — Phase 3 covers both.
 
 ---
 
@@ -22,11 +22,11 @@ You will spend most of your time **waiting for Claude** and **clicking links**. 
 
 You need these one-time things:
 
-1. **Claude Code installed** — get it from https://claude.com/code. Sign in with your Anthropic account.
+1. **Claude Code installed** — get it from https://claude.com/code. Sign in with your Claude account (Claude Pro or Claude Max subscription works fine; an Anthropic API key also works).
 2. **A GitHub account** — sign up free at https://github.com if you don't have one.
 3. **An Apple ID with admin rights on your Mac** — needed to install apps and grant permissions later.
 
-You do NOT need: Homebrew, Node, Python, Anki, or any developer tools pre-installed. Claude will handle all of that.
+You do NOT need: Homebrew, Node, Python, Anki, or any developer tools pre-installed. Claude will handle all of that. You **also don't need to buy an API key** if you already have a Claude subscription — your subscription covers what Jarvis sends to Claude. Phase 3 has a path for each.
 
 ---
 
@@ -80,31 +80,67 @@ You do NOT need: Homebrew, Node, Python, Anki, or any developer tools pre-instal
 
 ---
 
-## Phase 3 — Get your Anthropic API key
+## Phase 3 — Give Jarvis your Anthropic credentials
 
-This is the only key Jarvis truly needs. The others are optional.
+Jarvis needs to talk to Claude (Anthropic). There are **two ways** to do this — pick whichever describes you.
+
+> **Note for Codex users**: Codex (OpenAI) can run all the setup commands in this guide, but it can't replace the Anthropic credential Jarvis needs at runtime. The Jarvis backend itself uses Claude. So even if you use Codex to set things up, you still need a Claude subscription or Anthropic API key for the backend.
+
+---
+
+### Path A — You have a Claude subscription (most people)
+
+This is the path if you signed up for Claude Pro or Claude Max and use Claude Code by signing in with that account. You **do not need to buy an API key separately**. Your subscription pays for the model calls Jarvis makes.
+
+> **Copy this prompt**
+>
+> ```
+> I have a Claude subscription (Pro or Max). My Claude Code CLI is already signed in to my account. I want Jarvis to use my subscription too — no separate API key.
+>
+> Please:
+> 1. Find my Claude Code OAuth token. Try in this order:
+>    a. Run `printenv CLAUDE_CODE_OAUTH_TOKEN` — if it returns a value starting with sk-ant-oat-, use that.
+>    b. If empty, try the macOS Keychain: `security find-generic-password -a $USER -s "Claude Code-credentials" -w 2>/dev/null` (the entry name varies by version — also try "claude-code", "claude.ai-credentials").
+>    c. If empty, check ~/.claude/credentials.json or ~/.config/claude/credentials.json.
+>    d. If still empty, tell me to run `claude /login` in a new terminal, then re-run this prompt.
+> 2. Once you have the token (it starts with sk-ant-oat-), copy ~/jarvis/backend/.env.example to ~/jarvis/backend/.env if it doesn't exist, then add or replace the line: CLAUDE_CODE_OAUTH_TOKEN=<token>
+> 3. Make sure ANTHROPIC_API_KEY is empty or commented out (Jarvis prefers the OAuth token if both are set).
+> 4. Don't print the token back. Confirm it's saved and that backend/.env is gitignored (run `git check-ignore -v backend/.env`).
+> 5. Tell me to move on to Phase 4.
+> ```
+
+**Why this works:** Jarvis's backend auto-detects whether the credential is an OAuth token (starts with `sk-ant-oat-`) or an API key (starts with `sk-ant-api-`) and adds the right Bearer header + OAuth beta flag. Subscription users never need the Anthropic Console.
+
+**Heads-up:** If you ever uninstall Claude Code or sign out, the token rotates and Jarvis chat will stop working. Re-run the prompt above to refresh.
+
+---
+
+### Path B — You have a separate Anthropic API key
+
+This is the path if you went to console.anthropic.com and created an API key (pay-as-you-go billing, separate from any subscription). You'll see usage charges per token.
 
 **Manual step:**
 
 1. Go to https://console.anthropic.com/settings/keys.
-2. Click **Create Key**, name it "Jarvis", copy the key (starts with `sk-ant-api...`).
+2. Click **Create Key**, name it "Jarvis", copy the key (starts with `sk-ant-api-`).
 3. Keep that key handy — paste it into the next prompt.
 
 > **Copy this prompt** (replace `PASTE_KEY_HERE` with your real key)
 >
 > ```
-> I have an Anthropic API key. Please save it to ~/jarvis/backend/.env so Jarvis can use it.
+> I have an Anthropic API key (not a subscription). Please save it to ~/jarvis/backend/.env so Jarvis can use it.
 >
 > The key is: PASTE_KEY_HERE
 >
 > Steps:
 > 1. Copy ~/jarvis/backend/.env.example to ~/jarvis/backend/.env if it doesn't exist.
 > 2. Set the line ANTHROPIC_API_KEY= to my key.
-> 3. Don't print the key back — just confirm it's set.
-> 4. Verify backend/.env is gitignored (run `git check-ignore -v backend/.env`).
+> 3. Make sure CLAUDE_CODE_OAUTH_TOKEN is empty or commented out so it doesn't override.
+> 4. Don't print the key back — just confirm it's set.
+> 5. Verify backend/.env is gitignored (run `git check-ignore -v backend/.env`).
 > ```
 
-**You'll know it worked when:** Claude confirms the key is saved and that the file is gitignored (so it can't accidentally get pushed to GitHub).
+**You'll know it worked (either path):** Claude confirms the credential is saved and that backend/.env is gitignored. After Phase 4, the dashboard's chat panel will respond. If it says "No Anthropic credentials found," re-run the prompt for your path.
 
 ---
 
