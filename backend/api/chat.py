@@ -2,12 +2,13 @@
 Chat API — persistent conversations + facts memory.
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
 
 from agent.jarvis import chat_async
 from agent import memory
+from api._security import _require_local_origin
 
 # Initialize DB on import.
 memory.init_db()
@@ -47,18 +48,15 @@ async def chat_endpoint(
             model_override=model_override,
         )
         return ChatResponse(reply=reply, conversation_id=cid)
-    except Exception as e:
-        # Return a 200 with an error reply instead of a 500 so the UI
-        # renders the error inline as a Jarvis message rather than crashing.
-        # Only escalate to 500 for infrastructure failures (DB, auth config).
-        err_str = str(e)
-        is_infra = any(k in err_str.lower() for k in ("database", "sqlite", "no such table", "connection refused"))
-        if is_infra:
-            raise HTTPException(status_code=500, detail=err_str)
-        # Fallback: surface as a Jarvis message so the chat panel doesn't break.
+    except Exception:
+        # Log full traceback server-side; return a generic message client-side
+        # so we don't leak internal exception strings (DB schema names,
+        # filesystem paths, FK constraint details, etc.) to the UI.
+        import logging, traceback
+        logging.getLogger("jarvis.chat").error("chat_endpoint error: %s", traceback.format_exc())
         cid = req.conversation_id or ""
         return ChatResponse(
-            reply=f"Sorry, I ran into an error: {err_str}. Please try again.",
+            reply="Sorry, something went wrong on the server. Please try again.",
             conversation_id=cid,
         )
 
@@ -83,7 +81,8 @@ def get_conversation_endpoint(cid: str):
 
 
 @router.delete("/chat/conversations/{cid}")
-def delete_conversation_endpoint(cid: str):
+def delete_conversation_endpoint(cid: str, request: Request):
+    _require_local_origin(request)
     ok = memory.delete_conversation(cid)
     if not ok:
         raise HTTPException(status_code=404, detail="Conversation not found")

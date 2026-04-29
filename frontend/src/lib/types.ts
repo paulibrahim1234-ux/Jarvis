@@ -11,6 +11,8 @@ export interface CalendarEvent {
 export interface Email {
   id: string;
   from: string;
+  /** Raw from_email address (e.g. "noreply@rowan.edu") — used for domain scoring. */
+  from_email: string;
   subject: string;
   preview: string;
   time: string;

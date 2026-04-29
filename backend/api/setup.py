@@ -5,15 +5,14 @@ POST /setup/credentials saves them and triggers the OAuth flow.
 """
 
 import os
-import re
-from pathlib import Path
 
-from fastapi import APIRouter, Form
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-router = APIRouter()
+from api._security import _require_local_origin
+from tools.computer import _write_env
 
-_ENV_FILE = Path(__file__).parent.parent / ".env"
+router = APIRouter()
 
 _ALLOWED = {
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REDIRECT_URI",
@@ -83,6 +82,7 @@ def setup_page():
 
 @router.post("/setup/credentials")
 def save_credentials(
+    request: Request,
     service: str = Form(...),
     spotify_client_id: str = Form(""),
     spotify_client_secret: str = Form(""),
@@ -91,6 +91,7 @@ def save_credentials(
     uworld_username: str = Form(""),
     uworld_password: str = Form(""),
 ):
+    _require_local_origin(request)
     saved = []
 
     if service == "spotify":
@@ -130,24 +131,6 @@ def save_credentials(
         return RedirectResponse("/setup", status_code=303)
 
     return RedirectResponse("/setup", status_code=303)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _write_env(key: str, value: str):
-    _ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    lines = []
-    found = False
-    if _ENV_FILE.exists():
-        for line in _ENV_FILE.read_text().splitlines():
-            if re.match(rf"^{re.escape(key)}\s*=", line):
-                lines.append(f'{key}="{value}"')
-                found = True
-            else:
-                lines.append(line)
-    if not found:
-        lines.append(f'{key}="{value}"')
-    _ENV_FILE.write_text("\n".join(lines) + "\n")
 
 
 # ── HTML template ─────────────────────────────────────────────────────────────

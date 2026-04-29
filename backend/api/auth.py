@@ -2,6 +2,8 @@
 Auth endpoints for Outlook (Microsoft device flow) and Spotify (OAuth callback).
 """
 
+from html import escape as _h
+
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse, HTMLResponse
 
@@ -21,12 +23,15 @@ def microsoft_auth():
         result = start_device_flow()
         if result.get("already_authenticated"):
             return HTMLResponse(_page("✅ Already authenticated with Microsoft Outlook.", success=True))
+        url_safe = _h(str(result.get('url', '')))
+        code_safe = _h(str(result.get('code', '')))
+        raw_safe = _h(str(result.get('raw', '')))
         return HTMLResponse(_page(
             "Microsoft Outlook Auth",
             body=f"""
-            <p>Open <a href="{result['url']}" target="_blank">{result['url']}</a> and enter this code:</p>
-            <h2 style="letter-spacing:.3em;font-family:monospace;font-size:2rem">{result['code']}</h2>
-            <p style="color:#888;font-size:.85rem">{result.get('raw','')}</p>
+            <p>Open <a href="{url_safe}" target="_blank">{url_safe}</a> and enter this code:</p>
+            <h2 style="letter-spacing:.3em;font-family:monospace;font-size:2rem">{code_safe}</h2>
+            <p style="color:#888;font-size:.85rem">{raw_safe}</p>
             <p>After signing in, Jarvis will have access to your Outlook email and calendar.</p>
             """,
         ))
@@ -36,7 +41,7 @@ def microsoft_auth():
             '<p style="margin-top:1rem">Visit <a href="/setup">/setup</a> to enter your Microsoft Client ID.</p>'
             if "MS_CLIENT_ID" in err_str else ""
         )
-        return HTMLResponse(_page(f"⚠️ {err_str}", body=setup_hint, success=False))
+        return HTMLResponse(_page(f"⚠️ {_h(err_str)}", body=setup_hint, success=False))
 
 
 @router.get("/microsoft/status")
@@ -55,13 +60,13 @@ def spotify_auth():
         url = get_auth_url()
         return RedirectResponse(url)
     except Exception as e:
-        return HTMLResponse(_page(f"⚠️ {e}", success=False))
+        return HTMLResponse(_page(f"⚠️ {_h(str(e))}", success=False))
 
 
 @router.get("/spotify/callback")
 def spotify_callback(code: str = "", error: str = ""):
     if error:
-        return HTMLResponse(_page(f"⚠️ Spotify auth error: {error}", success=False))
+        return HTMLResponse(_page(f"⚠️ Spotify auth error: {_h(str(error))}", success=False))
     try:
         from tools.spotify import handle_callback
         ok = handle_callback(code)
@@ -69,7 +74,7 @@ def spotify_callback(code: str = "", error: str = ""):
             return HTMLResponse(_page("✅ Spotify connected! You can close this tab.", success=True))
         return HTMLResponse(_page("⚠️ Token exchange failed — try again.", success=False))
     except Exception as e:
-        return HTMLResponse(_page(f"⚠️ {e}", success=False))
+        return HTMLResponse(_page(f"⚠️ {_h(str(e))}", success=False))
 
 
 @router.get("/spotify/status")

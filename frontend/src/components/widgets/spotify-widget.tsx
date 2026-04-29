@@ -4,11 +4,21 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
   fetchSpotify,
+  fetchSpotifyHome,
   searchSpotify,
   playSpotifyURI,
+  playSpotifyContext,
   controlSpotify,
   setSpotifyVolume,
 } from "@/lib/api";
+import {
+  type Mood,
+  DEFAULT_MOODS,
+  loadMoods,
+  saveMoods,
+  resetMoods,
+  extractPlaylistId,
+} from "@/data/moods";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -60,7 +70,8 @@ interface SpotifyPayload {
   recently_played: RecentItem[] | null;
 }
 
-type Tab = "now" | "library" | "recent" | "search" | "queue";
+type Tab = "home" | "moods" | "now" | "library" | "recent" | "search" | "queue";
+
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -77,9 +88,11 @@ export function SpotifyWidget() {
   const [live, setLive] = useState(false);
   const [progressMs, setProgressMs] = useState(0);
   const [tab, setTab] = useState<Tab>("now");
+  const [homeData, setHomeData] = useState<Awaited<ReturnType<typeof fetchSpotifyHome>> | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<QueueItem[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [moods, setMoods] = useState<Mood[]>(() => loadMoods());
 
   // Resize observer on the OUTER tile (stable across branch swaps).
   useEffect(() => {
@@ -115,7 +128,10 @@ export function SpotifyWidget() {
     poll();
     // 10s is plenty for now-playing UI; 5s was over-fetching during heavy
     // backend AppleScript work elsewhere on the dashboard.
-    const id = setInterval(poll, 10_000);
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      poll();
+    }, 10_000);
     return () => clearInterval(id);
   }, [poll]);
 
@@ -131,10 +147,18 @@ export function SpotifyWidget() {
 
   const webOk = Boolean(payload?.web_api_connected);
 
-  // If web api is not connected, force Now Playing tab
+  // When web api connects, switch to Home. When it disconnects, revert to Now.
   useEffect(() => {
+    if (webOk && tab === "now") setTab("home");
     if (!webOk && tab !== "now") setTab("now");
-  }, [webOk, tab]);
+  }, [webOk]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load home data when on home tab and web api is connected
+  useEffect(() => {
+    if (tab === "home" && webOk) {
+      fetchSpotifyHome().then(setHomeData).catch(() => {});
+    }
+  }, [tab, webOk]);
 
   // ── Controls ──────────────────────────────────────────────────────────────
 
@@ -180,7 +204,17 @@ export function SpotifyWidget() {
   async function onPlayUri(uri: string) {
     if (!uri) return;
     try {
-      await playSpotifyURI(uri);
+      // Use Web API context endpoint for playlists/albums/artists — this plays
+      // the whole context in order. Use AppleScript track endpoint for tracks.
+      if (
+        uri.startsWith("spotify:playlist:") ||
+        uri.startsWith("spotify:album:") ||
+        uri.startsWith("spotify:artist:")
+      ) {
+        await playSpotifyContext(uri);
+      } else {
+        await playSpotifyURI(uri);
+      }
       setTimeout(poll, 1200);
     } catch {
       /* ignore */
@@ -228,13 +262,15 @@ export function SpotifyWidget() {
   const isCompact = size.h > 0 && size.h < 130;
 
   const visibleTabs: { key: Tab; label: string }[] = useMemo(() => {
-    const base: { key: Tab; label: string }[] = [{ key: "now", label: "Now" }];
+    const base: { key: Tab; label: string }[] = [];
     if (webOk) {
+      base.push({ key: "home", label: "Home" });
+      base.push({ key: "moods", label: "Moods" });
       base.push({ key: "library", label: "Library" });
-      base.push({ key: "recent", label: "Recent" });
       base.push({ key: "search", label: "Search" });
       base.push({ key: "queue", label: "Queue" });
     }
+    base.push({ key: "now", label: "Now" });
     return base;
   }, [webOk]);
 
@@ -313,6 +349,19 @@ export function SpotifyWidget() {
 
         {/* Content area */}
         <div className="flex-1 min-h-0 overflow-hidden mt-0.5">
+          {tab === "home" && (
+            <HomePane data={homeData} onPlay={onPlayUri} />
+          )}
+          {tab === "moods" && (
+            <MoodsPane
+              moods={moods}
+              onMoodsChange={(updated) => {
+                setMoods(updated);
+                saveMoods(updated);
+              }}
+              onPlay={onPlayUri}
+            />
+          )}
           {tab === "now" && !track ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
               <p className="text-sm text-muted-foreground">Nothing playing</p>
@@ -370,6 +419,220 @@ export function SpotifyWidget() {
 }
 
 // ── Panes ────────────────────────────────────────────────────────────────────
+
+type HomePayload = Awaited<ReturnType<typeof fetchSpotifyHome>>;
+
+function HomePane({
+  data,
+  onPlay,
+}: {
+  data: HomePayload | null;
+  onPlay: (uri: string) => void;
+}) {
+  if (!data || !data.available) {
+    return <Empty text="Loading home…" />;
+  }
+
+  type HomeItem = {
+    title?: string;
+    name?: string;
+    artist?: string;
+    album_art?: string | null;
+    uri?: string | null;
+  };
+
+  const rows: { label: string; items: HomeItem[] }[] = [
+    // Recently played is now playlist-only — hide row gracefully when empty
+    ...(
+      (data.recently_played ?? []).length > 0
+        ? [{ label: "Recently played playlists", items: (data.recently_played ?? []) as HomeItem[] }]
+        : []
+    ),
+    { label: "Your top tracks this month", items: (data.top_tracks ?? []) as HomeItem[] },
+    { label: "Top artists", items: (data.top_artists ?? []) as HomeItem[] },
+    { label: "Your playlists", items: (data.playlists ?? []) as HomeItem[] },
+  ];
+
+  return (
+    <div className="h-full overflow-y-auto space-y-3 pr-0.5">
+      {rows.map((row) => (
+        <div key={row.label}>
+          <div className="text-[11px] text-muted-foreground/60 mb-1.5 px-0.5">{row.label}</div>
+          <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+            {row.items.slice(0, 8).map((item, i) => (
+              <button
+                key={i}
+                className="flex-shrink-0 flex flex-col items-center gap-1 group/tile"
+                onClick={() => { if (item.uri) onPlay(item.uri); }}
+              >
+                <div className="w-[64px] h-[64px] rounded-lg bg-white/5 overflow-hidden flex-shrink-0">
+                  {item.album_art ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={item.album_art} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-white/10" />
+                  )}
+                </div>
+                <div className="text-[10px] text-muted-foreground/70 w-[64px] truncate text-center group-hover/tile:text-foreground transition-colors leading-tight">
+                  {item.title ?? item.name}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MoodsPane({
+  moods,
+  onMoodsChange,
+  onPlay,
+}: {
+  moods: Mood[];
+  onMoodsChange: (updated: Mood[]) => void;
+  onPlay: (uri: string) => void;
+}) {
+  const [editMode, setEditMode] = useState(false);
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const [draftEmoji, setDraftEmoji] = useState("");
+  const [draftPlaylistId, setDraftPlaylistId] = useState("");
+
+  function startEdit(i: number) {
+    setEditingIdx(i);
+    setDraftName(moods[i].name);
+    setDraftEmoji(moods[i].emoji);
+    setDraftPlaylistId(moods[i].playlistId);
+  }
+
+  function saveEdit() {
+    if (editingIdx === null) return;
+    const updated = moods.map((m, i) =>
+      i === editingIdx
+        ? {
+            name: draftName.trim() || m.name,
+            emoji: draftEmoji.trim() || m.emoji,
+            playlistId: extractPlaylistId(draftPlaylistId) || m.playlistId,
+          }
+        : m,
+    );
+    onMoodsChange(updated);
+    setEditingIdx(null);
+  }
+
+  function handleReset() {
+    resetMoods();
+    onMoodsChange([...DEFAULT_MOODS]);
+    setEditMode(false);
+    setEditingIdx(null);
+  }
+
+  return (
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-1.5 shrink-0">
+        <span className="text-[10px] text-muted-foreground/50 uppercase tracking-wide">Moods</span>
+        <div className="flex items-center gap-2">
+          {editMode && (
+            <button
+              onClick={handleReset}
+              className="text-[9px] text-muted-foreground/40 hover:text-muted-foreground/70 transition-colors underline"
+            >
+              Reset defaults
+            </button>
+          )}
+          <button
+            onClick={() => { setEditMode(!editMode); setEditingIdx(null); }}
+            className="text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors px-1.5 py-0.5 rounded hover:bg-white/5"
+          >
+            {editMode ? "Done" : "Edit"}
+          </button>
+        </div>
+      </div>
+
+      {/* Grid — 4 cols, compact tiles */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="grid grid-cols-4 gap-1.5">
+          {moods.map((mood, i) => {
+            if (editMode && editingIdx === i) {
+              return (
+                <div
+                  key={i}
+                  className="col-span-4 rounded-lg bg-white/[0.07] border border-white/10 p-2 space-y-1.5 text-xs"
+                >
+                  <div className="flex gap-1.5">
+                    <input
+                      value={draftEmoji}
+                      onChange={(e) => setDraftEmoji(e.target.value)}
+                      placeholder="Emoji"
+                      className="w-10 rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-center text-sm focus:outline-none"
+                    />
+                    <input
+                      value={draftName}
+                      onChange={(e) => setDraftName(e.target.value)}
+                      placeholder="Name"
+                      className="flex-1 rounded bg-white/5 border border-white/10 px-1.5 py-0.5 focus:outline-none"
+                    />
+                  </div>
+                  <input
+                    value={draftPlaylistId}
+                    onChange={(e) => setDraftPlaylistId(e.target.value)}
+                    placeholder="Playlist URL or ID"
+                    className="w-full rounded bg-white/5 border border-white/10 px-1.5 py-0.5 focus:outline-none text-[10px]"
+                  />
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={saveEdit}
+                      className="rounded bg-[#1DB954]/20 hover:bg-[#1DB954]/30 px-2 py-0.5 text-[#1DB954] transition-colors"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => setEditingIdx(null)}
+                      className="rounded bg-white/5 hover:bg-white/10 px-2 py-0.5 text-muted-foreground transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <div key={i} className="relative group/moodtile">
+                <button
+                  onClick={() => {
+                    if (editMode) {
+                      startEdit(i);
+                    } else {
+                      onPlay(`spotify:playlist:${mood.playlistId}`);
+                    }
+                  }}
+                  className="w-full aspect-square max-w-[72px] mx-auto rounded-lg bg-white/5 hover:bg-white/10 transition-colors flex flex-col items-center justify-center gap-0.5"
+                  title={editMode ? `Edit "${mood.name}"` : mood.name}
+                >
+                  <span className="text-base leading-none">{mood.emoji}</span>
+                  <span className="text-[9px] text-muted-foreground/70 group-hover/moodtile:text-foreground transition-colors leading-tight px-0.5 truncate w-full text-center">
+                    {mood.name}
+                  </span>
+                </button>
+                {editMode && (
+                  <div className="absolute -top-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-white/10 flex items-center justify-center pointer-events-none">
+                    <svg className="h-2.5 w-2.5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                    </svg>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function NowPlayingPane({
   track,
@@ -679,7 +942,7 @@ function Header({
 }) {
   return (
     <CardHeader className="px-3 pt-2 pb-1">
-      <CardTitle className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+      <CardTitle className="flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
         <svg className="h-4 w-4 text-[#1DB954]" viewBox="0 0 24 24" fill="currentColor">
           <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z" />
         </svg>

@@ -185,6 +185,41 @@ def get_recently_played(limit: int = 10) -> list[dict] | None:
         return None
 
 
+def get_top_tracks(time_range: str = "short_term", limit: int = 8) -> list[dict]:
+    """Get user's top tracks for the given time range (short_term/medium_term/long_term)."""
+    try:
+        sp = _sp()
+        result = sp.current_user_top_tracks(limit=limit, time_range=time_range)
+        return [
+            {
+                "title": t["name"],
+                "artist": ", ".join(a["name"] for a in t.get("artists", [])),
+                "album_art": (t["album"]["images"][0]["url"] if t["album"].get("images") else None),
+                "uri": t.get("uri"),
+            }
+            for t in (result.get("items") or [])
+        ]
+    except Exception:
+        return []
+
+
+def get_top_artists(time_range: str = "short_term", limit: int = 8) -> list[dict]:
+    """Get user's top artists for the given time range."""
+    try:
+        sp = _sp()
+        result = sp.current_user_top_artists(limit=limit, time_range=time_range)
+        return [
+            {
+                "name": a["name"],
+                "album_art": (a["images"][0]["url"] if a.get("images") else None),
+                "uri": a.get("uri"),
+            }
+            for a in (result.get("items") or [])
+        ]
+    except Exception:
+        return []
+
+
 def search_tracks(query: str, limit: int = 10) -> list[dict] | None:
     try:
         sp = _sp()
@@ -201,6 +236,69 @@ def search_tracks(query: str, limit: int = 10) -> list[dict] | None:
             }
             for t in items
         ]
+    except Exception:
+        return None
+
+
+def play_context_uri(uri: str) -> dict:
+    """Play a context (playlist/album/artist) via the Spotify Web API.
+
+    Uses PUT /v1/me/player/play with {"context_uri": uri}.
+    Returns {ok: bool, error?: str}.
+    """
+    try:
+        sp = _sp()
+        sp.start_playback(context_uri=uri)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def get_recently_played_playlists(limit: int = 8) -> list[dict] | None:
+    """Return up to `limit` unique playlists from recently-played history.
+
+    For each item in the recently-played endpoint, inspect context.type.
+    Deduplicate by context URI and fetch cover art via /v1/playlists/{id}.
+    Returns None when unauthenticated, [] when no playlist context found.
+    """
+    try:
+        sp = _sp()
+        res = sp.current_user_recently_played(limit=50)
+        items = res.get("items", []) if res else []
+        seen: dict[str, dict] = {}
+        for item in items:
+            ctx = item.get("context") or {}
+            if ctx.get("type") != "playlist":
+                continue
+            uri = ctx.get("uri", "")
+            if not uri or uri in seen:
+                continue
+            pid = uri.split(":")[-1] if ":" in uri else ""
+            if not pid:
+                continue
+            try:
+                pdata = sp.playlist(pid, fields="id,name,images,tracks.total,owner.display_name")
+                seen[uri] = {
+                    "name": pdata.get("name", ""),
+                    "uri": uri,
+                    "id": pid,
+                    "cover": (pdata.get("images") or [{}])[0].get("url"),
+                    "track_count": (pdata.get("tracks") or {}).get("total", 0),
+                    "owner": (pdata.get("owner") or {}).get("display_name"),
+                }
+            except Exception:
+                # Fallback: minimal entry without cover
+                seen[uri] = {
+                    "name": uri,
+                    "uri": uri,
+                    "id": pid,
+                    "cover": None,
+                    "track_count": 0,
+                    "owner": None,
+                }
+            if len(seen) >= limit:
+                break
+        return list(seen.values())
     except Exception:
         return None
 

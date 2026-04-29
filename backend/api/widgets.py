@@ -7,7 +7,8 @@ import threading
 import time
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
-from tools.anki import _invoke as anki_invoke
+from api._security import _require_local_origin
+from tools.anki import _invoke as anki_invoke, _invoke_multi as anki_invoke_multi
 from tools.imessage import get_conversations
 from tools.desktop_apps import (
     run_desktop_tool,
@@ -27,6 +28,7 @@ router = APIRouter()
 
 # Simple TTL cache: {key: (expires_at, value)}
 _CACHE: dict = {}
+_CACHE_MAX = 128  # upper bound on number of live cache entries
 
 # Semaphores: prevent back-to-back AppleScript calls from stacking up on the
 # threadpool. A single permit per heavy route is enough — cache absorbs all
@@ -70,6 +72,11 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
     effective_ttl = ttl
     if value is None or value == {} or value == []:
         effective_ttl = min(ttl, 10.0)
+    # LRU-style eviction: when cache exceeds _CACHE_MAX, drop the entry whose
+    # TTL expires soonest (i.e. the least valuable / oldest-expiring entry).
+    if len(_CACHE) >= _CACHE_MAX and key not in _CACHE:
+        oldest_key = min(_CACHE, key=lambda k: _CACHE[k][0])
+        del _CACHE[oldest_key]
     _CACHE[key] = (now + effective_ttl, value)
     return value
 
@@ -78,20 +85,27 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
 
 @router.get("/widgets/anki")
 def anki_stats():
-    try:
-        due_ids = anki_invoke("findCards", query="is:due")
-        reviewed_ids = anki_invoke("findCards", query="rated:1")
-        new_ids = anki_invoke("findCards", query="is:new is:due")
-        return {
-            "due": len(due_ids),
-            "reviewedToday": len(reviewed_ids),
-            "newCards": len(new_ids),
-            "streak": _compute_streak(),
-            "retention": _compute_retention(),
-            "available": True,
-        }
-    except Exception as e:
-        return {"error": str(e), "available": False}
+    def _compute():
+        try:
+            results = anki_invoke_multi([
+                {"action": "findCards", "params": {"query": "is:due"}},
+                {"action": "findCards", "params": {"query": "rated:1"}},
+                {"action": "findCards", "params": {"query": "is:new is:due"}},
+            ])
+            due_ids = results[0] or []
+            reviewed_ids = results[1] or []
+            new_ids = results[2] or []
+            return {
+                "due": len(due_ids),
+                "reviewedToday": len(reviewed_ids),
+                "newCards": len(new_ids),
+                "streak": _compute_streak(),
+                "retention": _compute_retention(),
+                "available": True,
+            }
+        except Exception as e:
+            return {"error": str(e), "available": False}
+    return _cached("anki_stats", 30, _compute)
 
 
 def _date_to_review_id(d) -> int:
@@ -320,7 +334,7 @@ def uworld_widget():
 
 
 @router.post("/widgets/uworld/refresh")
-def uworld_refresh():
+def uworld_refresh(request: Request):
     """Trigger a live UWorld scrape from the logged-in browser session (default: Comet).
 
     Calls _uworld_scrape_history() from tools/browser.py, persists results
@@ -329,6 +343,7 @@ def uworld_refresh():
     helpful message) as valid responses.
     Browser not running = returns logged_out state with clear message.
     """
+    _require_local_origin(request)
     import datetime as _dt
     try:
         from tools.browser import _uworld_scrape_history
@@ -471,10 +486,11 @@ def anki_suggestions(limit: int = 50):
 
 
 _ANKI_INDEX_BUILD_STATE: dict = {"running": False, "progress": 0, "total": 0, "started_at": None, "error": None}
+_ANKI_BUILD_LOCK = threading.Lock()
 
 
 @router.post("/widgets/anki/build-index")
-def anki_build_index_start():
+def anki_build_index_start(request: Request):
     """Kick off a background build of the QID → cards index.
 
     Strategy that does NOT crash Anki:
@@ -486,15 +502,23 @@ def anki_build_index_start():
     Returns immediately with status; subsequent calls to /widgets/anki/build-index/status
     report progress. On completion, /widgets/anki/suggestions becomes instant.
     """
+    _require_local_origin(request)
     import threading
 
-    if _ANKI_INDEX_BUILD_STATE["running"]:
-        return {"status": "already_running", **_ANKI_INDEX_BUILD_STATE}
+    # Acquire lock atomically around the running check + set so concurrent
+    # POST requests cannot both pass the check and spawn two builders.
+    with _ANKI_BUILD_LOCK:
+        if _ANKI_INDEX_BUILD_STATE["running"]:
+            return {"status": "already_running", **_ANKI_INDEX_BUILD_STATE}
+        _ANKI_INDEX_BUILD_STATE["running"] = True
+    # Lock released here — _run() will manage the state from this point.
 
     def _run():
         import time as _time
         import re as _re
-        _ANKI_INDEX_BUILD_STATE.update({"running": True, "progress": 0, "total": 0,
+        # running=True was already set atomically before Thread start; update
+        # the remaining fields without touching running.
+        _ANKI_INDEX_BUILD_STATE.update({"progress": 0, "total": 0,
                                          "started_at": __import__("datetime").datetime.utcnow().isoformat(), "error": None})
         # Resume from existing partial index if present.
         index: dict = _load_anki_qid_index()
@@ -610,36 +634,8 @@ class AnkiUnsuspendBody(BaseModel):
     card_ids: list[int]
 
 
-def _require_local_origin(request) -> None:
-    """
-    Reject cross-site POSTs. The dashboard binds 127.0.0.1:8000 but a
-    malicious page in another tab could fetch with Content-Type: text/plain
-    (a "simple" CORS request that bypasses preflight) and trigger writes.
-    Allow only requests whose Origin / Referer (when present) maps to
-    localhost, or browser-less callers (curl) that send neither header.
-    """
-    from fastapi import HTTPException
-
-    def _host(url: str) -> str:
-        # crude — just enough to extract netloc from "http://host:port/..."
-        if "://" not in url:
-            return ""
-        rest = url.split("://", 1)[1]
-        return rest.split("/", 1)[0].lower()
-
-    LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
-    for header in ("origin", "referer"):
-        val = request.headers.get(header)
-        if not val:
-            continue
-        host = _host(val)
-        # Host portion may include :port — strip it.
-        bare = host.rsplit(":", 1)[0] if host.startswith(("127.", "localhost", "[::1]")) else host.split(":")[0]
-        if bare not in LOCAL_HOSTS:
-            raise HTTPException(
-                status_code=403,
-                detail=f"cross-site write rejected (origin host: {bare})",
-            )
+# NOTE: _require_local_origin is now imported from api._security to avoid
+# circular imports between widgets / setup / chat / apps. See top of file.
 
 
 @router.post("/widgets/anki/unsuspend")
@@ -668,36 +664,41 @@ def anki_unsuspend(body: AnkiUnsuspendBody, request: Request):
 
 @router.get("/widgets/imessage")
 def imessage_widget(include_groups: bool = False, limit: int = 25):
-    try:
-        convos = get_conversations(
-            limit=limit,
-            messages_per_thread=15,
-            include_groups=include_groups,
-        )
-        # Resolve handles -> Contacts.app display names server-side so every
-        # consumer (widget, agent tools, future mail/call widgets) sees names,
-        # not phone numbers. Falls back to the existing `contact` field if the
-        # handle isn't in the address book (spam, short codes).
+    cache_key = f"imessage::{int(include_groups)}::{limit}"
+
+    def _compute():
         try:
-            from tools.contacts import resolve as _resolve_contact
-            for c in convos:
-                handle = c.get("handle") or c.get("contact", "")
-                name = _resolve_contact(handle)
-                if name:
-                    c["contact"] = name
-        except Exception:
-            pass
-        total_unread = sum(c.get("unread_count", 0) for c in convos)
-        return {
-            "conversations": convos,
-            "total_unread": total_unread,
-            "count": len(convos),
-            "available": True,
-        }
-    except PermissionError as e:
-        return {"available": False, "error": str(e)}
-    except Exception as e:
-        return {"available": False, "error": str(e)}
+            convos = get_conversations(
+                limit=limit,
+                messages_per_thread=15,
+                include_groups=include_groups,
+            )
+            # Resolve handles -> Contacts.app display names server-side so every
+            # consumer (widget, agent tools, future mail/call widgets) sees names,
+            # not phone numbers. Falls back to the existing `contact` field if the
+            # handle isn't in the address book (spam, short codes).
+            try:
+                from tools.contacts import resolve as _resolve_contact
+                for c in convos:
+                    handle = c.get("handle") or c.get("contact", "")
+                    name = _resolve_contact(handle)
+                    if name:
+                        c["contact"] = name
+            except Exception:
+                pass
+            total_unread = sum(c.get("unread_count", 0) for c in convos)
+            return {
+                "conversations": convos,
+                "total_unread": total_unread,
+                "count": len(convos),
+                "available": True,
+            }
+        except PermissionError as e:
+            return {"available": False, "error": str(e)}
+        except Exception as e:
+            return {"available": False, "error": str(e)}
+
+    return _cached(cache_key, 30, _compute)
 
 
 # ── Email (Outlook desktop first, then Graph API fallback) ────────────────────
@@ -863,7 +864,7 @@ def calendar_widget(start: str = "", end: str = ""):
 # ── On-demand warmup ──────────────────────────────────────────────────────────
 
 @router.post("/widgets/warm")
-def warm_widgets():
+def warm_widgets(request: Request):
     """Fire all slow AppleScript compute functions in the background so caches
     are hot before the user's first widget interaction.
 
@@ -871,6 +872,7 @@ def warm_widgets():
     which were triggered. Safe to call multiple times — semaphores prevent
     duplicate in-flight AppleScript invocations.
     """
+    _require_local_origin(request)
     import concurrent.futures
 
     tasks = {
@@ -961,14 +963,26 @@ def _spotify_recents_cached():
     return _cached("spotify_recents", 60, _compute)
 
 
-def _spotify_queue_live():
+def _spotify_recent_playlists_cached():
+    """Return recently-played playlists (deduped by URI) or None when not authed."""
     if not _spotify_web_ok():
         return None
-    try:
-        from tools.spotify import get_queue
-        return get_queue()
-    except Exception:
+    def _compute():
+        from tools.spotify import get_recently_played_playlists
+        return get_recently_played_playlists(limit=8)
+    return _cached("spotify_recent_playlists", 120, _compute)
+
+
+def _spotify_queue_cached():
+    if not _spotify_web_ok():
         return None
+    def _compute():
+        try:
+            from tools.spotify import get_queue
+            return get_queue()
+        except Exception:
+            return None
+    return _cached("spotify_queue", 8, _compute)
 
 
 @router.get("/widgets/spotify")
@@ -1022,10 +1036,28 @@ def spotify_widget():
         "album_art_url": album_art,
         "web_api_connected": web_ok,
         "auth_url": None if web_ok else "http://127.0.0.1:8000/auth/spotify",
-        "queue": _spotify_queue_live(),
+        "queue": _spotify_queue_cached(),
         "playlists": _spotify_playlists_cached(),
         "recently_played": _spotify_recents_cached(),
     }
+
+
+@router.get("/widgets/spotify/home")
+def spotify_home():
+    def _compute():
+        if not _spotify_web_ok():
+            return {"available": False, "error": "Spotify Web API not connected"}
+        from tools.spotify import get_top_tracks, get_top_artists
+        recent_playlists = _spotify_recent_playlists_cached() or []
+        return {
+            "available": True,
+            "top_tracks": get_top_tracks("short_term", 8),
+            "top_artists": get_top_artists("short_term", 8),
+            # recently_played is now playlist-only (user feedback: don't show songs)
+            "recently_played": recent_playlists,
+            "playlists": _spotify_playlists_cached() or [],
+        }
+    return _cached("spotify_home", 60, _compute)
 
 
 # ── Spotify control endpoints ─────────────────────────────────────────────────
@@ -1047,7 +1079,8 @@ class SpotifyVolumeBody(BaseModel):
 
 
 @router.post("/widgets/spotify/search")
-def spotify_search(body: SpotifySearchBody):
+def spotify_search(body: SpotifySearchBody, request: Request):
+    _require_local_origin(request)
     if not _spotify_web_ok():
         return {
             "results": None,
@@ -1063,8 +1096,9 @@ def spotify_search(body: SpotifySearchBody):
 
 
 @router.post("/widgets/spotify/play")
-def spotify_play(body: SpotifyPlayBody):
+def spotify_play(body: SpotifyPlayBody, request: Request):
     """Play a Spotify URI via AppleScript (requires Spotify desktop app open)."""
+    _require_local_origin(request)
     data = _spotify_play_uri(body.uri)
     if "error" in data:
         return {"ok": False, "error": data["error"]}
@@ -1072,7 +1106,8 @@ def spotify_play(body: SpotifyPlayBody):
 
 
 @router.post("/widgets/spotify/control")
-def spotify_control(body: SpotifyControlBody):
+def spotify_control(body: SpotifyControlBody, request: Request):
+    _require_local_origin(request)
     action_map = {
         "play": "play",
         "pause": "pause",
@@ -1091,8 +1126,27 @@ def spotify_control(body: SpotifyControlBody):
     return {"ok": True, "state": data.get("state"), "track": data.get("track")}
 
 
+class SpotifyContextBody(BaseModel):
+    context_uri: str  # spotify:playlist:... or spotify:album:...
+
+
+@router.post("/widgets/spotify/play-context")
+def spotify_play_context(body: SpotifyContextBody, request: Request):
+    """Play a Spotify context (playlist/album) via Web API.
+
+    Preferred for playlists — uses PUT /v1/me/player/play with context_uri
+    so the whole playlist plays in order, not just a single track.
+    """
+    _require_local_origin(request)
+    if not _spotify_web_ok():
+        return {"ok": False, "error": "Spotify Web API not connected"}
+    from tools.spotify import play_context_uri
+    return play_context_uri(body.context_uri)
+
+
 @router.post("/widgets/spotify/volume")
-def spotify_volume(body: SpotifyVolumeBody):
+def spotify_volume(body: SpotifyVolumeBody, request: Request):
+    _require_local_origin(request)
     v = max(0, min(100, int(body.volume)))
     data = _spotify_volume(v)
     if "error" in data:
@@ -1157,6 +1211,25 @@ def _format_briefing_time(iso: str) -> str:
         except Exception:
             return ""
     return dt.strftime("%-I:%M %p")
+
+
+# Folders that are noise in a morning briefing — Inbox is rolled into
+# `unread_mail`, the rest are infra/cleanup buckets the user doesn't read.
+_BRIEFING_HIDDEN: frozenset[str] = frozenset({
+    "Inbox",
+    "Drafts",
+    "Sent Items",
+    "Deleted Items",
+    "Junk Email",
+    "Junk E-mail",
+    "Clutter",
+    "Conversation History",
+    "RSS Feeds",
+    "Sync Issues",
+    "Outbox",
+    "Subscribed Public Folders",
+    "Archive",  # archived = read by definition
+})
 
 
 # ── Morning briefing ──────────────────────────────────────────────────────────
@@ -1271,24 +1344,6 @@ def briefing_widget():
             errors.append(f"unread: {e}")
             return None
 
-    # Folders that are noise in a morning briefing — Inbox is rolled into
-    # `unread_mail`, the rest are infra/cleanup buckets the user doesn't read.
-    _BRIEFING_HIDDEN = {
-        "Inbox",
-        "Drafts",
-        "Sent Items",
-        "Deleted Items",
-        "Junk Email",
-        "Junk E-mail",
-        "Clutter",
-        "Conversation History",
-        "RSS Feeds",
-        "Sync Issues",
-        "Outbox",
-        "Subscribed Public Folders",
-        "Archive",  # archived = read by definition
-    }
-
     def fetch_folders():
         try:
             data = _cached("email_folders", 300, _compute_email_folders)
@@ -1309,7 +1364,12 @@ def briefing_widget():
 
     def fetch_messages():
         try:
-            convos = get_conversations(limit=25, messages_per_thread=1, include_groups=False)
+            # Piggyback on P1's 30s imessage cache when available.
+            cached_im = _CACHE.get("imessage::0::25")
+            if cached_im and cached_im[0] > time.time():
+                convos = (cached_im[1] or {}).get("conversations") or []
+            else:
+                convos = get_conversations(limit=25, messages_per_thread=1, include_groups=False)
             try:
                 from tools.contacts import resolve as _resolve_contact
             except Exception:
@@ -1332,12 +1392,7 @@ def briefing_widget():
             errors.append(f"imessage: {e}")
             return None
 
-    def fetch_now_playing():
-        # Use _osascript with a 2s timeout so a closed Spotify app doesn't
-        # stall the briefing. The full _spotify_now_playing() uses the 15s
-        # default which always exceeds the briefing's per-fetcher budget.
-        try:
-            _NP_SCRIPT = """
+    _NP_SCRIPT = """
 tell application "Spotify"
     try
         if player state is playing or player state is paused then
@@ -1350,17 +1405,29 @@ tell application "Spotify"
     end try
 end tell
 """
-            result = _osascript(_NP_SCRIPT, timeout=2)
-            out = (result.get("output") or "").strip()
-            if not out:
+
+    def fetch_now_playing():
+        # Use _osascript with a 2s timeout so a closed Spotify app doesn't
+        # stall the briefing. The full _spotify_now_playing() uses the 15s
+        # default which always exceeds the briefing's per-fetcher budget.
+        # Wrap in a 15s cache so rapid briefing refreshes skip the osascript.
+        def _np_compute():
+            try:
+                result = _osascript(_NP_SCRIPT, timeout=2)
+                out = (result.get("output") or "").strip()
+                if not out:
+                    return None
+                parts = out.split("|||")
+                title = parts[0].strip() if parts else ""
+                artist = parts[1].strip() if len(parts) > 1 else ""
+                state = parts[2].strip() if len(parts) > 2 else ""
+                if not title or state not in ("playing", "paused"):
+                    return None
+                return {"title": title, "artist": artist}
+            except Exception:
                 return None
-            parts = out.split("|||")
-            title = parts[0].strip() if parts else ""
-            artist = parts[1].strip() if len(parts) > 1 else ""
-            state = parts[2].strip() if len(parts) > 2 else ""
-            if not title or state not in ("playing", "paused"):
-                return None
-            return {"title": title, "artist": artist}
+        try:
+            return _cached("briefing_now_playing", 15, _np_compute)
         except Exception as e:
             errors.append(f"spotify: {e}")
             return None
@@ -1472,7 +1539,8 @@ def nbme_widget():
 
 
 @router.post("/widgets/nbme")
-def nbme_create(payload: NBMEScoreIn):
+def nbme_create(payload: NBMEScoreIn, request: Request):
+    _require_local_origin(request)
     scores = _load_nbme()
     new_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
     record = {"id": new_id, **payload.model_dump()}
@@ -1482,10 +1550,39 @@ def nbme_create(payload: NBMEScoreIn):
 
 
 @router.delete("/widgets/nbme/{score_id}")
-def nbme_delete(score_id: str):
+def nbme_delete(score_id: str, request: Request):
+    _require_local_origin(request)
     scores = _load_nbme()
     remaining = [s for s in scores if s.get("id") != score_id]
     if len(remaining) == len(scores):
         raise HTTPException(status_code=404, detail="score not found")
     _save_nbme(remaining)
     return {"deleted": True}
+
+
+# ── Email → Calendar ──────────────────────────────────────────────────────────
+
+class AddToCalendarBody(BaseModel):
+    title: str
+    start_iso: str
+    end_iso: str | None = None
+    location: str | None = None
+    notes: str | None = None
+    calendar_name: str = "School"
+
+
+@router.post("/widgets/email/add-to-calendar")
+def email_add_to_calendar(body: AddToCalendarBody, request: Request):
+    _require_local_origin(request)
+    from tools.desktop_apps import _calendar_create_event
+    result = _calendar_create_event(
+        title=body.title,
+        start_iso=body.start_iso,
+        end_iso=body.end_iso or "",
+        calendar_name=body.calendar_name,
+        location=body.location or "",
+        notes=body.notes or "",
+    )
+    if "error" in result:
+        return {"ok": False, "error": result["error"]}
+    return {"ok": True, "event_id": result.get("event_id")}

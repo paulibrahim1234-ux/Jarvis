@@ -25,8 +25,8 @@ JarvisNative/.build/
 # Compiled .app bundle — rebuild from `swift build` locally; never commit binaries.
 JarvisNative/JarvisNative.app/
 
-# Claude Code worktrees (top-level workspace state)
-.claude/worktrees/
+# Claude Code editor state (worktrees, launch configs, etc.)
+.claude/
 
 # Generic secret files — belt + suspenders
 *.pem

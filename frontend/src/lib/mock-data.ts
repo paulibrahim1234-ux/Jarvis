@@ -66,6 +66,7 @@ export const mockEmails: Email[] = [
   {
     id: "1",
     from: "Canvas Notifications",
+    from_email: "notifications@canvas.rowan.edu",
     subject: "New Assignment: Surgery Shelf Practice Exam",
     preview:
       "A new assignment has been posted in SURG 7010. Due date: April 18...",
@@ -76,6 +77,7 @@ export const mockEmails: Email[] = [
   {
     id: "2",
     from: "Dr. Sarah Mitchell",
+    from_email: "s.mitchell@cooperhealth.org",
     subject: "Re: Case Presentation Feedback",
     preview:
       "Great job on the appendicitis case yesterday. A few suggestions for next time...",
@@ -85,6 +87,7 @@ export const mockEmails: Email[] = [
   {
     id: "3",
     from: "One45",
+    from_email: "noreply@one45.com",
     subject: "Duty Hours Reminder",
     preview:
       "Please submit your duty hours for the week ending April 11 by Friday...",
@@ -95,6 +98,7 @@ export const mockEmails: Email[] = [
   {
     id: "4",
     from: "Canvas Notifications",
+    from_email: "notifications@canvas.rowan.edu",
     subject: "Grade Posted: Pathology Quiz 7",
     preview: "Your grade for Pathology Quiz 7 has been posted. Score: 88%...",
     time: "Yesterday",
@@ -104,6 +108,7 @@ export const mockEmails: Email[] = [
   {
     id: "5",
     from: "Study Group",
+    from_email: "studygroup@rowan.edu",
     subject: "Tomorrow's session - Renal Physiology",
     preview:
       "Hey everyone, just confirming we are meeting at 6 PM in the library...",

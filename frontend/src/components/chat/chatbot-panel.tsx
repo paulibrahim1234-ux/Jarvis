@@ -43,8 +43,10 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isNarrow, setIsNarrow] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const loadedRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   // ── Responsive: hide sidebar when narrow ──
   useEffect(() => {
@@ -94,7 +96,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   }, [activeId]);
 
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages, isTyping]);
 
   const refreshConversations = useCallback(async () => {
@@ -167,6 +169,16 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
     }
   }, [activeId, handleDeleteConversation]);
 
+  function handleStop() {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setIsTyping(false);
+    setMessages((prev) => [...prev, { id: prev.length + 1, role: "jarvis", text: "(cancelled)" }]);
+    setNextId((n) => n + 1);
+  }
+
   async function handleSend() {
     const text = input.trim();
     if (!text || isTyping) return;
@@ -177,12 +189,16 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
     setNextId((n) => n + 1);
     setIsTyping(true);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       // Send just the new user turn; backend reads full history from DB.
       const { reply, conversation_id } = await postChat(
         [{ role: "user", content: text }],
-        { conversation_id: activeId ?? undefined }
+        { conversation_id: activeId ?? undefined, signal: controller.signal }
       );
+      abortRef.current = null;
       if (!activeId) setActiveId(conversation_id);
       setMessages((prev) => [
         ...prev,
@@ -190,6 +206,9 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
       ]);
       refreshConversations();
     } catch (err: unknown) {
+      abortRef.current = null;
+      const isAbort = err instanceof Error && err.name === "AbortError";
+      if (isAbort) return; // handleStop already appended the cancelled message
       const isOffline = err instanceof TypeError && err.message.includes("fetch");
       const errText = isOffline
         ? "⚠️ Can't reach the Jarvis backend."
@@ -323,6 +342,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
         {/* Messages */}
         <ScrollArea className="flex-1 min-h-0">
           <div ref={scrollRef} className="flex flex-col gap-3 p-4">
+            <div aria-live="polite" aria-atomic="false" className="contents">
             {messages.map((msg) => (
               <div
                 key={msg.id}
@@ -353,7 +373,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
             ))}
 
             {isTyping && (
-              <div className="flex justify-start">
+              <div className="flex justify-start items-center gap-2">
                 <div
                   className="flex items-center gap-1 rounded-2xl rounded-bl-md border-l-2 px-4 py-3"
                   style={{
@@ -374,8 +394,18 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                     style={{ backgroundColor: "oklch(0.6 0 0)" }}
                   />
                 </div>
+                <button
+                  type="button"
+                  onClick={handleStop}
+                  className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground border border-white/10 rounded px-1.5 py-0.5 transition-colors"
+                  title="Stop generation"
+                >
+                  Stop
+                </button>
               </div>
             )}
+            </div>
+            <div ref={bottomRef} aria-hidden="true" />
           </div>
         </ScrollArea>
 

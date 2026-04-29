@@ -1,4 +1,4 @@
-export const BACKEND = "http://localhost:8000";
+export const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 export async function backendAvailable(): Promise<boolean> {
   try {
@@ -21,14 +21,14 @@ export interface ChatResponse {
 
 export async function postChat(
   messages: ChatTurn[],
-  opts: { conversation_id?: string; model?: "haiku" | "sonnet" } = {}
+  opts: { conversation_id?: string; model?: "haiku" | "sonnet"; signal?: AbortSignal } = {}
 ): Promise<ChatResponse> {
   const qs = opts.model ? `?model=${opts.model}` : "";
   const r = await fetch(`${BACKEND}/chat${qs}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, conversation_id: opts.conversation_id }),
-    signal: AbortSignal.timeout(60000),
+    signal: opts.signal ?? AbortSignal.timeout(60000),
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({ detail: r.statusText }));
@@ -67,19 +67,25 @@ export async function createConversation(title?: string): Promise<ConversationMe
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!r.ok) throw new Error("Failed to create conversation");
   return r.json();
 }
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
-  const r = await fetch(`${BACKEND}/chat/conversations/${id}`);
+  const r = await fetch(`${BACKEND}/chat/conversations/${id}`, {
+    signal: AbortSignal.timeout(30_000),
+  });
   if (!r.ok) throw new Error("Failed to get conversation");
   return r.json();
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  const r = await fetch(`${BACKEND}/chat/conversations/${id}`, { method: "DELETE" });
+  const r = await fetch(`${BACKEND}/chat/conversations/${id}`, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!r.ok) throw new Error("Failed to delete conversation");
 }
 
@@ -87,6 +93,7 @@ export async function fetchAnkiStats() {
   const r = await fetch(`${BACKEND}/widgets/anki`, {
     signal: AbortSignal.timeout(30000),
   });
+  if (!r.ok) throw new Error(`anki stats ${r.status}`);
   return r.json();
 }
 
@@ -181,6 +188,7 @@ export async function fetchAnkiSuggestions(): Promise<{
   const r = await fetch(`${BACKEND}/widgets/anki/suggestions`, {
     signal: AbortSignal.timeout(30000),
   });
+  if (!r.ok) throw new Error(`anki suggestions ${r.status}`);
   return r.json();
 }
 
@@ -224,6 +232,7 @@ export async function fetchIMessages() {
   const r = await fetch(`${BACKEND}/widgets/imessage`, {
     signal: AbortSignal.timeout(30000),
   });
+  if (!r.ok) throw new Error(`imessage ${r.status}`);
   return r.json();
 }
 
@@ -234,6 +243,7 @@ export async function fetchEmails(opts?: { folder?: string; account?: string }) 
   const r = await fetch(url.toString(), {
     signal: AbortSignal.timeout(30000),
   });
+  if (!r.ok) throw new Error(`email ${r.status}`);
   return r.json();
 }
 
@@ -260,6 +270,7 @@ export async function fetchSpotify() {
   const r = await fetch(`${BACKEND}/widgets/spotify`, {
     signal: AbortSignal.timeout(30000),
   });
+  if (!r.ok) throw new Error(`spotify ${r.status}`);
   return r.json();
 }
 
@@ -282,6 +293,17 @@ export async function playSpotifyURI(uri: string) {
     signal: AbortSignal.timeout(10000),
   });
   if (!r.ok) throw new Error(`spotify play ${r.status}`);
+  return r.json().catch(() => ({}));
+}
+
+export async function playSpotifyContext(uri: string) {
+  const r = await fetch(`${BACKEND}/widgets/spotify/play-context`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ context_uri: uri }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) throw new Error(`spotify play-context ${r.status}`);
   return r.json().catch(() => ({}));
 }
 
@@ -317,6 +339,7 @@ export async function fetchCalendar(range?: { start: string; end: string }) {
   const r = await fetch(url.toString(), {
     signal: AbortSignal.timeout(30000),
   });
+  if (!r.ok) throw new Error(`calendar ${r.status}`);
   return r.json();
 }
 
@@ -378,4 +401,36 @@ export async function fetchAuthStatus(): Promise<Record<string, boolean>> {
   } catch {
     return { claude: false, outlook: false, spotify: false, anki: false };
   }
+}
+
+export async function addEmailToCalendar(body: {
+  title: string;
+  start_iso: string;
+  end_iso?: string;
+  location?: string;
+  notes?: string;
+  calendar_name?: string;
+}): Promise<{ ok: boolean; event_id?: string; error?: string }> {
+  const r = await fetch(`${BACKEND}/widgets/email/add-to-calendar`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  return r.json();
+}
+
+export async function fetchSpotifyHome(): Promise<{
+  available: boolean;
+  error?: string;
+  top_tracks?: Array<{ title: string; artist: string; album_art?: string | null; uri?: string | null }>;
+  top_artists?: Array<{ name: string; album_art?: string | null; uri?: string | null }>;
+  recently_played?: Array<{ title: string; artist: string; album_art?: string | null; uri?: string | null }>;
+  playlists?: Array<{ name: string; uri: string; id: string; cover?: string | null }>;
+}> {
+  const r = await fetch(`${BACKEND}/widgets/spotify/home`, {
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) return { available: false, error: r.statusText };
+  return r.json();
 }

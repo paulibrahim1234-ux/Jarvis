@@ -48,7 +48,8 @@ _PHI_MARKER_RE = re.compile(
     r"|\bdiagnosis\b"
     r"|\brotation\b"
     r"|\bpreceptor\b"
-    r"|\bpt\b",
+    r"|\bpt\s+#\d+"
+    r"|\bpt\s+record\b",
     re.IGNORECASE,
 )
 
@@ -76,7 +77,6 @@ def _connect() -> sqlite3.Connection:
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=5.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -84,6 +84,8 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     """Create tables on startup."""
     conn = _connect()
+    # WAL is sticky in the file header — set once at init.
+    conn.execute("PRAGMA journal_mode=WAL")
     try:
         conn.executescript(
             """
@@ -188,7 +190,7 @@ def delete_conversation(cid: str) -> bool:
     conn = _connect()
     try:
         cur = conn.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
+        # CASCADE handles messages
         conn.commit()
         return cur.rowcount > 0
     finally:

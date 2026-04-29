@@ -202,7 +202,7 @@ async def chat_async(
                 c = lu.get("content") or ""
                 last_user = c if isinstance(c, str) else str(c)
         if last_user:
-            asyncio.ensure_future(
+            asyncio.create_task(
                 asyncio.to_thread(memory.extract_facts_async, client, last_user, final_text)
             )
     except Exception:

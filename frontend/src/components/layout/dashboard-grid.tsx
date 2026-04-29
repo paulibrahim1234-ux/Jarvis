@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { Responsive as ResponsiveBase } from "react-grid-layout";
 
 // The published types don't include all runtime props (draggableHandle, etc.)
@@ -55,11 +55,24 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
   const [hiddenWidgets, setHiddenWidgets] = useState<Set<string>>(new Set());
   const [showPanel, setShowPanel] = useState(false);
 
+  const BREAKPOINT_COLS: Record<string, number> = { lg: 12, md: 8, sm: 4 };
+
   // Load saved state on mount
   useEffect(() => {
     const savedLayout = localStorage.getItem(LAYOUT_KEY);
     if (savedLayout) {
-      try { setLayouts(JSON.parse(savedLayout)); } catch { /* keep default */ }
+      try {
+        const parsed: ReactGridLayout.Layouts = JSON.parse(savedLayout);
+        // Sanity-check: if any widget overflows its breakpoint's column count, fall back to default for that breakpoint.
+        const sanitized: ReactGridLayout.Layouts = {};
+        for (const [bp, items] of Object.entries(parsed)) {
+          const cols = BREAKPOINT_COLS[bp] ?? 12;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const hasOverflow = (items as any[]).some((item: any) => (item.x + item.w) > cols);
+          sanitized[bp] = hasOverflow ? DEFAULT_LAYOUT : items;
+        }
+        setLayouts(sanitized);
+      } catch { /* keep default */ }
     }
     const savedHidden = localStorage.getItem(HIDDEN_KEY);
     if (savedHidden) {
@@ -67,7 +80,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     }
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = containerRef.current;
     if (!node) return;
     setWidth(node.getBoundingClientRect().width);

@@ -171,10 +171,18 @@ def run_computer_tool(name: str, inp: dict):
         return _screenshot()
 
     if name == "send_notification":
-        title = inp["title"].replace('"', "'")
-        msg = inp["message"].replace('"', "'")
+        title = inp["title"]
+        msg = inp["message"]
+        # Use positional argv form — avoids string interpolation entirely,
+        # so no escaping of quotes or backslashes is needed.
         subprocess.run(
-            ["osascript", "-e", f'display notification "{msg}" with title "{title}"'],
+            [
+                "osascript",
+                "-e", "on run argv",
+                "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
+                "-e", "end run",
+                "--", msg, title,
+            ],
             timeout=5,
         )
         return {"status": "Notification sent"}
@@ -217,7 +225,7 @@ def run_applescript(script: str) -> dict:
         "do shell script",
         "delete file",
         "eject ",
-        'keystroke "',
+        "keystroke",
     )
     script_lower = script.lower()
     for pattern in _APPLESCRIPT_BLOCKED:
@@ -256,7 +264,45 @@ def _safe_shell(command: str, cwd: str | None = None) -> dict:
             )
         }
 
-    # 4. Execute without a shell — no metachar expansion possible.
+    # 4a. Per-command argument restrictions.
+    cmd = argv[0]
+    args = argv[1:]
+
+    if cmd == "cat":
+        # Only allow reading files inside the user's jarvis directory.
+        # Reject any path referencing sensitive system or home-config locations.
+        _BLOCKED_PATH_FRAGMENTS = (
+            "~", ".ssh", ".aws", ".config", "/etc", "/var", "/private",
+        )
+        _JARVIS_DIR = str(Path(__file__).parent.parent.resolve())
+        for arg in args:
+            if arg.startswith("-"):
+                continue  # allow flags like -n
+            # Resolve to absolute path for comparison.
+            resolved = str(Path(arg).expanduser().resolve())
+            # Reject if the resolved path is outside the jarvis directory.
+            if not resolved.startswith(_JARVIS_DIR):
+                return {"error": f"blocked: cat path outside jarvis dir: {arg!r}"}
+            # Reject if any blocked fragment appears in the raw or resolved path.
+            for frag in _BLOCKED_PATH_FRAGMENTS:
+                if frag in arg or frag in resolved:
+                    return {"error": f"blocked: cat path contains disallowed fragment {frag!r}"}
+
+    if cmd == "curl":
+        # Reject upload/mutation flags — only GET-style requests allowed.
+        _CURL_BLOCKED_FLAGS = {
+            "-X", "--request",
+            "-d", "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+            "-F", "--form",
+            "-T", "--upload-file",
+        }
+        for arg in args:
+            # Handle both "--flag" and "--flag=value" forms.
+            flag = arg.split("=", 1)[0]
+            if flag in _CURL_BLOCKED_FLAGS:
+                return {"error": f"blocked: curl flag not allowed: {flag!r}"}
+
+    # 4b. Execute without a shell — no metachar expansion possible.
     r = subprocess.run(
         argv, shell=False, capture_output=True, text=True,
         timeout=60, cwd=cwd or None,

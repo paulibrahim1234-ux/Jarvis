@@ -122,6 +122,17 @@ BROWSER_TOOLS = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "uworld_scrape_history",
+        "description": (
+            "Scrape UWorld QBank test history from the logged-in browser session "
+            f"({BROWSER_APP}). Reads sessionStorage authInfo from an open UWorld tab, "
+            "calls the gateway-api to fetch completed test records and per-test wrong "
+            "question IDs, and persists results to uworld_history.json. "
+            "User must be logged into UWorld in the browser."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 
@@ -170,7 +181,12 @@ def _chrome_navigate(url: str):
     # indefinitely on complex SPAs like UWorld's courseapp.
     # "open location" returns immediately after dispatching navigation.
     # We call it twice with a 1s pause to ensure Comet focuses the tab.
-    script = f'tell application "{BROWSER_APP}" to open location "{url}"'
+    if not url or '\n' in url or '\r' in url:
+        raise ValueError('invalid URL: contains newlines')
+    if not url.startswith(('http://', 'https://', 'about:', 'chrome://', 'file://')):
+        raise ValueError(f'invalid URL scheme: {url!r}')
+    safe = url.replace('\\', '\\\\').replace('"', '\\"')
+    script = f'tell application "{BROWSER_APP}" to open location "{safe}"'
     subprocess.run(["osascript", "-e", script], timeout=10)
 
 
@@ -194,6 +210,7 @@ def _switch_to_tab_containing(domain: str) -> bool:
     when called from a background thread.
     """
     import tempfile, os as _os
+    domain = domain.replace("\\", "").replace('"', "").replace("'", "")
     script = (
         f'tell application "{BROWSER_APP}"\n'
         f'  repeat with w from 1 to count of windows\n'
@@ -256,23 +273,27 @@ def run_browser_tool(name: str, inp: dict):
         return {"result": result}
 
     if name == "browser_click":
-        sel = inp["selector"].replace('"', '\\"')
+        # json.dumps emits a JS-safe string literal (handles backslash, quotes,
+        # newlines, control chars) — safer than the prior char-replace escape
+        # which left newlines in the selector capable of breaking out of the
+        # JS string literal.
+        sel = json.dumps(inp["selector"])
         result = _chrome_js(
-            f'(function(){{ var el = document.querySelector("{sel}"); '
+            f'(function(){{ var el = document.querySelector({sel}); '
             f'if(!el) return "NOT FOUND"; el.click(); return "clicked"; }})()'
         )
         time.sleep(0.8)
         return {"result": result}
 
     if name == "browser_fill":
-        sel = inp["selector"].replace('"', '\\"')
-        val = inp["value"].replace('"', '\\"')
+        sel = json.dumps(inp["selector"])
+        val = json.dumps(inp["value"])
         result = _chrome_js(
             f'(function(){{'
-            f'  var el = document.querySelector("{sel}");'
+            f'  var el = document.querySelector({sel});'
             f'  if(!el) return "NOT FOUND";'
             f'  el.focus();'
-            f'  el.value = "{val}";'
+            f'  el.value = {val};'
             f'  el.dispatchEvent(new Event("input", {{bubbles:true}}));'
             f'  el.dispatchEvent(new Event("change", {{bubbles:true}}));'
             f'  return "filled";'
@@ -333,11 +354,16 @@ def _fetch_spotify_credentials(app_name: str = "Jarvis") -> dict:
         }
 
     # Look for existing app or create one
-    # Try to find app link
+    # Try to find app link.
+    # Use json.dumps to safely escape app_name into a JS string literal —
+    # otherwise an attacker-controlled name like `"); evil(); //` would
+    # break out of the literal and run arbitrary JavaScript in Comet.
+    needle = json.dumps(app_name.lower())
     existing = _chrome_js(
         f'(function(){{'
         f'  var links = Array.from(document.querySelectorAll("a"));'
-        f'  var app = links.find(l => l.textContent.trim().toLowerCase().includes("{app_name.lower()}"));'
+        f'  var needle = {needle};'
+        f'  var app = links.find(l => l.textContent.trim().toLowerCase().includes(needle));'
         f'  return app ? app.href : "none";'
         f'}})()'
     )
@@ -358,10 +384,11 @@ def _fetch_spotify_credentials(app_name: str = "Jarvis") -> dict:
 
         if "clicked" in create_btn:
             # Fill app name
+            name_lit = json.dumps(app_name)
             _chrome_js(
                 f'(function(){{'
                 f'  var inp = document.querySelector("input[name=\\"name\\"],input#name,input[placeholder*=name]");'
-                f'  if(inp){{ inp.focus(); inp.value="{app_name}"; inp.dispatchEvent(new Event("input",{{bubbles:true}})); }}'
+                f'  if(inp){{ inp.focus(); inp.value={name_lit}; inp.dispatchEvent(new Event("input",{{bubbles:true}})); }}'
                 f'}})()'
             )
             time.sleep(0.5)
@@ -520,7 +547,7 @@ def _uw_find_tab(url_fragment: str) -> tuple[int, int] | None:
     Uses AppleScript written to a temp file for reliability.
     """
     import tempfile, os as _os
-
+    url_fragment = url_fragment.replace("\\", "").replace('"', "").replace("'", "")
     as_script = (
         f'tell application "{BROWSER_APP}"\n'
         f'  repeat with wi from 1 to count of windows\n'
@@ -654,8 +681,8 @@ def _uworld_scrape_history() -> dict:
     UWORLD_APP_BASE = "https://apps.uworld.com/courseapp/usmle/v50/en-US"
     HISTORY_PATH = _Path(__file__).resolve().parent.parent / "storage" / "uworld_history.json"
     _UWORLD_APP_DOMAIN = "apps.uworld.com"
-    COURSE_ID = "14842106"  # User's USMLE Step 2 course ID
-    QBANK_ID = "2"          # Step 2 QBank ID
+    COURSE_ID = os.environ.get("JARVIS_UWORLD_COURSE_ID", "14842106")
+    QBANK_ID = os.environ.get("JARVIS_UWORLD_QBANK_ID", "2")
 
     # How many tests to pull detail for per refresh (env knob, default 10)
     _results_limit = int(os.environ.get("JARVIS_UWORLD_RESULTS_LIMIT", "10"))

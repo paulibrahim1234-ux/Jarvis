@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { BACKEND } from "@/lib/api";
+import { fetchCalendar } from "@/lib/api";
 import { openInApp } from "@/lib/open-apps";
 
 type EventType = "lecture" | "clinical" | "exam" | "meeting" | "personal" | "rotation";
@@ -269,6 +269,7 @@ export function CalendarWidget() {
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [calendarCounts, setCalendarCounts] = useState<Record<string, number>>({});
   const [selectedCal, setSelectedCal] = useState<string>("All");
+  const [expandedEvent, setExpandedEvent] = useState<BucketedEvent | null>(null);
   // Ref tracks whether we have any events loaded — avoids stale-closure reads
   // of `events` state inside the polling useEffect (which has [] deps).
   const hasEventsRef = useRef(false);
@@ -293,10 +294,7 @@ export function CalendarWidget() {
       today0.setHours(0, 0, 0, 0);
 
       try {
-        const r = await fetch(`${BACKEND}/widgets/calendar`, {
-          signal: AbortSignal.timeout(60_000),
-        });
-        const data = await r.json();
+        const data = await fetchCalendar();
         if (!data.available) {
           // Preserve previously-rendered events on a transient backend
           // failure (Calendar.app wedged, AppleScript timeout, etc).
@@ -331,7 +329,10 @@ export function CalendarWidget() {
     load();
     // Calendar AppleScript is heavy; backend caches 90s but polling more
     // often than 5min just heats the cache for no payoff.
-    const id = setInterval(load, 300_000);
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      load();
+    }, 300_000);
     return () => clearInterval(id);
   }, []);
 
@@ -380,14 +381,24 @@ export function CalendarWidget() {
 
   const calendarNames = Object.keys(calendarCounts).sort();
 
+  // ESC closes the inline event modal
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpandedEvent(null);
+    };
+    document.addEventListener("keydown", handleEsc);
+    return () => document.removeEventListener("keydown", handleEsc);
+  }, []);
+
   return (
     <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
       <CardHeader className="p-5 pb-3">
-        <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground flex items-center gap-2 flex-wrap">
+        <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2 flex-wrap">
           Upcoming
           {isLive ? (
             <>
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" title="Live" />
+              <span className="sr-only">live</span>
               <span className="text-[10px] normal-case font-normal text-muted-foreground/60">
                 · {events.length} events · next 30 days
               </span>
@@ -428,12 +439,18 @@ export function CalendarWidget() {
               )}
             </>
           ) : status === "loading" ? (
-            <span className="text-[10px] normal-case font-normal text-muted-foreground/50">loading…</span>
+            <>
+              <span className="text-[10px] normal-case font-normal text-muted-foreground/50">loading…</span>
+              <span className="sr-only">loading</span>
+            </>
           ) : (
-            <span
-              className="h-1.5 w-1.5 rounded-full bg-amber-400 inline-block"
-              title={errorMsg}
-            />
+            <>
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-amber-400 inline-block"
+                title={errorMsg}
+              />
+              <span className="sr-only">error</span>
+            </>
           )}
         </CardTitle>
       </CardHeader>
@@ -456,7 +473,7 @@ export function CalendarWidget() {
           </div>
         )}
         {isLive && events.length > 0 && isLandscape && (
-          <WeekGrid groups={groups} nowIdx={nowIdx} />
+          <WeekGrid groups={groups} nowIdx={nowIdx} onExpandEvent={setExpandedEvent} />
         )}
         {isLive && events.length > 0 && !isLandscape && (
           <ScrollArea className="h-full">
@@ -489,7 +506,7 @@ export function CalendarWidget() {
                     }
                   >
                     {g.events.map((event) => (
-                      <EventRow key={event.bucketKey} event={event} wide={isWide} />
+                      <EventRow key={event.bucketKey} event={event} wide={isWide} onExpand={setExpandedEvent} />
                     ))}
                   </div>
                 </div>
@@ -498,6 +515,36 @@ export function CalendarWidget() {
           </ScrollArea>
         )}
       </CardContent>
+
+      {/* Cmd+click / Shift+click inline event detail modal */}
+      {expandedEvent && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center"
+          onClick={() => setExpandedEvent(null)}
+          onKeyDown={(e) => { if (e.key === "Escape") setExpandedEvent(null); }}
+          tabIndex={-1}
+        >
+          <div
+            className="bg-card border border-white/10 rounded-xl p-5 w-80 max-w-[90vw] space-y-2 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="font-semibold text-sm text-foreground leading-snug">{expandedEvent.title}</p>
+            {expandedEvent.calendar && (
+              <p className="text-[11px] text-muted-foreground/70">{expandedEvent.calendar}</p>
+            )}
+            <p className="text-[11px] text-muted-foreground">{expandedEvent.startLabel}</p>
+            {expandedEvent.location && (
+              <p className="text-[11px] text-muted-foreground truncate">{expandedEvent.location}</p>
+            )}
+            <button
+              className="mt-1 text-[11px] text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+              onClick={() => setExpandedEvent(null)}
+            >
+              Close (ESC)
+            </button>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -508,7 +555,15 @@ export function CalendarWidget() {
 
 const WEEK_DAYS = 7;
 
-function WeekGrid({ groups, nowIdx }: { groups: DayGroup[]; nowIdx: number }) {
+function WeekGrid({
+  groups,
+  nowIdx,
+  onExpandEvent,
+}: {
+  groups: DayGroup[];
+  nowIdx: number;
+  onExpandEvent?: (ev: BucketedEvent) => void;
+}) {
   // Take the slice of groups that are today-or-later, up to 7 days.
   const startSlice = nowIdx >= 0 ? nowIdx : 0;
   const slice = groups.slice(startSlice, startSlice + WEEK_DAYS);
@@ -565,7 +620,7 @@ function WeekGrid({ groups, nowIdx }: { groups: DayGroup[]; nowIdx: number }) {
                 <div className="text-[9px] text-muted-foreground/30 text-center pt-2">—</div>
               ) : (
                 col.events.map((ev) => (
-                  <WeekEventChip key={ev.bucketKey} event={ev} />
+                  <WeekEventChip key={ev.bucketKey} event={ev} onExpand={onExpandEvent} />
                 ))
               )}
             </div>
@@ -576,11 +631,21 @@ function WeekGrid({ groups, nowIdx }: { groups: DayGroup[]; nowIdx: number }) {
   );
 }
 
-function WeekEventChip({ event }: { event: BucketedEvent }) {
+function WeekEventChip({
+  event,
+  onExpand,
+}: {
+  event: BucketedEvent;
+  onExpand?: (ev: BucketedEvent) => void;
+}) {
   const typeCls = typeColors[event.type];
   const timeLabel = event.ongoing ? "all-day" : event.startLabel;
 
-  const handleClick = async () => {
+  const handleClick = async (e: React.MouseEvent) => {
+    if (e.metaKey || e.shiftKey) {
+      onExpand?.(event);
+      return;
+    }
     try {
       await openInApp({
         app: "outlook-calendar",
@@ -594,7 +659,10 @@ function WeekEventChip({ event }: { event: BucketedEvent }) {
 
   return (
     <div
+      role="button"
+      tabIndex={0}
       onClick={handleClick}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
       className={`cursor-pointer rounded px-1.5 py-1 text-[10px] leading-snug hover:bg-white/10 transition-colors ${typeCls} bg-transparent`}
     >
       <div className="font-medium truncate">{event.title}</div>
@@ -605,7 +673,15 @@ function WeekEventChip({ event }: { event: BucketedEvent }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function EventRow({ event, wide }: { event: BucketedEvent; wide: boolean }) {
+function EventRow({
+  event,
+  wide,
+  onExpand,
+}: {
+  event: BucketedEvent;
+  wide: boolean;
+  onExpand?: (ev: BucketedEvent) => void;
+}) {
   const calCls = calendarColor(event.calendar);
   const typeCls = typeColors[event.type];
 
@@ -618,7 +694,11 @@ function EventRow({ event, wide }: { event: BucketedEvent; wide: boolean }) {
   // start time that doesn't apply to this particular day.
   const timeLabel = event.ongoing ? "all-day" : event.startLabel;
 
-  const handleClick = async () => {
+  const handleClick = async (e: React.MouseEvent) => {
+    if (e.metaKey || e.shiftKey) {
+      onExpand?.(event);
+      return;
+    }
     // Per HIPAA boundary: do not log event title or sensitive data
     try {
       await openInApp({
@@ -634,7 +714,10 @@ function EventRow({ event, wide }: { event: BucketedEvent; wide: boolean }) {
   if (wide) {
     return (
       <div
+        role="button"
+        tabIndex={0}
         onClick={handleClick}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
         className="cursor-pointer rounded-lg border border-white/5 bg-white/[0.02] p-3 hover:bg-white/10 transition-colors"
       >
         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
@@ -665,7 +748,10 @@ function EventRow({ event, wide }: { event: BucketedEvent; wide: boolean }) {
 
   return (
     <div
+      role="button"
+      tabIndex={0}
       onClick={handleClick}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
       className="cursor-pointer flex items-start gap-3 rounded-lg px-3 py-2 hover:bg-white/10 transition-colors"
     >
       <div className="min-w-[68px] pt-0.5 font-mono text-xs text-muted-foreground">

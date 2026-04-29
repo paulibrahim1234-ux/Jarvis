@@ -22,7 +22,10 @@ import {
 type ThreadMessage = {
   text: string;
   time: string;
+  time_iso?: string | null;
+  epoch_ms?: number | null;
   isFromMe: boolean;
+  sender?: string | null;
 };
 
 type Conversation = {
@@ -73,6 +76,7 @@ export function IMessageWidget() {
   const contentRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [convos, setConvos] = useState<Conversation[]>([]);
+  const [loading, setLoading] = useState(true);
   const [totalUnread, setTotalUnread] = useState(0);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [live, setLive] = useState(false);
@@ -106,6 +110,7 @@ export function IMessageWidget() {
           if (!alive) return;
           if (!data.available) {
             setStatusMsg(data.error ?? "iMessage not connected");
+            setLoading(false);
             return;
           }
           let incoming = data.conversations ?? [];
@@ -128,6 +133,7 @@ export function IMessageWidget() {
             });
           }
           setConvos(incoming);
+          setLoading(false);
           setTotalUnread(
             allowlist.size > 0
               ? incoming.reduce((s, c) => s + c.unread_count, 0)
@@ -140,10 +146,18 @@ export function IMessageWidget() {
               : null,
           );
         })
-        .catch(() => alive && setStatusMsg("Backend offline"));
+        .catch(() => {
+          if (alive) {
+            setStatusMsg("Backend offline");
+            setLoading(false);
+          }
+        });
     };
     load();
-    const t = setInterval(load, 60_000);
+    const t = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      load();
+    }, 60_000);
     return () => {
       alive = false;
       clearInterval(t);
@@ -177,15 +191,23 @@ export function IMessageWidget() {
   return (
     <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
       <CardHeader className="p-5 pb-3 flex-row items-center justify-between space-y-0">
-        <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+        <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2">
           Messages
           {live ? (
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" title="Live data" />
+            <>
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" title="Live data" />
+              <span className="sr-only">live</span>
+            </>
           ) : statusMsg ? (
-            <span className="text-[10px] normal-case font-normal text-muted-foreground/50" title={statusMsg}>
-              {statusMsg.includes("Full Disk") ? "no FDA" : "offline"}
-            </span>
-          ) : null}
+            <>
+              <span className="text-[10px] normal-case font-normal text-muted-foreground/50" title={statusMsg}>
+                {statusMsg.includes("Full Disk") ? "no FDA" : "offline"}
+              </span>
+              <span className="sr-only">error</span>
+            </>
+          ) : (
+            <span className="sr-only">loading</span>
+          )}
         </CardTitle>
         {totalUnread > 0 && !expandedConvo && (
           <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-200">
@@ -214,6 +236,7 @@ export function IMessageWidget() {
               isWide={isWide}
               statusMsg={statusMsg}
               hasAny={convos.length > 0}
+              loading={loading}
             />
           )}
         </ScrollArea>
@@ -229,6 +252,7 @@ function ConversationList({
   isWide,
   statusMsg,
   hasAny,
+  loading,
 }: {
   unread: Conversation[];
   read: Conversation[];
@@ -236,7 +260,23 @@ function ConversationList({
   isWide: boolean;
   statusMsg: string | null;
   hasAny: boolean;
+  loading: boolean;
 }) {
+  if (loading && !hasAny) {
+    return (
+      <div className="space-y-2 pt-2 animate-pulse">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="flex items-center gap-3 py-2 px-2">
+            <div className={`rounded-full bg-white/[0.07] flex-shrink-0 ${isWide ? "h-10 w-10" : "h-8 w-8"}`} />
+            <div className="flex-1 space-y-1.5">
+              <div className="h-2.5 w-1/2 rounded bg-white/[0.06]" />
+              <div className="h-2 w-3/4 rounded bg-white/[0.04]" />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
   if (!hasAny) {
     return (
       <div className="py-8 text-center text-xs text-muted-foreground">
@@ -279,10 +319,12 @@ function ConversationRow({
     // For group chats, don't include phone in context so Case 2 (chat_id path) is reached
     const context = convo.is_group
       ? {
+          is_group: true,
           chat_id: convo.chat_id,
           display_name: convo.contact,
         }
       : {
+          is_group: false,
           phone: convo.handle,
           chat_id: convo.chat_id,
           display_name: convo.contact,
@@ -312,7 +354,7 @@ function ConversationRow({
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") handleOpenInMessages(e as unknown as React.MouseEvent);
       }}
-      className="w-full flex items-center gap-3 py-2 px-2 rounded-lg text-left hover:bg-white/5 transition-colors cursor-pointer"
+      className="w-full flex items-center gap-3 py-2.5 px-2 rounded-lg text-left hover:bg-white/5 transition-colors cursor-pointer border-b border-white/[0.04] last:border-0"
     >
       <Avatar className={isWide ? "h-10 w-10 flex-shrink-0" : "h-8 w-8 flex-shrink-0"}>
         <AvatarFallback className={`${avatarClass(convo.contact)} text-sm font-semibold`}>
@@ -364,7 +406,70 @@ function ConversationRow({
   );
 }
 
+/** Format a day label for a thread divider pill. */
+function dayLabel(epochMs: number): string {
+  const d = new Date(epochMs);
+  const today = new Date();
+  const todayStr = today.toDateString();
+  const dStr = d.toDateString();
+  if (dStr === todayStr) return "Today";
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (dStr === yesterday.toDateString()) return "Yesterday";
+  const diffDays = Math.round((today.getTime() - d.getTime()) / 86_400_000);
+  if (diffDays < 7) return d.toLocaleDateString("en-US", { weekday: "long" });
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 function ThreadView({ convo, isWide }: { convo: Conversation; isWide: boolean }) {
+  // Build groups with real epoch-based 60s window grouping.
+  const { groups, dayDividers } = useMemo(() => {
+    type Group = {
+      isFromMe: boolean;
+      messages: ThreadMessage[];
+      firstSender: string | null;
+    };
+    const result: Group[] = [];
+    // Map from group index → day-label to show BEFORE that group
+    const dividerBefore: Map<number, string> = new Map();
+
+    convo.messages.forEach((m, idx) => {
+      const prevMsg = idx > 0 ? convo.messages[idx - 1] : null;
+
+      // Day divider: check if this message crossed midnight from the previous one
+      if (prevMsg && m.epoch_ms && prevMsg.epoch_ms) {
+        const prevDate = new Date(prevMsg.epoch_ms).toDateString();
+        const currDate = new Date(m.epoch_ms).toDateString();
+        if (prevDate !== currDate) {
+          // Insert divider before the new group we're about to create
+          dividerBefore.set(result.length, dayLabel(m.epoch_ms));
+        }
+      }
+
+      // Group condition: same sender AND within 60s of previous message in group
+      const last = result[result.length - 1];
+      const lastMsg = last?.messages[last.messages.length - 1];
+      const sameDir = last && last.isFromMe === m.isFromMe;
+      const withinWindow =
+        sameDir &&
+        m.epoch_ms != null &&
+        lastMsg?.epoch_ms != null &&
+        Math.abs(m.epoch_ms - lastMsg.epoch_ms) < 60_000;
+
+      if (withinWindow) {
+        last.messages.push(m);
+      } else {
+        result.push({
+          isFromMe: m.isFromMe,
+          messages: [m],
+          firstSender: m.sender ?? null,
+        });
+      }
+    });
+
+    return { groups: result, dayDividers: dividerBefore };
+  }, [convo.messages]);
+
   return (
     <div className="pt-2 space-y-3">
       <div className="flex items-center gap-3 pb-3 border-b border-white/5">
@@ -383,32 +488,62 @@ function ThreadView({ convo, isWide }: { convo: Conversation; isWide: boolean })
         </div>
       </div>
 
-      <div className={isWide ? "space-y-3" : "space-y-2"}>
-        {convo.messages.map((m, idx) => (
-          <div
-            key={`${m.time}-${idx}`}
-            className={`flex ${m.isFromMe ? "justify-end" : "justify-start"}`}
-          >
-            <div className={`${isWide ? "max-w-[75%]" : "max-w-[80%]"} space-y-1`}>
-              <div
-                className={`rounded-2xl ${isWide ? "px-3.5 py-2 text-sm" : "px-3 py-1.5 text-xs"} ${
-                  m.isFromMe
-                    ? "rounded-br-md bg-blue-600 text-white"
-                    : "rounded-bl-md bg-white/5 text-foreground"
-                }`}
-              >
-                {m.text}
-              </div>
-              <div
-                className={`text-muted-foreground/40 ${m.isFromMe ? "text-right" : ""} ${
-                  isWide ? "text-[10px]" : "text-[9px]"
-                }`}
-              >
-                {m.time}
+      <div className="space-y-2">
+        {groups.map((group, gi) => {
+          const dividerLabel = dayDividers.get(gi);
+          return (
+            <div key={`group-${gi}`}>
+              {dividerLabel && (
+                <div className="text-[10px] text-muted-foreground/50 text-center py-1.5 flex items-center gap-2">
+                  <span className="flex-1 border-t border-white/5" />
+                  <span className="px-2 py-0.5 rounded-full bg-white/[0.04] border border-white/[0.06]">
+                    {dividerLabel}
+                  </span>
+                  <span className="flex-1 border-t border-white/5" />
+                </div>
+              )}
+
+              {/* Sender label for group chats — only first bubble in each group */}
+              {convo.is_group && !group.isFromMe && group.firstSender && (
+                <div className={`text-[10px] text-muted-foreground/50 mb-0.5 ${isWide ? "ml-1" : "ml-0.5"}`}>
+                  {group.firstSender}
+                </div>
+              )}
+
+              <div className={`flex flex-col ${group.isFromMe ? "items-end" : "items-start"} gap-0.5`}>
+                {group.messages.map((m, mi) => {
+                  const isLast = mi === group.messages.length - 1;
+                  const bubbleCls = group.isFromMe
+                    ? isLast
+                      ? "rounded-[18px] rounded-br-[4px] bg-gradient-to-b from-[#0b93f6] to-[#0a7ce0] text-white"
+                      : "rounded-[18px] bg-gradient-to-b from-[#0b93f6] to-[#0a7ce0] text-white"
+                    : isLast
+                      ? "rounded-[18px] rounded-bl-[4px] bg-white/5 text-foreground"
+                      : "rounded-[18px] bg-white/5 text-foreground";
+                  return (
+                    <div
+                      key={`${m.epoch_ms ?? m.time}-${mi}`}
+                      className={`group/bubble ${isWide ? "max-w-[75%]" : "max-w-[80%]"}`}
+                    >
+                      <div className={`${bubbleCls} ${isWide ? "px-3.5 py-2 text-sm" : "px-3 py-1.5 text-xs"}`}>
+                        {m.text}
+                      </div>
+                      {isLast && (
+                        <div
+                          className={`opacity-0 group-hover/bubble:opacity-100 transition-opacity text-muted-foreground/40 ${group.isFromMe ? "text-right" : ""} ${
+                            isWide ? "text-[10px]" : "text-[9px]"
+                          } mt-0.5`}
+                        >
+                          {m.time}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

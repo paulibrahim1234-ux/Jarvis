@@ -95,6 +95,7 @@ export function PomodoroWidget() {
     if (state !== "running" && state !== "break") return;
 
     const interval = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       setSecondsLeft((prev) => {
         if (prev <= 1) {
           if (state === "running") {
@@ -196,7 +197,7 @@ export function PomodoroWidget() {
   return (
     <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
       <CardHeader className="p-5 pb-3">
-        <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
           Pomodoro
         </CardTitle>
       </CardHeader>
@@ -248,7 +249,7 @@ export function PomodoroWidget() {
             >
               {timeDisplay}
             </span>
-            <span className="mt-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <span className="mt-1 text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
               {stateLabel}
             </span>
           </div>

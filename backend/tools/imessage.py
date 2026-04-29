@@ -182,24 +182,33 @@ def get_conversations(
             else f"c.style = {STYLE_DM}"
         )
 
-        # Step 1: most-recent-message timestamp per chat
+        # Step 1: most-recent-message timestamp per chat (index-driven CTE).
+        # Replaces the old GROUP BY full-scan (~1000ms) with a top-N scan on
+        # the message.date index followed by a small aggregation (~12ms).
         chat_rows = conn.execute(
             f"""
-            SELECT
-                c.ROWID                              AS chat_id,
-                c.style                              AS style,
-                c.display_name                       AS display_name,
-                c.chat_identifier                    AS chat_identifier,
-                c.last_read_message_timestamp        AS last_read_ts,
-                MAX(m.date)                          AS last_date
-            FROM chat c
-            JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
-            JOIN message m             ON m.ROWID    = cmj.message_id
+            WITH recent_msgs AS (
+                SELECT m.date AS d, cmj.chat_id
+                FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE m.text IS NOT NULL AND m.text != ''
+                ORDER BY m.date DESC
+                LIMIT 8000
+            ),
+            chat_max AS (
+                SELECT chat_id, MAX(d) AS last_date
+                FROM recent_msgs GROUP BY chat_id
+            )
+            SELECT c.ROWID                         AS chat_id,
+                   c.style                         AS style,
+                   c.display_name                  AS display_name,
+                   c.chat_identifier               AS chat_identifier,
+                   c.last_read_message_timestamp   AS last_read_ts,
+                   cm.last_date                    AS last_date
+            FROM chat_max cm
+            JOIN chat c ON c.ROWID = cm.chat_id
             WHERE {style_filter}
-              AND m.text IS NOT NULL
-              AND m.text != ''
-            GROUP BY c.ROWID
-            ORDER BY last_date DESC
+            ORDER BY cm.last_date DESC
             LIMIT ?
             """,
             # Over-fetch x3 so we can safely collapse duplicate handles
@@ -247,9 +256,10 @@ def get_conversations(
             seen_contacts.add(dedup_key)
 
             # Step 2: recent messages in this chat, newest first
+            # Include handle_id so we can resolve sender names in group chats.
             msg_rows = conn.execute(
                 """
-                SELECT m.text, m.is_from_me, m.date
+                SELECT m.text, m.is_from_me, m.date, m.handle_id
                 FROM message m
                 JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
                 WHERE cmj.chat_id = ?
@@ -282,14 +292,35 @@ def get_conversations(
             newest = msg_rows[0]
             newest_dt = _mac_ns_to_dt(newest["date"])
 
+            # Build handle_id → display name map for group chats (one query).
+            sender_names: dict[int, str] = {}
+            if is_group:
+                handle_id_list = list({mr["handle_id"] for mr in msg_rows if mr["handle_id"]})
+                if handle_id_list:
+                    placeholders2 = ",".join("?" for _ in handle_id_list)
+                    handle_rows = conn.execute(
+                        f"SELECT ROWID, id FROM handle WHERE ROWID IN ({placeholders2})",
+                        handle_id_list,
+                    ).fetchall()
+                    for hr in handle_rows:
+                        sender_names[hr["ROWID"]] = _format_phone(hr["id"])
+
             messages = []
             for mr in reversed(msg_rows):  # oldest → newest for UI
                 dt = _mac_ns_to_dt(mr["date"])
+                epoch_ms = int(mr["date"] / 1e6 + MAC_EPOCH_OFFSET * 1000) if mr["date"] else None
+                # Sender name: only meaningful for group chats on incoming msgs.
+                sender: str | None = None
+                if is_group and not mr["is_from_me"] and mr["handle_id"]:
+                    raw_sender = sender_names.get(mr["handle_id"], "")
+                    sender = raw_sender if raw_sender else None
                 messages.append({
                     "text": _scrub(mr["text"]),
                     "time": _fmt_time_in_thread(dt),
                     "time_iso": dt.isoformat() if dt else None,
+                    "epoch_ms": epoch_ms,
                     "isFromMe": bool(mr["is_from_me"]),
+                    "sender": sender,
                 })
 
             result.append({

@@ -81,6 +81,14 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
   const groups = groupBySystem(sessionWrong);
   const hasData = session.test_id && sessionWrong.length > 0;
 
+  // UWorld deep-link: use test results overview (no seq segment).
+  // The /seq form (e.g. /results/{course}/{test_id}/0) only shows the
+  // loading spinner because seq=0 doesn't resolve to a real question.
+  // Dropping the segment lands on the test overview page correctly.
+  const testResultsUrl = session.test_id
+    ? `https://apps.uworld.com/courseapp/usmle/v50/en-US/performance/test/results/${COURSE_ID}/${session.test_id}`
+    : null;
+
   const handleAnkiSuggest = async () => {
     setAnkiLoading(true);
     setAnkiMsg(null);
@@ -156,41 +164,39 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
         <>
           {/* Wrong questions grouped by system */}
           <div className="space-y-3">
-            {groups.map((g) => {
-              // Build a UWorld results link using the first question's test_seq
-              const firstSeq = g.questions[0]?.test_seq;
-              const uworldUrl = firstSeq != null
-                ? `https://apps.uworld.com/courseapp/usmle/v50/en-US/performance/test/results/${COURSE_ID}/${session.test_id}/${firstSeq}`
-                : `https://apps.uworld.com/courseapp/usmle/v50/en-US/performance/test/results/${COURSE_ID}/${session.test_id}/1`;
-
-              return (
-                <div key={g.system}>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-medium text-foreground/80 uppercase tracking-wide text-[10px]">
-                      {g.system}
-                    </span>
+            {groups.map((g) => (
+              <div key={g.system}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-medium text-foreground/80 uppercase tracking-wide text-[10px]">
+                    {g.system}
+                  </span>
+                  {testResultsUrl && (
                     <a
-                      href={uworldUrl}
+                      href={testResultsUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="text-[10px] text-blue-400/80 hover:text-blue-400 transition-colors"
+                      title="Opens test results overview — navigate to individual questions there"
                     >
                       Open in UWorld ↗
                     </a>
-                  </div>
-                  <div className="space-y-0.5 pl-1">
-                    {g.questions.map((q) => (
-                      <div key={q.uworld_qid} className="flex items-center gap-2">
-                        <span className="text-foreground/80">{q.uworld_topic_name || q.uworld_topic}</span>
-                        <span className="text-muted-foreground/40 font-mono text-[10px] shrink-0">
-                          #{q.uworld_qid}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+                  )}
                 </div>
-              );
-            })}
+                <div className="space-y-0.5 pl-1">
+                  {g.questions.map((q) => (
+                    <div
+                      key={q.uworld_qid}
+                      className="flex items-center gap-2"
+                    >
+                      <span className="text-foreground/80">{q.uworld_topic_name || q.uworld_topic}</span>
+                      <span className="text-muted-foreground/40 font-mono text-[10px] shrink-0">
+                        #{q.uworld_qid}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
 
           {/* Anki suggestions button */}
@@ -311,7 +317,7 @@ function WeakTopicsSection({ topics }: { topics: UWorldWeakTopic[] }) {
   if (topics.length === 0) return null;
   return (
     <div className="mt-4 space-y-3 border-t border-white/5 pt-4">
-      <h4 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+      <h4 className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
         Weak Topics
       </h4>
       {topics.map((t) => (
@@ -352,7 +358,7 @@ export function UWorldWidget() {
   const handleLaunchUWorld = async () => {
     setLaunching(true);
     try {
-      await openInApp({ app: "uworld", ref: "" });
+      await openInApp({ app: "uworld", ref: "dashboard" });
     } catch (error) {
       console.error("Failed to launch UWorld:", error);
     } finally {
@@ -419,7 +425,7 @@ export function UWorldWidget() {
     <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
       <CardHeader className="p-5 pb-3 flex flex-row items-center justify-between">
         <div className="flex items-center gap-2">
-          <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
             QBank
           </CardTitle>
           {dataSource === "stub" && (

@@ -1,6 +1,13 @@
 """
 Jarvis backend — FastAPI entry point.
-Run: cd backend && source .venv/bin/activate && uvicorn main:app --reload
+
+Production: cd backend && .venv/bin/python3 main.py
+Dev (hot-reload): cd backend && JARVIS_DEV=1 .venv/bin/python3 main.py
+  OR:             cd backend && .venv/bin/python3 -m uvicorn main:app --reload --port 8000
+
+IMPORTANT: Backend has NO hot-reload in production mode.
+After editing any backend .py file, restart with:
+  kill <pid>  (or Ctrl-C) then re-run.
 """
 
 import asyncio
@@ -42,7 +49,7 @@ def _run_warmup():
         import concurrent.futures
 
         tasks = [
-            ("calendar",      90,   _compute_calendar,         _SEM_CALENDAR),
+            ("calendar",      600,  _compute_calendar,         _SEM_CALENDAR),
             ("email::::",     60,   lambda: _compute_email(),  _SEM_EMAIL),
             ("email_folders", 300,  _compute_email_folders,    _SEM_EMAIL_FOLDERS),
             ("study_streak",  1800, _compute_study_streak_days, _SEM_STUDY_STREAK),
@@ -157,3 +164,15 @@ async def health():
         "outlook": outlook_ok,
         "spotify": spotify_ok,
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    dev_mode = os.getenv("JARVIS_DEV", "").strip() in ("1", "true", "yes")
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=dev_mode,
+        reload_dirs=["./"] if dev_mode else None,
+    )

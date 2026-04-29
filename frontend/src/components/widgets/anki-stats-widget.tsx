@@ -209,15 +209,18 @@ export function AnkiStatsWidget() {
 
   // Live indicator dot + label
   const LiveDot = () => {
-    if (liveStatus === "loading") return null;
+    if (liveStatus === "loading") return <span className="sr-only">loading</span>;
     if (liveStatus === "live") {
       const hasActivity = due > 0 || reviewedToday > 0;
       if (hasActivity) {
         return (
-          <span
-            className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block"
-            title="Live data"
-          />
+          <>
+            <span
+              className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block"
+              title="Live data"
+            />
+            <span className="sr-only">live</span>
+          </>
         );
       }
       return (
@@ -229,6 +232,7 @@ export function AnkiStatsWidget() {
           <span className="text-[10px] normal-case font-normal text-muted-foreground/60">
             no recent activity
           </span>
+          <span className="sr-only">loading</span>
         </>
       );
     }
@@ -242,6 +246,7 @@ export function AnkiStatsWidget() {
           <span className="text-[10px] normal-case font-normal text-muted-foreground/60">
             closed
           </span>
+          <span className="sr-only">loading</span>
         </>
       );
     }
@@ -255,6 +260,7 @@ export function AnkiStatsWidget() {
         <span className="text-[10px] normal-case font-normal text-muted-foreground/60">
           not reachable
         </span>
+        <span className="sr-only">error</span>
       </>
     );
   };
@@ -262,7 +268,7 @@ export function AnkiStatsWidget() {
   return (
     <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
       <CardHeader className="p-5 pb-2">
-        <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+        <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2">
           Anki
           <LiveDot />
         </CardTitle>

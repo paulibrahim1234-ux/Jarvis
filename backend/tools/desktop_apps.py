@@ -7,8 +7,27 @@ Covers: Microsoft Outlook, Spotify, Apple Calendar, Messages
 """
 
 import json
+import os
+import sqlite3
 import subprocess
 import time
+import urllib.parse
+
+
+def _as_str(value: str) -> str:
+    """Escape a Python string for safe inclusion inside an AppleScript "..." literal.
+
+    Order matters: backslash MUST be escaped first, otherwise `\\"` would be
+    re-escaped as `\\\\"` and an attacker-controlled trailing backslash could
+    close the string literal early (the original injection vector).
+    """
+    return (
+        (value or "")
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
 
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
@@ -300,8 +319,9 @@ def _fetch_outlook_account_inbox(
     # means "default inbox"; any other name does a case-insensitive match
     # against top-level mail folders of the account.
     if folder_name:
-        # Escape any quotes in the user-supplied folder name.
-        safe = folder_name.replace('"', '\\"')
+        # Escape user-supplied folder name for safe inclusion in an
+        # AppleScript "..." literal (backslash, quote, newline, CR).
+        safe = _as_str(folder_name)
         resolve_target = (
             f'set targetFolderName to "{safe}"\n'
             '    set targetInbox to missing value\n'
@@ -569,6 +589,8 @@ def _outlook_inbox(
         folder: optional folder name (e.g. "Rowan class of 2027"). Empty = Inbox.
         account: optional account name OR email to restrict to a single account.
     """
+    import concurrent.futures
+
     counts = _count_outlook_accounts()
     total_accounts = sum(counts.get(k, 0) for k in ("exchange", "imap", "pop"))
     if total_accounts == 0:
@@ -576,14 +598,33 @@ def _outlook_inbox(
         return {"error": err, "emails": []}
 
     per_account = max(limit, 10)  # over-fetch so merge picks the freshest
-    all_emails: list[dict] = []
-    accounts_seen: list[dict] = []
     acct_filter = (account or "").strip().lower()
 
+    # Build list of (acct_type, idx) jobs.
+    jobs: list[tuple[str, int]] = []
     for acct_type in ("exchange", "imap", "pop"):
         n = counts.get(acct_type, 0)
         for idx in range(1, n + 1):
-            result = _fetch_outlook_account_inbox(acct_type, idx, per_account, folder_name=folder)
+            jobs.append((acct_type, idx))
+
+    def _fetch_job(job: tuple[str, int]):
+        acct_type, idx = job
+        try:
+            return _fetch_outlook_account_inbox(acct_type, idx, per_account, folder_name=folder)
+        except Exception:
+            return {"error": "exception", "emails": []}
+
+    all_emails: list[dict] = []
+    accounts_seen: list[dict] = []
+
+    max_workers = min(len(jobs) or 1, 4)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_job = {pool.submit(_fetch_job, job): job for job in jobs}
+        for fut in concurrent.futures.as_completed(future_to_job):
+            try:
+                result = fut.result()
+            except Exception:
+                continue
             if result.get("error"):
                 continue
             # Filter by account name/email if requested.
@@ -592,6 +633,7 @@ def _outlook_inbox(
                 email_l = (result.get("account_email", "") or "").lower()
                 if acct_filter not in name_l and acct_filter not in email_l:
                     continue
+            acct_type, _ = future_to_job[fut]
             accounts_seen.append({
                 "type": acct_type,
                 "name": result.get("account", ""),
@@ -660,10 +702,10 @@ end tell
 
 
 def _outlook_send(to: str, subject: str, body: str) -> dict:
-    # Escape for AppleScript
-    to_s = to.replace('"', '\\"')
-    subj_s = subject.replace('"', '\\"')
-    body_s = body.replace('"', '\\"').replace("\n", "\\n")
+    # Escape for AppleScript (handles backslash, quote, newline, CR).
+    to_s = _as_str(to)
+    subj_s = _as_str(subject)
+    body_s = _as_str(body)
     script = f"""
 tell application "Microsoft Outlook"
     set newMsg to make new outgoing message with properties {{subject:"{subj_s}", plain text content:"{body_s}"}}
@@ -687,7 +729,7 @@ def _outlook_search_inbox(query: str, max_results: int = 10) -> dict:
     q = (query or "").strip().lower()
     if not q:
         return {"messages": [], "error": "empty query"}
-    q_s = q.replace('"', '\\"')
+    q_s = _as_str(q)
     script = f"""
 tell application "Microsoft Outlook"
     set q to "{q_s}"
@@ -761,8 +803,11 @@ def _outlook_read_email(message_id: str = "", subject_query: str = "") -> dict:
     """
     if not message_id and not subject_query:
         return {"error": "Provide message_id or subject_query"}
+    # message_id is gated on isdigit() below — drop quotes; isdigit() will
+    # reject any other character anyway. subject_query goes into a literal
+    # so use the full _as_str escape.
     safe_id = (message_id or "").replace('"', '').strip()
-    safe_q = (subject_query or "").replace('"', '\\"').strip()
+    safe_q = _as_str((subject_query or "").strip())
     if safe_id and safe_id.isdigit():
         finder = f"set m to first message of inbox of acct whose id is {safe_id}"
     elif safe_q:
@@ -867,10 +912,10 @@ def _calendar_create_event(
             return {"error": f"bad end_iso: {e}"}
     else:
         edt = sdt + _dt.timedelta(minutes=60)
-    title_s = title.replace('"', '\\"')
-    cal_s = calendar_name.replace('"', '\\"')
-    loc_s = (location or "").replace('"', '\\"')
-    notes_s = (notes or "").replace('"', '\\"').replace("\n", "\\n")
+    title_s = _as_str(title)
+    cal_s = _as_str(calendar_name)
+    loc_s = _as_str(location or "")
+    notes_s = _as_str(notes or "")
     # AppleScript constructs date by component to avoid locale ambiguity.
     s = (sdt.year, sdt.month, sdt.day, sdt.hour, sdt.minute)
     e = (edt.year, edt.month, edt.day, edt.hour, edt.minute)
@@ -966,9 +1011,16 @@ end tell
 
 def _spotify_play_uri(uri: str) -> dict:
     """Play a Spotify URI (spotify:track:..., spotify:playlist:..., spotify:album:...)."""
-    safe = (uri or "").replace('"', '').strip()
-    if not safe:
+    raw = (uri or "").strip()
+    if not raw:
         return {"error": "Empty URI"}
+    # Spotify URIs are alphanumeric-only after the colons. Reject anything
+    # else outright so an attacker can't smuggle quotes/backslashes/newlines
+    # into the AppleScript literal even if _as_str escapes them.
+    import re as _re
+    if not _re.match(r"^(spotify:[a-zA-Z]+:[A-Za-z0-9]+|https?://[A-Za-z0-9./_:?=&-]+)$", raw):
+        return {"error": "Invalid Spotify URI"}
+    safe = _as_str(raw)
     result = _osascript(f'tell application "Spotify" to play track "{safe}"')
     if "error" in result:
         return result
@@ -1222,8 +1274,11 @@ def _clean_event_title(title: str) -> str:
 # ── Messages ──────────────────────────────────────────────────────────────────
 
 def _messages_send(to: str, message: str) -> dict:
-    msg_escaped = message.replace('"', '\\"').replace("\\", "\\\\")
-    to_escaped = to.replace('"', '\\"')
+    # Use the centralized escape — original code had broken order
+    # (escaped quote, then escaped backslash, which double-escaped the
+    # already-escaped quote and let `\` close the string literal early).
+    msg_escaped = _as_str(message)
+    to_escaped = _as_str(to)
     script = f"""
 tell application "Messages"
     try
@@ -1278,7 +1333,7 @@ def _messages_recent(contact: str, limit: int = 20) -> dict:
             {
                 "text": row[0],
                 "from_me": bool(row[1]),
-                "time": datetime.utcfromtimestamp(row[2]).strftime("%Y-%m-%d %H:%M"),
+                "time": datetime.fromtimestamp(row[2]).strftime("%Y-%m-%d %H:%M"),
             }
             for row in reversed(rows)
         ]
@@ -1371,41 +1426,75 @@ end tell
 def open_messages_chat(phone: str = "", context: dict = None) -> dict:
     """Open Messages and initiate a chat with the given phone/handle or group chat ID.
 
-    Handles three cases:
-      1. context.phone available (1:1 chat) → open imessage://<phone>
-      2. context.chat_id available (group chat) → open Messages and try to select by chat_id
-      3. Neither → just open Messages app
+    Three-tier routing:
+      1. 1:1 chats (phone/email handle): try imessage://<URL-encoded handle>.
+         On failure, fall back to AppleScript buddy lookup (handles iCloud email handles
+         and non-ASCII characters that the URL scheme can't open directly).
+      2. Group chats (chat_id only): try AppleScript `chat id` lookup; on failure,
+         query ~/Library/Messages/chat.db for the chat GUID and open imessage://<guid>.
+      3. Neither — just open Messages.app.
 
     Args:
         phone: phone/handle for 1:1 chats (legacy; prefer context.phone)
         context: dict with optional keys:
                  - phone: phone number or email handle
                  - chat_id: iMessage chat database ID (for group chats)
+                 - is_group: bool hint (group path skips phone lookup even if phone present)
     """
     context = context or {}
 
     # Prefer context.phone over the legacy phone parameter
     phone_to_use = context.get("phone") or phone
     chat_id = context.get("chat_id")
+    is_group = context.get("is_group", False)
 
-    # Case 1: phone/handle available (1:1 chat)
-    if phone_to_use and phone_to_use.strip():
+    # Case 1: phone/handle available for a 1:1 chat
+    if phone_to_use and phone_to_use.strip() and not is_group:
+        handle = phone_to_use.strip()
+        # URL-encode preserving @ and + so phone numbers and email handles work
+        encoded = urllib.parse.quote(handle, safe="@+")
         try:
-            subprocess.run(
-                ["open", f"imessage://{phone_to_use.strip()}"],
+            proc = subprocess.run(
+                ["open", f"imessage://{encoded}"],
                 timeout=10,
                 check=False
             )
-            return {"ok": True, "type": "1-1 chat", "target": phone_to_use.strip()}
+            if proc.returncode == 0:
+                return {"ok": True, "type": "1-1 chat", "target": handle}
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": "Timeout opening Messages"}
+        except Exception:
+            pass
+
+        # Fallback: AppleScript buddy lookup (works for iCloud email handles)
+        script = f"""
+tell application "Messages"
+    activate
+    try
+        set targetService to 1st service whose service type = iMessage
+        set targetBuddy to buddy "{_as_str(handle)}" of targetService
+        set targetChat to (first chat whose participants contains targetBuddy)
+        show targetChat
+        return "found_buddy"
+    on error errMsg
+        return "buddy_error: " & errMsg
+    end try
+end tell
+"""
+        try:
+            result = _osascript(script, timeout=12)
+            if "found_buddy" in result.get("output", ""):
+                return {"ok": True, "type": "1-1 chat (applescript)", "target": handle}
+            # AppleScript fallback also failed — open app only
+            subprocess.run(["open", "-a", "Messages"], timeout=10, check=False)
+            return {"ok": True, "type": "1-1 chat (app only)", "target": handle}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    # Case 2: chat_id available (group chat) — try AppleScript to open and show the chat
+    # Case 2: chat_id available (group chat or explicit chat_id path)
     if chat_id:
+        chat_id_str = str(chat_id)
         try:
-            chat_id_str = str(chat_id)
             # Try to open Messages and display the chat by ID via AppleScript
             script = f"""
 tell application "Messages"
@@ -1422,13 +1511,29 @@ end tell
             result = _osascript(script, timeout=10)
             if "found_chat" in result.get("output", ""):
                 return {"ok": True, "type": "group chat", "chat_id": chat_id_str}
-            # Fallback: just open Messages
-            subprocess.run(["open", "-a", "Messages"], timeout=10, check=False)
-            return {"ok": True, "type": "group chat (app only)", "chat_id": chat_id_str}
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": "Timeout opening Messages"}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+        except Exception:
+            pass
+
+        # Fallback: look up the chat GUID in chat.db and open via imessage:// URL
+        try:
+            db_path = os.path.expanduser("~/Library/Messages/chat.db")
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT guid FROM chat WHERE ROWID = ?", (int(chat_id),)
+            ).fetchone()
+            conn.close()
+            if row:
+                guid = row[0]
+                subprocess.run(["open", f"imessage://{guid}"], timeout=10, check=False)
+                return {"ok": True, "type": "group chat (guid)", "chat_id": chat_id_str, "guid": guid}
+        except Exception:
+            pass
+
+        # Last resort: open Messages app
+        subprocess.run(["open", "-a", "Messages"], timeout=10, check=False)
+        return {"ok": True, "type": "group chat (app only)", "chat_id": chat_id_str}
 
     # Case 3: neither phone nor chat_id — just open Messages
     try:
@@ -1467,16 +1572,21 @@ end tell
         return {"ok": False, "error": str(e)}
 
 
-def open_uworld() -> dict:
+def open_uworld(ref: str = "") -> dict:
     """Open UWorld in the default browser.
-    The /login path returns 404; the homepage redirects to login when not authenticated.
+
+    Args:
+        ref: "dashboard" opens the performance dashboard directly.
+             Any other value (or empty string) opens the homepage.
     """
+    course_id = os.environ.get("UWORLD_COURSE_ID", "14842106")
+    if ref == "dashboard":
+        url = f"https://apps.uworld.com/courseapp/usmle/v50/en-US/performance/dashboard/{course_id}"
+    else:
+        # The /login path returns 404; the homepage redirects to login when not authenticated.
+        url = "https://www.uworld.com/"
     try:
-        subprocess.run(
-            ["open", "https://www.uworld.com/"],
-            timeout=10,
-            check=False
-        )
+        subprocess.run(["open", url], timeout=10, check=False)
         return {"ok": True}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "Timeout opening UWorld"}
@@ -1536,7 +1646,7 @@ def open_app(app_name: str, ref: str = "", context: dict = None) -> dict:
     elif app_name == "outlook-calendar":
         return open_outlook_calendar(ref)
     elif app_name == "uworld":
-        return open_uworld()
+        return open_uworld(ref)
     elif app_name == "anki":
         return open_anki()
     else:

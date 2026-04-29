@@ -500,7 +500,7 @@ export function StudyStreakWidget() {
       <CardHeader className="p-5 pb-2">
         <div className="flex items-center justify-between">
           <div className="flex flex-col gap-1">
-            <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
               Study Streak
             </CardTitle>
             {dataSource === "mock" && (

@@ -62,6 +62,7 @@ function hasAnyData(d: BriefingData): boolean {
 export function MorningBriefing() {
   const [data, setData] = useState<BriefingData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +77,7 @@ export function MorningBriefing() {
           // `data` was closure-captured from the initial render (always null)
           // so EVERY failed refresh wiped the widget. The 60s polling will
           // recover on the next successful fetch.
+          if (!cancelled) setLoadFailed(true);
         })
         .finally(() => {
           if (!cancelled) setLoading(false);
@@ -144,7 +146,9 @@ export function MorningBriefing() {
       (folders.reduce((s, f) => s + f.unread, 0) || null);
     if (mail && mail > 0) parts.push(`${mail} unread`);
     highlight = parts.length > 0 ? parts.join(" · ") : "you're all caught up";
-  } else if (!loading) {
+  } else if (!loading && loadFailed && !data) {
+    highlight = "briefing unavailable — retrying…";
+  } else if (!loading && data) {
     highlight = "you're all caught up";
   }
 
@@ -239,8 +243,11 @@ export function MorningBriefing() {
             <CardTitle className="text-xl font-semibold tracking-tight">
               {greeting}.
             </CardTitle>
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="mt-1 text-sm text-muted-foreground flex items-center gap-1.5">
               {loading ? "Loading your briefing…" : highlight}
+              {!loading && loadFailed && !data && (
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400 inline-block flex-shrink-0" title="Backend unreachable" />
+              )}
             </p>
           </div>
         </div>

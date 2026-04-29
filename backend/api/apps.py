@@ -2,9 +2,11 @@
 Open-in-app endpoints — launch native macOS apps to specific items.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
+
+from api._security import _require_local_origin
 
 router = APIRouter(prefix="/apps")
 
@@ -23,7 +25,7 @@ class OpenAppResponse(BaseModel):
 
 
 @router.post("/open", response_model=OpenAppResponse)
-def open_app(req: OpenAppRequest):
+def open_app(req: OpenAppRequest, request: Request):
     """Launch a native macOS app to a specific item.
 
     POST /apps/open
@@ -37,6 +39,7 @@ def open_app(req: OpenAppRequest):
     { "ok": true } on success
     { "ok": false, "error": "<msg>" } on failure
     """
+    _require_local_origin(request)
     # Validate app name
     valid_apps = {"outlook-email", "messages", "outlook-calendar", "uworld", "anki"}
     if req.app not in valid_apps:

@@ -49,6 +49,25 @@ def _invoke(action: str, **params):
     return data["result"]
 
 
+def _invoke_multi(actions: list[dict]):
+    """Send multiple AnkiConnect actions in a single HTTP request (action="multi").
+
+    Each item in *actions* should be a dict with at least an "action" key
+    and optionally a "params" key.  Returns the list of per-action results.
+    """
+    payload = {
+        "action": "multi",
+        "version": 6,
+        "params": {"actions": actions},
+    }
+    r = httpx.post(ANKICONNECT_URL, json=payload, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("error"):
+        raise RuntimeError(f"AnkiConnect multi error: {data['error']}")
+    return data["result"]
+
+
 def run_anki_tool(name: str, inp: dict):
     if name == "anki_get_stats":
         # Aggregate stats across all decks

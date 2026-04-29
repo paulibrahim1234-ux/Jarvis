@@ -217,7 +217,7 @@ export function NBMETrackerWidget() {
     <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
       <CardHeader className="p-5 pb-3">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
             NBME Progress
           </CardTitle>
           <div className="flex items-center gap-3">
