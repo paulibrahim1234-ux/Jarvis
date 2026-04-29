@@ -302,8 +302,10 @@ async def chat_async(
     # Refresh last_used_at on surfaced facts.
     memory.touch_facts([])  # no-op placeholder; facts are touched when created
 
-    # Fire-and-forget fact extraction — run in a thread so the sync
-    # Anthropic call inside doesn't block the event loop.
+    # Fire-and-forget fact extraction — runs in a thread so the sync
+    # Anthropic call inside doesn't block the event loop. Wrapped in
+    # asyncio.wait_for(timeout=30s) so a flaky network or stuck SDK call
+    # doesn't pile up dangling tasks on the event loop indefinitely.
     try:
         last_user = ""
         if messages:
@@ -312,9 +314,16 @@ async def chat_async(
                 c = lu.get("content") or ""
                 last_user = c if isinstance(c, str) else str(c)
         if last_user:
-            asyncio.create_task(
-                asyncio.to_thread(memory.extract_facts_async, client, last_user, final_text)
-            )
+            async def _timed_extract():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(memory.extract_facts_async, client, last_user, final_text),
+                        timeout=30.0,
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    # Best-effort; never break the chat reply over fact extraction.
+                    pass
+            asyncio.create_task(_timed_extract())
     except Exception:
         pass
 

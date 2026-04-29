@@ -29,6 +29,10 @@ router = APIRouter()
 # Simple TTL cache: {key: (expires_at, value)}
 _CACHE: dict = {}
 _CACHE_MAX = 128  # upper bound on number of live cache entries
+# Lock around eviction + write — protects against the rare race where two
+# threads both pass the `len() >= _CACHE_MAX` check, both pick the same
+# oldest_key, and the second thread's `del` raises KeyError mid-request.
+_CACHE_LOCK = threading.Lock()
 
 # Semaphores: prevent back-to-back AppleScript calls from stacking up on the
 # threadpool. A single permit per heavy route is enough — cache absorbs all
@@ -51,6 +55,12 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
     bug: when an AppleScript call timed out and compute() returned None,
     the None got cached for 10 minutes, and the widget looked
     permanently broken even after the underlying app recovered.
+
+    Cold-start behavior: when sem timeout AND no entry exists yet, fall
+    through and compute without the semaphore guard. The old "return None"
+    path here meant the very first request after backend startup (before
+    warmup populated the cache) saw a null payload and the widget showed
+    an error state for no reason.
     """
     now = time.time()
     entry = _CACHE.get(key)
@@ -58,26 +68,35 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
         return entry[1]
     if sem is not None:
         acquired = sem.acquire(blocking=True, timeout=0.05)
-        # If we couldn't grab the lock a sibling thread is already computing;
-        # return the stale value (or None) rather than queuing another call.
         if not acquired:
-            return entry[1] if entry else None
-        try:
+            if entry:
+                # Stale data is fine — sibling thread is recomputing.
+                return entry[1]
+            # Cold start, no stale data: do an unguarded compute. We
+            # accept the rare duplicate call to avoid handing back None.
             value = compute()
-        finally:
-            sem.release()
+        else:
+            try:
+                value = compute()
+            finally:
+                sem.release()
     else:
         value = compute()
     # Short TTL on negative results so a one-time failure doesn't lock in.
     effective_ttl = ttl
     if value is None or value == {} or value == []:
         effective_ttl = min(ttl, 10.0)
-    # LRU-style eviction: when cache exceeds _CACHE_MAX, drop the entry whose
-    # TTL expires soonest (i.e. the least valuable / oldest-expiring entry).
-    if len(_CACHE) >= _CACHE_MAX and key not in _CACHE:
-        oldest_key = min(_CACHE, key=lambda k: _CACHE[k][0])
-        del _CACHE[oldest_key]
-    _CACHE[key] = (now + effective_ttl, value)
+    # LRU-style eviction under a lock — `min()` then `del` is not atomic
+    # without one, and a concurrent eviction can KeyError-crash the
+    # endpoint with a generic 500.
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _CACHE_MAX and key not in _CACHE:
+            try:
+                oldest_key = min(_CACHE, key=lambda k: _CACHE[k][0])
+                del _CACHE[oldest_key]
+            except (ValueError, KeyError):
+                pass
+        _CACHE[key] = (now + effective_ttl, value)
     return value
 
 

@@ -391,7 +391,7 @@ export function CalendarWidget() {
   }, []);
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-3">
         <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2 flex-wrap">
           Upcoming
@@ -410,8 +410,8 @@ export function CalendarWidget() {
                     className={
                       "text-[9px] normal-case font-normal px-1.5 py-0.5 rounded ring-1 transition-colors " +
                       (selectedCal === "All"
-                        ? "ring-white/40 bg-white/15 text-foreground"
-                        : "ring-white/10 bg-white/[0.02] text-muted-foreground hover:bg-white/5")
+                        ? "ring-white/40 bg-foreground/15 text-foreground"
+                        : "ring-white/10 bg-foreground/[0.02] text-muted-foreground hover:bg-foreground/5")
                     }
                   >
                     All {events.length}
@@ -483,7 +483,7 @@ export function CalendarWidget() {
                   {/* Sticky-ish day header */}
                   <div
                     ref={gi === nowIdx ? nowAnchorRef : undefined}
-                    className="flex items-baseline gap-2 sticky top-0 bg-card/95 backdrop-blur-sm z-10 pt-0.5 pb-1 border-b border-white/5"
+                    className="flex items-baseline gap-2 sticky top-0 bg-card/95 backdrop-blur-sm z-10 pt-0.5 pb-1 border-b border-foreground/5"
                   >
                     <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground/80">
                       {g.label}
@@ -525,7 +525,7 @@ export function CalendarWidget() {
           tabIndex={-1}
         >
           <div
-            className="bg-card border border-white/10 rounded-xl p-5 w-80 max-w-[90vw] space-y-2 shadow-xl"
+            className="bg-card border border-foreground/10 rounded-xl p-5 w-80 max-w-[90vw] space-y-2 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <p className="font-semibold text-sm text-foreground leading-snug">{expandedEvent.title}</p>
@@ -600,7 +600,7 @@ function WeekGrid({
             {/* Day header */}
             <div
               className={`shrink-0 px-1 py-0.5 mb-1 border-b text-center ${
-                isToday ? "border-emerald-500/40" : "border-white/5"
+                isToday ? "border-emerald-500/40" : "border-foreground/5"
               }`}
             >
               <div
@@ -663,7 +663,7 @@ function WeekEventChip({
       tabIndex={0}
       onClick={handleClick}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
-      className={`cursor-pointer rounded px-1.5 py-1 text-[10px] leading-snug hover:bg-white/10 transition-colors ${typeCls} bg-transparent`}
+      className={`cursor-pointer rounded px-1.5 py-1 text-[10px] leading-snug hover:bg-foreground/10 transition-colors ${typeCls} bg-transparent`}
     >
       <div className="font-medium truncate">{event.title}</div>
       <div className="text-[9px] opacity-70 truncate">{timeLabel}</div>
@@ -718,7 +718,7 @@ function EventRow({
         tabIndex={0}
         onClick={handleClick}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
-        className="cursor-pointer rounded-lg border border-white/5 bg-white/[0.02] p-3 hover:bg-white/10 transition-colors"
+        className="cursor-pointer rounded-lg border border-foreground/5 bg-foreground/[0.02] p-3 hover:bg-foreground/10 transition-colors"
       >
         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
           <Badge className={`${typeCls} border-none text-[10px] capitalize`}>
@@ -752,7 +752,7 @@ function EventRow({
       tabIndex={0}
       onClick={handleClick}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
-      className="cursor-pointer flex items-start gap-3 rounded-lg px-3 py-2 hover:bg-white/10 transition-colors"
+      className="cursor-pointer flex items-start gap-3 rounded-lg px-3 py-2 hover:bg-foreground/10 transition-colors"
     >
       <div className="min-w-[68px] pt-0.5 font-mono text-xs text-muted-foreground">
         {timeLabel}

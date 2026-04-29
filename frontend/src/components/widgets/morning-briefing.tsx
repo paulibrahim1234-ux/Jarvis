@@ -231,7 +231,7 @@ export function MorningBriefing() {
     !loading && errors.length > 0 && (data ? hasAnyData(data) : false);
 
   return (
-    <Card className="group relative col-span-full overflow-hidden rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="group relative col-span-full overflow-hidden rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <div className="absolute inset-y-0 left-0 w-1 bg-gradient-to-b from-emerald-400 via-blue-500 to-emerald-400 bg-[length:100%_200%] animate-[gradient-y_3s_ease-in-out_infinite]" />
 
       <CardHeader className="pl-6 p-5 pb-2">
@@ -270,7 +270,7 @@ export function MorningBriefing() {
                     className={`mt-0.5 inline-block min-w-[3rem] rounded px-1 py-0 text-[9px] uppercase tracking-wider ${
                       l.urgent
                         ? "bg-amber-500/15 text-amber-400"
-                        : "bg-white/5 text-muted-foreground/60"
+                        : "bg-foreground/5 text-muted-foreground/60"
                     }`}
                   >
                     {l.tag}

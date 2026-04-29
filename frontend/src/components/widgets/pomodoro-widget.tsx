@@ -146,7 +146,7 @@ export function PomodoroWidget() {
   // Compact mode: just time + play button, no ring
   if (isCompact) {
     return (
-      <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+      <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
         <CardContent className="flex-1 min-h-0 flex items-center justify-center gap-3 p-4">
           <span className="font-mono text-xl font-bold tabular-nums">
             {timeDisplay}
@@ -155,7 +155,7 @@ export function PomodoroWidget() {
             <Button
               size="sm"
               onClick={() => setState("running")}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white border-0 h-7 w-7 p-0"
+              className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0 h-7 w-7 p-0"
             >
               &#9654;
             </Button>
@@ -165,7 +165,7 @@ export function PomodoroWidget() {
               size="sm"
               variant="outline"
               onClick={() => setState("paused")}
-              className="border-white/10 hover:bg-white/5 h-7 w-7 p-0"
+              className="border-foreground/10 hover:bg-foreground/5 h-7 w-7 p-0"
             >
               &#10074;&#10074;
             </Button>
@@ -174,7 +174,7 @@ export function PomodoroWidget() {
             <Button
               size="sm"
               onClick={() => setState("running")}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white border-0 h-7 w-7 p-0"
+              className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0 h-7 w-7 p-0"
             >
               &#9654;
             </Button>
@@ -184,7 +184,7 @@ export function PomodoroWidget() {
               size="sm"
               variant="outline"
               onClick={reset}
-              className="border-white/10 hover:bg-white/5 h-7 px-2"
+              className="border-foreground/10 hover:bg-foreground/5 h-7 px-2"
             >
               Skip
             </Button>
@@ -195,7 +195,7 @@ export function PomodoroWidget() {
   }
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-3">
         <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
           Pomodoro
@@ -226,7 +226,7 @@ export function PomodoroWidget() {
               fill="none"
               stroke="currentColor"
               strokeWidth={strokeWidth}
-              className="text-white/5"
+              className="text-foreground/5"
             />
             {/* Progress circle */}
             <circle
@@ -264,7 +264,7 @@ export function PomodoroWidget() {
               className={`px-2 py-0.5 rounded-full text-[11px] font-medium transition-colors border ${
                 workMinutes === d && !customInput
                   ? "border-emerald-500 bg-emerald-500/15 text-emerald-400"
-                  : "border-white/10 text-muted-foreground hover:border-white/20 hover:text-foreground"
+                  : "border-foreground/10 text-muted-foreground hover:border-foreground/20 hover:text-foreground"
               }`}
             >
               {d}m
@@ -285,7 +285,7 @@ export function PomodoroWidget() {
                 setSecondsLeft(n * 60);
               }
             }}
-            className="w-12 px-1.5 py-0.5 rounded-full text-[11px] font-medium text-center border border-white/10 bg-transparent text-muted-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-emerald-500 focus:text-foreground [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            className="w-12 px-1.5 py-0.5 rounded-full text-[11px] font-medium text-center border border-foreground/10 bg-transparent text-muted-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-emerald-500 focus:text-foreground [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
           />
         </div>
 
@@ -295,7 +295,7 @@ export function PomodoroWidget() {
             <Button
               size="sm"
               onClick={() => setState("running")}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white border-0"
+              className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0"
             >
               Start
             </Button>
@@ -305,7 +305,7 @@ export function PomodoroWidget() {
               size="sm"
               variant="outline"
               onClick={() => setState("paused")}
-              className="border-white/10 hover:bg-white/5"
+              className="border-foreground/10 hover:bg-foreground/5"
             >
               Pause
             </Button>
@@ -315,7 +315,7 @@ export function PomodoroWidget() {
               <Button
                 size="sm"
                 onClick={() => setState("running")}
-                className="bg-emerald-600 hover:bg-emerald-500 text-white border-0"
+                className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0"
               >
                 Resume
               </Button>
@@ -323,7 +323,7 @@ export function PomodoroWidget() {
                 size="sm"
                 variant="outline"
                 onClick={reset}
-                className="border-white/10 hover:bg-white/5"
+                className="border-foreground/10 hover:bg-foreground/5"
               >
                 Reset
               </Button>
@@ -334,7 +334,7 @@ export function PomodoroWidget() {
               size="sm"
               variant="outline"
               onClick={reset}
-              className="border-white/10 hover:bg-white/5"
+              className="border-foreground/10 hover:bg-foreground/5"
             >
               Skip Break
             </Button>

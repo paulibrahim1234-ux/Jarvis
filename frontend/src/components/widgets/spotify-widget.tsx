@@ -286,7 +286,7 @@ export function SpotifyWidget() {
 
   if (isCompact) {
     return (
-      <Card ref={tileRef} className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors overflow-hidden">
+      <Card ref={tileRef} className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors overflow-hidden">
         <Header live={live} webOk={webOk} authUrl={payload?.auth_url} />
         <CardContent ref={contentRef} className="flex-1 min-h-0 px-3 py-2">
           {!track ? (
@@ -300,7 +300,7 @@ export function SpotifyWidget() {
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium truncate">{track.title}</p>
                 <p className="text-xs text-muted-foreground truncate">{track.artist}</p>
-                <div className="mt-1 h-1 w-full rounded-full bg-white/10 overflow-hidden">
+                <div className="mt-1 h-1 w-full rounded-full bg-foreground/10 overflow-hidden">
                   <div
                     className="h-full rounded-full bg-[#1DB954]"
                     style={{ width: `${progress * 100}%` }}
@@ -326,7 +326,7 @@ export function SpotifyWidget() {
   // ── Full layout ───────────────────────────────────────────────────────────
 
   return (
-    <Card ref={tileRef} className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors overflow-hidden">
+    <Card ref={tileRef} className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors overflow-hidden">
       <Header live={live} webOk={webOk} authUrl={payload?.auth_url} />
       <CardContent
         ref={contentRef}
@@ -343,7 +343,7 @@ export function SpotifyWidget() {
           </div>
         )}
         {/* Tab strip */}
-        <div className="flex items-center gap-0 border-b border-white/10 overflow-x-auto no-scrollbar">
+        <div className="flex items-center gap-0 border-b border-foreground/10 overflow-x-auto no-scrollbar">
           {visibleTabs.map((t) => (
             <TabBtn
               key={t.key}
@@ -451,11 +451,15 @@ function HomePane({
     return <Empty text="Loading home…" />;
   }
 
+  // Unified shape across the four Home rows. The recently-played row
+  // returns playlists with `cover` (no album_art), top tracks/artists
+  // return tracks with `album_art`. The render reads either.
   type HomeItem = {
     title?: string;
     name?: string;
     artist?: string;
     album_art?: string | null;
+    cover?: string | null;
     uri?: string | null;
   };
 
@@ -483,12 +487,12 @@ function HomePane({
                 className="flex-shrink-0 flex flex-col items-center gap-1 group/tile"
                 onClick={() => { if (item.uri) onPlay(item.uri); }}
               >
-                <div className="w-[64px] h-[64px] rounded-lg bg-white/5 overflow-hidden flex-shrink-0">
-                  {item.album_art ? (
+                <div className="w-[64px] h-[64px] rounded-lg bg-foreground/5 overflow-hidden flex-shrink-0">
+                  {(item.album_art ?? item.cover) ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.album_art} alt="" className="w-full h-full object-cover" />
+                    <img src={(item.album_art ?? item.cover) as string} alt="" className="w-full h-full object-cover" />
                   ) : (
-                    <div className="w-full h-full bg-white/10" />
+                    <div className="w-full h-full bg-foreground/10" />
                   )}
                 </div>
                 <div className="text-[10px] text-muted-foreground/70 w-[64px] truncate text-center group-hover/tile:text-foreground transition-colors leading-tight">
@@ -563,7 +567,7 @@ function MoodsPane({
           )}
           <button
             onClick={() => { setEditMode(!editMode); setEditingIdx(null); }}
-            className="text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors px-1.5 py-0.5 rounded hover:bg-white/5"
+            className="text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors px-1.5 py-0.5 rounded hover:bg-foreground/5"
           >
             {editMode ? "Done" : "Edit"}
           </button>
@@ -578,27 +582,27 @@ function MoodsPane({
               return (
                 <div
                   key={i}
-                  className="col-span-4 rounded-lg bg-white/[0.07] border border-white/10 p-2 space-y-1.5 text-xs"
+                  className="col-span-4 rounded-lg bg-foreground/[0.07] border border-foreground/10 p-2 space-y-1.5 text-xs"
                 >
                   <div className="flex gap-1.5">
                     <input
                       value={draftEmoji}
                       onChange={(e) => setDraftEmoji(e.target.value)}
                       placeholder="Emoji"
-                      className="w-10 rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-center text-sm focus:outline-none"
+                      className="w-10 rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 text-center text-sm focus:outline-none"
                     />
                     <input
                       value={draftName}
                       onChange={(e) => setDraftName(e.target.value)}
                       placeholder="Name"
-                      className="flex-1 rounded bg-white/5 border border-white/10 px-1.5 py-0.5 focus:outline-none"
+                      className="flex-1 rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 focus:outline-none"
                     />
                   </div>
                   <input
                     value={draftPlaylistId}
                     onChange={(e) => setDraftPlaylistId(e.target.value)}
                     placeholder="Playlist URL or ID"
-                    className="w-full rounded bg-white/5 border border-white/10 px-1.5 py-0.5 focus:outline-none text-[10px]"
+                    className="w-full rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 focus:outline-none text-[10px]"
                   />
                   <div className="flex gap-1.5">
                     <button
@@ -609,7 +613,7 @@ function MoodsPane({
                     </button>
                     <button
                       onClick={() => setEditingIdx(null)}
-                      className="rounded bg-white/5 hover:bg-white/10 px-2 py-0.5 text-muted-foreground transition-colors"
+                      className="rounded bg-foreground/5 hover:bg-foreground/10 px-2 py-0.5 text-muted-foreground transition-colors"
                     >
                       Cancel
                     </button>
@@ -628,7 +632,7 @@ function MoodsPane({
                       onPlay(`spotify:playlist:${mood.playlistId}`);
                     }
                   }}
-                  className="w-full aspect-square max-w-[72px] mx-auto rounded-lg bg-white/5 hover:bg-white/10 transition-colors flex flex-col items-center justify-center gap-0.5"
+                  className="w-full aspect-square max-w-[72px] mx-auto rounded-lg bg-foreground/5 hover:bg-foreground/10 transition-colors flex flex-col items-center justify-center gap-0.5"
                   title={editMode ? `Edit "${mood.name}"` : mood.name}
                 >
                   <span className="text-base leading-none">{mood.emoji}</span>
@@ -637,7 +641,7 @@ function MoodsPane({
                   </span>
                 </button>
                 {editMode && (
-                  <div className="absolute -top-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-white/10 flex items-center justify-center pointer-events-none">
+                  <div className="absolute -top-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-foreground/10 flex items-center justify-center pointer-events-none">
                     <svg className="h-2.5 w-2.5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                     </svg>
@@ -687,7 +691,7 @@ function NowPlayingPane({
 
       {/* Progress bar */}
       <div className="space-y-0.5">
-        <div className="h-1 w-full rounded-full bg-white/10 overflow-hidden">
+        <div className="h-1 w-full rounded-full bg-foreground/10 overflow-hidden">
           <div
             className="h-full rounded-full bg-[#1DB954] transition-all duration-1000"
             style={{ width: `${progress * 100}%` }}
@@ -748,7 +752,7 @@ function LibraryPane({
           <li key={p.id}>
             <button
               onClick={() => onPlay(p.uri)}
-              className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-white/5 text-left"
+              className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-foreground/5 text-left"
               title={p.name}
             >
               {p.cover ? (
@@ -794,7 +798,7 @@ function RecentPane({
           <li key={(t.uri ?? "") + i}>
             <button
               onClick={() => t.uri && onPlay(t.uri)}
-              className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-white/5 text-left"
+              className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-foreground/5 text-left"
             >
               {t.album_art ? (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -849,7 +853,7 @@ function SearchPane({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search songs, artists, albums…"
-          className="w-full rounded-md bg-white/5 border border-white/10 px-2 py-1 text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:border-[#1DB954]/60"
+          className="w-full rounded-md bg-foreground/5 border border-foreground/10 px-2 py-1 text-xs placeholder:text-muted-foreground/50 focus:outline-none focus:border-[#1DB954]/60"
           autoFocus
         />
         {searching && (
@@ -871,7 +875,7 @@ function SearchPane({
               <li key={(t.uri ?? "") + i}>
                 <button
                   onClick={() => t.uri && onPlay(t.uri)}
-                  className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-white/5 text-left"
+                  className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-foreground/5 text-left"
                 >
                   {t.album_art ? (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -920,7 +924,7 @@ function QueuePane({
           <li key={(t.uri ?? "") + i}>
             <button
               onClick={() => t.uri && onPlay(t.uri)}
-              className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-white/5 text-left"
+              className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-foreground/5 text-left"
             >
               <span className="text-muted-foreground/40 tabular-nums w-4 text-[10px]">
                 {i + 1}
@@ -1044,7 +1048,7 @@ function PlayButton({
   const cls =
     size === "lg"
       ? "h-10 w-10 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform"
-      : "shrink-0 h-8 w-8 rounded-full bg-white/10 hover:bg-white/15 flex items-center justify-center transition-colors";
+      : "shrink-0 h-8 w-8 rounded-full bg-foreground/10 hover:bg-foreground/15 flex items-center justify-center transition-colors";
   const iconCls = size === "lg" ? "h-5 w-5 text-black" : "h-3.5 w-3.5";
   return (
     <button

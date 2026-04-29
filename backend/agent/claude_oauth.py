@@ -70,7 +70,9 @@ JSON_FALLBACK_PATH = Path.home() / ".jarvis" / "anthropic_oauth.json"
 
 # Mirror the active access token into backend/.env so the existing env-driven
 # resolver in agent.jarvis works without Keychain plumbing on every read.
-DOTENV_PATH = Path("/Users/paulibrahim/jarvis/backend/.env")
+# Path is derived from this module's location so the backend works under
+# any clone path (CI runner, different user account, etc.).
+DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 # ── Lock so concurrent 401s only refresh once ────────────────────────────────
@@ -167,10 +169,30 @@ def _write_keychain(blob: dict) -> bool:
 
 
 def _write_json_fallback(blob: dict) -> None:
+    """Atomic write — never leave the file in a partial state.
+
+    A naive `open('w')` truncates immediately and the json.dump can be
+    interrupted by SIGKILL/disk error/etc., leaving a 0-byte file.
+    Reading that on next boot raises a JSON parse error, returns None,
+    and the refresh token is permanently lost. The temp-file + rename
+    dance gives us atomicity on the same filesystem (POSIX rename(2) is
+    atomic), so the file is either the old contents or the new — never
+    half-written.
+    """
+    import tempfile
     JSON_FALLBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with JSON_FALLBACK_PATH.open("w") as f:
-        json.dump(blob, f, separators=(",", ":"))
-    os.chmod(JSON_FALLBACK_PATH, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=str(JSON_FALLBACK_PATH.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(blob, f, separators=(",", ":"))
+        os.replace(tmp, JSON_FALLBACK_PATH)
+        os.chmod(JSON_FALLBACK_PATH, 0o600)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _write_dotenv(access_token: str) -> None:

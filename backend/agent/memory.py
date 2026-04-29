@@ -41,12 +41,16 @@ _PHI_LONGNUM_RE = re.compile(r"\b\d{7,}\b")
 # PHI marker keywords that should trigger wholesale rejection.
 # mrn and patient id use a left-word-boundary only (no right \b) because
 # they commonly appear run together with digits (e.g. MRN12345, PatientID7).
+# Tightened: standalone "attending"/"patient"/"rotation"/"diagnosis" fired
+# on common English ("attending a meeting", "songs in heavy rotation",
+# "the diagnosis of a design problem") and silently aborted fact extraction
+# on most conversations. Patterns now require adjacent clinical context.
 _PHI_MARKER_RE = re.compile(
-    r"\bmrn"
-    r"|\battending\b"
-    r"|\bpatient(?:\s*id)?"
-    r"|\bdiagnosis\b"
-    r"|\brotation\b"
+    r"\bmrn\s*[:#]?\s*\d"
+    r"|\battending\s+physician\b"
+    r"|\bpatient\s+(?:id|record|mrn|chart)\b"
+    r"|\bmedical\s+diagnosis\b"
+    r"|\bclinical\s+rotation\b"
     r"|\bpreceptor\b"
     r"|\bpt\s+#\d+"
     r"|\bpt\s+record\b",

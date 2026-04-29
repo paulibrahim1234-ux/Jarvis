@@ -115,7 +115,7 @@ function DayEditPopover({
   return (
     <div
       ref={ref}
-      className="absolute z-50 rounded-lg border border-white/10 bg-zinc-900 p-3 shadow-xl"
+      className="absolute z-50 rounded-lg border border-foreground/10 bg-zinc-900 p-3 shadow-xl"
       style={{
         left: position.x,
         top: position.y,
@@ -123,7 +123,7 @@ function DayEditPopover({
         minWidth: 180,
       }}
     >
-      <div className="absolute left-1/2 -bottom-1.5 h-3 w-3 -translate-x-1/2 rotate-45 border-b border-r border-white/10 bg-zinc-900" />
+      <div className="absolute left-1/2 -bottom-1.5 h-3 w-3 -translate-x-1/2 rotate-45 border-b border-r border-foreground/10 bg-zinc-900" />
 
       <div className="text-xs font-medium text-muted-foreground mb-2">
         {formatted}
@@ -132,7 +132,7 @@ function DayEditPopover({
       <div className="flex items-center gap-2 mb-2">
         <button
           onClick={() => adjust(-15)}
-          className="flex h-6 w-6 items-center justify-center rounded bg-white/5 text-xs font-bold text-muted-foreground hover:bg-white/10 transition-colors"
+          className="flex h-6 w-6 items-center justify-center rounded bg-foreground/5 text-xs font-bold text-muted-foreground hover:bg-foreground/10 transition-colors"
         >
           -
         </button>
@@ -142,7 +142,7 @@ function DayEditPopover({
         </div>
         <button
           onClick={() => adjust(15)}
-          className="flex h-6 w-6 items-center justify-center rounded bg-white/5 text-xs font-bold text-muted-foreground hover:bg-white/10 transition-colors"
+          className="flex h-6 w-6 items-center justify-center rounded bg-foreground/5 text-xs font-bold text-muted-foreground hover:bg-foreground/10 transition-colors"
         >
           +
         </button>
@@ -155,7 +155,7 @@ function DayEditPopover({
         step={5}
         value={displayMinutes}
         onChange={(e) => onChangeMinutes(Number(e.target.value))}
-        className="w-full h-1 appearance-none rounded bg-white/10 accent-emerald-500 cursor-pointer mb-2
+        className="w-full h-1 appearance-none rounded bg-foreground/10 accent-emerald-500 cursor-pointer mb-2
           [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none
           [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-emerald-500"
       />
@@ -165,8 +165,8 @@ function DayEditPopover({
           onClick={() => onChangeMinutes(null)}
           className={`flex-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
             minutes === null
-              ? "bg-white/15 text-foreground"
-              : "bg-white/5 text-muted-foreground hover:bg-white/10"
+              ? "bg-foreground/15 text-foreground"
+              : "bg-foreground/5 text-muted-foreground hover:bg-foreground/10"
           }`}
         >
           Clear
@@ -176,7 +176,7 @@ function DayEditPopover({
           className={`flex-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
             minutes === 0
               ? "bg-red-500/20 text-red-400"
-              : "bg-white/5 text-muted-foreground hover:bg-white/10"
+              : "bg-foreground/5 text-muted-foreground hover:bg-foreground/10"
           }`}
         >
           No study
@@ -186,7 +186,7 @@ function DayEditPopover({
           className={`flex-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
             (minutes ?? 0) > 0
               ? "bg-emerald-500/20 text-emerald-400"
-              : "bg-white/5 text-muted-foreground hover:bg-white/10"
+              : "bg-foreground/5 text-muted-foreground hover:bg-foreground/10"
           }`}
         >
           Studied
@@ -230,13 +230,13 @@ function HelpPopover() {
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
         aria-label="Show interaction hints"
-        className="flex h-5 w-5 items-center justify-center rounded-full border border-white/15 bg-white/5 text-[10px] text-muted-foreground hover:border-white/25 hover:text-foreground transition-colors"
+        className="flex h-5 w-5 items-center justify-center rounded-full border border-foreground/15 bg-foreground/5 text-[10px] text-muted-foreground hover:border-foreground/25 hover:text-foreground transition-colors"
       >
         ?
       </button>
       {open && (
         <div
-          className="absolute right-0 top-6 z-50 rounded-lg border border-white/10 bg-zinc-900 p-2.5 shadow-xl text-[10px] text-muted-foreground leading-relaxed whitespace-nowrap"
+          className="absolute right-0 top-6 z-50 rounded-lg border border-foreground/10 bg-zinc-900 p-2.5 shadow-xl text-[10px] text-muted-foreground leading-relaxed whitespace-nowrap"
           style={{ minWidth: 260 }}
         >
           <div>Click: cycle 60→90→120m (or clear if already no-study)</div>
@@ -496,7 +496,7 @@ export function StudyStreakWidget() {
   const svgHeight = ROWS * (CELL + GAP) + 14;
 
   return (
-    <Card className="col-span-full rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="col-span-full rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-2">
         <div className="flex items-center justify-between">
           <div className="flex flex-col gap-1">
@@ -518,7 +518,7 @@ export function StudyStreakWidget() {
               onClick={() => setConfirmingReset(true)}
               title="Reset study data"
               aria-label="Reset study data"
-              className="rounded border border-white/10 bg-transparent px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:border-white/20 transition-colors"
+              className="rounded border border-foreground/10 bg-transparent px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground hover:border-foreground/20 transition-colors"
             >
               Reset
             </button>
@@ -645,7 +645,7 @@ export function StudyStreakWidget() {
           onClick={() => setConfirmingReset(false)}
         >
           <div
-            className="rounded-xl border border-white/10 bg-zinc-900 p-5 shadow-2xl max-w-sm"
+            className="rounded-xl border border-foreground/10 bg-zinc-900 p-5 shadow-2xl max-w-sm"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-sm font-semibold mb-2">Reset study data?</h3>
@@ -656,7 +656,7 @@ export function StudyStreakWidget() {
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setConfirmingReset(false)}
-                className="rounded-md border border-white/10 bg-transparent px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                className="rounded-md border border-foreground/10 bg-transparent px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
               >
                 Cancel
               </button>

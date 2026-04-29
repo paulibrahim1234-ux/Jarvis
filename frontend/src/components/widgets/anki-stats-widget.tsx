@@ -307,7 +307,7 @@ export function AnkiStatsWidget() {
   };
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-2">
         <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2">
           Anki
@@ -318,8 +318,8 @@ export function AnkiStatsWidget() {
             onClick={() => setTab("stats")}
             className={`px-2.5 py-1 rounded-md transition-colors ${
               tab === "stats"
-                ? "bg-white/10 text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                ? "bg-foreground/10 text-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-foreground/5"
             }`}
           >
             Stats
@@ -328,8 +328,8 @@ export function AnkiStatsWidget() {
             onClick={() => setTab("suggested")}
             className={`px-2.5 py-1 rounded-md transition-colors ${
               tab === "suggested"
-                ? "bg-white/10 text-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-white/5"
+                ? "bg-foreground/10 text-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-foreground/5"
             }`}
           >
             Suggested
@@ -395,7 +395,7 @@ export function AnkiStatsWidget() {
                       "mt-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors " +
                       (due === 0
                         ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30"
-                        : "text-muted-foreground/70 hover:text-foreground hover:bg-white/5")
+                        : "text-muted-foreground/70 hover:text-foreground hover:bg-foreground/5")
                     }
                     title="Open the Suggested tab to unsuspend UWorld-mapped cards"
                   >
@@ -410,7 +410,7 @@ export function AnkiStatsWidget() {
               </div>
 
               <div className="space-y-2">
-                <div className="relative h-3 w-full overflow-hidden rounded-full bg-white/5">
+                <div className="relative h-3 w-full overflow-hidden rounded-full bg-foreground/5">
                   <div
                     className={`h-full rounded-full bg-gradient-to-r ${progressGradient(progressPct)} transition-all duration-500`}
                     style={{ width: `${progressPct}%` }}
@@ -425,7 +425,7 @@ export function AnkiStatsWidget() {
               <div
                 className={`${
                   isWide ? "flex justify-evenly" : "grid grid-cols-3 gap-4"
-                } pt-4 border-t border-white/5 mt-4`}
+                } pt-4 border-t border-foreground/5 mt-4`}
               >
                 <div className="text-center">
                   <div className="text-base font-semibold tabular-nums text-amber-400">
@@ -556,7 +556,7 @@ function SuggestedPanel(props: {
               className={`flex items-start gap-2 px-2.5 py-2 rounded-md cursor-pointer border transition-colors ${
                 checked
                   ? "bg-emerald-500/10 border-emerald-500/30"
-                  : "bg-white/[0.02] border-white/5 hover:bg-white/[0.04]"
+                  : "bg-foreground/[0.02] border-foreground/5 hover:bg-foreground/[0.04]"
               }`}
             >
               <input
@@ -575,7 +575,7 @@ function SuggestedPanel(props: {
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
                   {s.tag && (
-                    <span className="px-1.5 py-0.5 rounded bg-white/5 text-[10px]">
+                    <span className="px-1.5 py-0.5 rounded bg-foreground/5 text-[10px]">
                       {s.tag}
                     </span>
                   )}
@@ -598,13 +598,13 @@ function SuggestedPanel(props: {
         <div className="mt-2 text-xs text-emerald-400 text-center">{toast}</div>
       )}
 
-      <div className="pt-3 mt-2 border-t border-white/5">
+      <div className="pt-3 mt-2 border-t border-foreground/5">
         <button
           onClick={onUnsuspend}
           disabled={selected.size === 0 || submitting}
           className={`w-full py-2 rounded-md text-xs font-medium transition-colors flex items-center justify-center gap-2 ${
             selected.size === 0 || submitting
-              ? "bg-white/5 text-muted-foreground cursor-not-allowed"
+              ? "bg-foreground/5 text-muted-foreground cursor-not-allowed"
               : "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30"
           }`}
         >

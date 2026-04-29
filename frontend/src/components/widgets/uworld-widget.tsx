@@ -129,7 +129,7 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
   }, [onClose]);
 
   return (
-    <div className="mt-1 mb-2 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-3 text-xs">
+    <div className="mt-1 mb-2 rounded-lg border border-foreground/10 bg-foreground/[0.03] px-3 py-3 text-xs">
       {/* Header row */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div>
@@ -238,7 +238,7 @@ function SessionRow({ session, incorrects, isExpanded, onToggle }: SessionRowPro
         onClick={onToggle}
         onKeyDown={(e) => e.key === "Enter" && onToggle()}
         className={`flex items-center justify-between rounded-lg px-3 py-2.5 cursor-pointer transition-colors ${
-          isExpanded ? "bg-white/8 hover:bg-white/10" : "hover:bg-white/5"
+          isExpanded ? "bg-foreground/8 hover:bg-foreground/10" : "hover:bg-foreground/5"
         }`}
         aria-expanded={isExpanded}
       >
@@ -316,12 +316,12 @@ function SessionList({
 function WeakTopicsSection({ topics }: { topics: UWorldWeakTopic[] }) {
   if (topics.length === 0) return null;
   return (
-    <div className="mt-4 space-y-3 border-t border-white/5 pt-4">
+    <div className="mt-4 space-y-3 border-t border-foreground/5 pt-4">
       <h4 className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
         Weak Topics
       </h4>
       {topics.map((t) => (
-        <div key={t.topic} className="space-y-1.5 rounded-lg px-3 py-2 hover:bg-white/5 transition-colors">
+        <div key={t.topic} className="space-y-1.5 rounded-lg px-3 py-2 hover:bg-foreground/5 transition-colors">
           <div className="flex items-center justify-between">
             <span className="text-sm">{t.topic}</span>
             <div className="flex items-center gap-1.5">
@@ -422,7 +422,7 @@ export function UWorldWidget() {
   const trueLearnSessions = sessions.filter((s) => s.platform === "truelearn");
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-3 flex flex-row items-center justify-between">
         <div className="flex items-center gap-2">
           <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
@@ -467,7 +467,7 @@ export function UWorldWidget() {
 
       {/* Status / message bar */}
       {refreshMsg && (
-        <div className={`mx-5 mb-2 rounded-md px-3 py-2 text-xs ${loggedOut ? "bg-amber-500/10 text-amber-300" : "bg-white/5 text-muted-foreground"}`}>
+        <div className={`mx-5 mb-2 rounded-md px-3 py-2 text-xs ${loggedOut ? "bg-amber-500/10 text-amber-300" : "bg-foreground/5 text-muted-foreground"}`}>
           {loggedOut && (
             <span className="font-medium">Not logged in — </span>
           )}
@@ -514,11 +514,11 @@ export function UWorldWidget() {
           </div>
         ) : (
           <Tabs defaultValue="uworld" className="flex-1 min-h-0 flex flex-col">
-            <TabsList className="mb-3 bg-white/5 border border-white/5 shrink-0">
-              <TabsTrigger value="uworld" className="text-xs data-[state=active]:bg-white/10">
+            <TabsList className="mb-3 bg-foreground/5 border border-foreground/5 shrink-0">
+              <TabsTrigger value="uworld" className="text-xs data-[state=active]:bg-foreground/10">
                 UWorld {uworldSessions.length > 0 && <span className="ml-1 text-muted-foreground/50">({uworldSessions.length})</span>}
               </TabsTrigger>
-              <TabsTrigger value="truelearn" className="text-xs data-[state=active]:bg-white/10">
+              <TabsTrigger value="truelearn" className="text-xs data-[state=active]:bg-foreground/10">
                 TrueLearn
               </TabsTrigger>
             </TabsList>

@@ -292,7 +292,7 @@ export function EmailWidget() {
   const isWide = containerWidth > 500;
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-4 pb-2">
         <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2">
           Inbox
@@ -339,13 +339,13 @@ export function EmailWidget() {
                   className={
                     "rounded-full px-2.5 py-0.5 text-[11px] transition-colors max-w-[180px] truncate " +
                     (active
-                      ? "bg-white/10 text-white"
-                      : "bg-white/[0.02] text-muted-foreground hover:bg-white/5 hover:text-white/80")
+                      ? "bg-foreground/10 text-foreground"
+                      : "bg-foreground/[0.02] text-muted-foreground hover:bg-foreground/5 hover:text-foreground/80")
                   }
                 >
                   {t.label}
                   {count > 0 && (
-                    <span className={"ml-1.5 text-[10px] " + (active ? "text-white/60" : "text-muted-foreground/60")}>
+                    <span className={"ml-1.5 text-[10px] " + (active ? "text-foreground/60" : "text-muted-foreground/60")}>
                       {count}
                     </span>
                   )}
@@ -361,7 +361,7 @@ export function EmailWidget() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search sender or subject..."
-              className="w-full rounded-md bg-white/[0.04] border border-white/[0.06] px-2.5 py-1 text-[11px] text-white/80 placeholder:text-muted-foreground/40 outline-none focus:border-white/15 focus:bg-white/[0.06] transition-colors"
+              className="w-full rounded-md bg-foreground/[0.04] border border-foreground/[0.06] px-2.5 py-1 text-[11px] text-foreground/80 placeholder:text-muted-foreground/40 outline-none focus:border-foreground/15 focus:bg-foreground/[0.06] transition-colors"
             />
           </div>
         </>
@@ -388,10 +388,10 @@ export function EmailWidget() {
           <div className="space-y-2 pt-1">
             {[0, 1, 2, 3].map((i) => (
               <div key={i} className="flex items-start gap-2.5 px-1 py-1.5 animate-pulse">
-                <div className="mt-[3px] h-5 w-5 rounded-full bg-white/[0.07] flex-shrink-0" />
+                <div className="mt-[3px] h-5 w-5 rounded-full bg-foreground/[0.07] flex-shrink-0" />
                 <div className="flex-1 space-y-1.5">
-                  <div className="h-2.5 w-2/3 rounded bg-white/[0.06]" />
-                  <div className="h-2 w-4/5 rounded bg-white/[0.04]" />
+                  <div className="h-2.5 w-2/3 rounded bg-foreground/[0.06]" />
+                  <div className="h-2 w-4/5 rounded bg-foreground/[0.04]" />
                 </div>
               </div>
             ))}
@@ -402,7 +402,7 @@ export function EmailWidget() {
             <p className="text-muted-foreground leading-relaxed">{errorMsg}</p>
             <button
               onClick={loadEmails}
-              className="mt-1 rounded-md bg-white/5 hover:bg-white/10 px-3 py-1 text-[11px] text-white/90 transition-colors"
+              className="mt-1 rounded-md bg-foreground/5 hover:bg-foreground/10 px-3 py-1 text-[11px] text-foreground/90 transition-colors"
             >
               Retry
             </button>
@@ -453,8 +453,8 @@ export function EmailWidget() {
                   }}
                   className={
                     isWide
-                      ? "flex items-start gap-2.5 rounded-lg border border-white/5 bg-white/[0.02] p-2.5 transition-colors cursor-pointer hover:bg-white/10"
-                      : "flex items-start gap-2.5 px-1 py-1.5 transition-colors cursor-pointer hover:bg-white/[0.08]"
+                      ? "flex items-start gap-2.5 rounded-lg border border-foreground/5 bg-foreground/[0.02] p-2.5 transition-colors cursor-pointer hover:bg-foreground/10"
+                      : "flex items-start gap-2.5 px-1 py-1.5 transition-colors cursor-pointer hover:bg-foreground/[0.08]"
                   }
                 >
                   {/* Unread + priority dots */}
@@ -495,7 +495,7 @@ export function EmailWidget() {
                       <p
                         className={
                           "truncate text-[11px] leading-tight flex-1 " +
-                          (!email.read ? "text-white/80" : "text-muted-foreground/60")
+                          (!email.read ? "text-foreground/80" : "text-muted-foreground/60")
                         }
                       >
                         {email.subject}
@@ -511,7 +511,7 @@ export function EmailWidget() {
                       )}
                       {/* Folder origin chip — only in All / Unread views */}
                       {showFolderChips && email.folder && (
-                        <span className="shrink-0 rounded px-1 py-px text-[9px] bg-white/[0.05] text-muted-foreground/50 leading-tight">
+                        <span className="shrink-0 rounded px-1 py-px text-[9px] bg-foreground/[0.05] text-muted-foreground/50 leading-tight">
                           {folderChip(email.folder)}
                         </span>
                       )}
@@ -541,7 +541,7 @@ export function EmailWidget() {
                       });
                       return (
                         <button
-                          className="mt-1 text-[10px] px-2 py-0.5 rounded-full border border-white/10 text-muted-foreground hover:text-foreground transition-colors"
+                          className="mt-1 text-[10px] px-2 py-0.5 rounded-full border border-foreground/10 text-muted-foreground hover:text-foreground transition-colors"
                           onClick={(ev) => {
                             ev.stopPropagation();
                             addEmailToCalendar({
@@ -594,11 +594,11 @@ function EmailPreviewModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-xl border border-white/10 bg-card shadow-2xl flex flex-col max-h-[80vh]"
+        className="w-full max-w-md rounded-xl border border-foreground/10 bg-card shadow-2xl flex flex-col max-h-[80vh]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="p-4 pb-3 border-b border-white/[0.06] shrink-0">
+        <div className="p-4 pb-3 border-b border-foreground/[0.06] shrink-0">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold text-foreground leading-tight truncate">
@@ -633,7 +633,7 @@ function EmailPreviewModal({
               <Badge className="border-none bg-violet-500/10 text-[9px] px-1 py-0 text-violet-400/80">School</Badge>
             )}
             {email.folder && (
-              <span className="rounded px-1.5 py-px text-[9px] bg-white/[0.05] text-muted-foreground/50 border border-white/[0.06]">
+              <span className="rounded px-1.5 py-px text-[9px] bg-foreground/[0.05] text-muted-foreground/50 border border-foreground/[0.06]">
                 {email.folder}
               </span>
             )}
@@ -655,13 +655,13 @@ function EmailPreviewModal({
         </div>
 
         {/* Footer */}
-        <div className="p-3 pt-2 border-t border-white/[0.06] shrink-0 flex justify-between items-center">
+        <div className="p-3 pt-2 border-t border-foreground/[0.06] shrink-0 flex justify-between items-center">
           <p className="text-[10px] text-muted-foreground/40">
             Cmd+click any email row to open directly in Outlook
           </p>
           <button
             onClick={onOpenOutlook}
-            className="rounded-md bg-white/[0.06] hover:bg-white/[0.10] border border-white/[0.08] px-3 py-1.5 text-[11px] text-white/80 transition-colors"
+            className="rounded-md bg-foreground/[0.06] hover:bg-foreground/[0.10] border border-foreground/[0.08] px-3 py-1.5 text-[11px] text-foreground/80 transition-colors"
           >
             Open in Outlook
           </button>

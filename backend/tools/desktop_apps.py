@@ -1075,12 +1075,16 @@ def _spotify_volume(vol: int) -> dict:
 
 
 def _spotify_search_play(query: str) -> dict:
-    # Use Spotify URI scheme to search and play
-    uri = f"spotify:search:{query.replace(' ', '%20')}"
-    result = _osascript(f'tell application "Spotify" to play track "{uri}"')
+    # Properly URL-encode the query AND escape the resulting URI for the
+    # AppleScript string literal. Without _as_str(), a query containing
+    # a double-quote would close the AppleScript string and let arbitrary
+    # AppleScript run. With it, the string is always sealed.
+    from urllib.parse import quote as _quote
+    safe_uri = _as_str(f"spotify:search:{_quote(query)}")
+    result = _osascript(f'tell application "Spotify" to play track "{safe_uri}"')
     if "error" in result:
-        # Fallback: open via URL scheme
-        subprocess.run(["open", f"spotify:search:{query}"], timeout=5)
+        # Fallback: argv-list call (no shell), URI already encoded.
+        subprocess.run(["open", f"spotify:search:{_quote(query)}"], timeout=5)
     for _ in range(3):
         time.sleep(0.5)
         np = _spotify_now_playing()
@@ -1316,17 +1320,25 @@ def _messages_recent(contact: str, limit: int = 20) -> dict:
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         cur = conn.cursor()
-        # Search by handle id (phone) or display name
+        # Escape SQLite LIKE wildcards (% and _) in user-supplied input.
+        # Without this, a contact of "%" matches every chat, and contacts
+        # legitimately containing those characters also match too broadly.
+        def _esc_like(s: str) -> str:
+            return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        esc = _esc_like(contact)
+        # Search by handle id (phone) or display name. ESCAPE clause must
+        # match the escape character used by _esc_like.
         cur.execute("""
             SELECT m.text, m.is_from_me, m.date / 1000000000 + 978307200 as ts
             FROM message m
             JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
             JOIN chat c ON cmj.chat_id = c.ROWID
-            WHERE (c.chat_identifier LIKE ? OR c.display_name LIKE ?)
+            WHERE (c.chat_identifier LIKE ? ESCAPE '\\'
+                   OR c.display_name LIKE ? ESCAPE '\\')
               AND m.text IS NOT NULL
             ORDER BY m.date DESC
             LIMIT ?
-        """, (f"%{contact}%", f"%{contact}%", limit))
+        """, (f"%{esc}%", f"%{esc}%", limit))
         rows = cur.fetchall()
         conn.close()
         messages = [

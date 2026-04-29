@@ -448,7 +448,19 @@ export async function fetchSpotifyHome(): Promise<{
   error?: string;
   top_tracks?: Array<{ title: string; artist: string; album_art?: string | null; uri?: string | null }>;
   top_artists?: Array<{ name: string; album_art?: string | null; uri?: string | null }>;
-  recently_played?: Array<{ title: string; artist: string; album_art?: string | null; uri?: string | null }>;
+  // recently_played here is PLAYLISTS derived from track context (the
+  // backend `get_recently_played_playlists`), not raw tracks. Cover lives
+  // on the `cover` field; keep `album_art` optional for backwards compat
+  // with cached payloads.
+  recently_played?: Array<{
+    name: string;
+    uri: string;
+    id: string;
+    cover?: string | null;
+    album_art?: string | null;
+    track_count?: number;
+    owner?: string | null;
+  }>;
   playlists?: Array<{ name: string; uri: string; id: string; cover?: string | null }>;
 }> {
   const r = await fetch(`${BACKEND}/widgets/spotify/home`, {

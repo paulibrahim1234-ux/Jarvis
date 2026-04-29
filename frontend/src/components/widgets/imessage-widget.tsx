@@ -189,7 +189,7 @@ export function IMessageWidget() {
     : null;
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-3 flex-row items-center justify-between space-y-0">
         <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2">
           Messages
@@ -267,10 +267,10 @@ function ConversationList({
       <div className="space-y-2 pt-2 animate-pulse">
         {[0, 1, 2, 3].map((i) => (
           <div key={i} className="flex items-center gap-3 py-2 px-2">
-            <div className={`rounded-full bg-white/[0.07] flex-shrink-0 ${isWide ? "h-10 w-10" : "h-8 w-8"}`} />
+            <div className={`rounded-full bg-foreground/[0.07] flex-shrink-0 ${isWide ? "h-10 w-10" : "h-8 w-8"}`} />
             <div className="flex-1 space-y-1.5">
-              <div className="h-2.5 w-1/2 rounded bg-white/[0.06]" />
-              <div className="h-2 w-3/4 rounded bg-white/[0.04]" />
+              <div className="h-2.5 w-1/2 rounded bg-foreground/[0.06]" />
+              <div className="h-2 w-3/4 rounded bg-foreground/[0.04]" />
             </div>
           </div>
         ))}
@@ -290,7 +290,7 @@ function ConversationList({
         <ConversationRow key={c.chat_id} convo={c} onOpen={onOpen} isWide={isWide} />
       ))}
       {unread.length > 0 && read.length > 0 && (
-        <div className="my-2 border-t border-white/5" />
+        <div className="my-2 border-t border-foreground/5" />
       )}
       {read.map((c) => (
         <ConversationRow key={c.chat_id} convo={c} onOpen={onOpen} isWide={isWide} />
@@ -354,7 +354,7 @@ function ConversationRow({
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") handleOpenInMessages(e as unknown as React.MouseEvent);
       }}
-      className="w-full flex items-center gap-3 py-2.5 px-2 rounded-lg text-left hover:bg-white/5 transition-colors cursor-pointer border-b border-white/[0.04] last:border-0"
+      className="w-full flex items-center gap-3 py-2.5 px-2 rounded-lg text-left hover:bg-foreground/5 transition-colors cursor-pointer border-b border-foreground/[0.04] last:border-0"
     >
       <Avatar className={isWide ? "h-10 w-10 flex-shrink-0" : "h-8 w-8 flex-shrink-0"}>
         <AvatarFallback className={`${avatarClass(convo.contact)} text-sm font-semibold`}>
@@ -394,7 +394,7 @@ function ConversationRow({
             <button
               type="button"
               onClick={handleExpandInline}
-              className="text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors text-[10px] px-1.5 py-0.5 rounded hover:bg-white/5"
+              className="text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors text-[10px] px-1.5 py-0.5 rounded hover:bg-foreground/5"
               title="Expand in widget"
             >
               ▾
@@ -472,7 +472,7 @@ function ThreadView({ convo, isWide }: { convo: Conversation; isWide: boolean })
 
   return (
     <div className="pt-2 space-y-3">
-      <div className="flex items-center gap-3 pb-3 border-b border-white/5">
+      <div className="flex items-center gap-3 pb-3 border-b border-foreground/5">
         <Avatar className={isWide ? "h-10 w-10" : "h-8 w-8"}>
           <AvatarFallback className={`${avatarClass(convo.contact)} text-sm font-semibold`}>
             {initial(convo.contact)}
@@ -495,11 +495,11 @@ function ThreadView({ convo, isWide }: { convo: Conversation; isWide: boolean })
             <div key={`group-${gi}`}>
               {dividerLabel && (
                 <div className="text-[10px] text-muted-foreground/50 text-center py-1.5 flex items-center gap-2">
-                  <span className="flex-1 border-t border-white/5" />
-                  <span className="px-2 py-0.5 rounded-full bg-white/[0.04] border border-white/[0.06]">
+                  <span className="flex-1 border-t border-foreground/5" />
+                  <span className="px-2 py-0.5 rounded-full bg-foreground/[0.04] border border-foreground/[0.06]">
                     {dividerLabel}
                   </span>
-                  <span className="flex-1 border-t border-white/5" />
+                  <span className="flex-1 border-t border-foreground/5" />
                 </div>
               )}
 
@@ -518,8 +518,8 @@ function ThreadView({ convo, isWide }: { convo: Conversation; isWide: boolean })
                       ? "rounded-[18px] rounded-br-[4px] bg-gradient-to-b from-[#0b93f6] to-[#0a7ce0] text-white"
                       : "rounded-[18px] bg-gradient-to-b from-[#0b93f6] to-[#0a7ce0] text-white"
                     : isLast
-                      ? "rounded-[18px] rounded-bl-[4px] bg-white/5 text-foreground"
-                      : "rounded-[18px] bg-white/5 text-foreground";
+                      ? "rounded-[18px] rounded-bl-[4px] bg-foreground/5 text-foreground"
+                      : "rounded-[18px] bg-foreground/5 text-foreground";
                   return (
                     <div
                       key={`${m.epoch_ms ?? m.time}-${mi}`}

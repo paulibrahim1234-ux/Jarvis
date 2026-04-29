@@ -285,47 +285,91 @@ def get_recently_played_playlists(limit: int = 8) -> list[dict] | None:
     For each item in the recently-played endpoint, inspect context.type.
     Deduplicate by context URI and fetch cover art via /v1/playlists/{id}.
     Returns None when unauthenticated, [] when no playlist context found.
+
+    Performance: per-playlist sp.playlist() lookups run in parallel via a
+    thread pool (Spotify deprecated their playlist-batch endpoint, so the
+    only way to fetch N playlists by ID is N HTTP roundtrips). 4 workers
+    cap concurrency so we don't fan out beyond what the FastAPI threadpool
+    is comfortable with.
     """
+    import concurrent.futures
     try:
         sp = _sp()
         res = sp.current_user_recently_played(limit=50)
         items = res.get("items", []) if res else []
-        seen: dict[str, dict] = {}
+
+        # First pass: collect unique playlist URIs in encounter order, capped at limit.
+        ordered_uris: list[str] = []
         for item in items:
             ctx = item.get("context") or {}
             if ctx.get("type") != "playlist":
                 continue
             uri = ctx.get("uri", "")
-            if not uri or uri in seen:
+            if not uri or uri in ordered_uris:
                 continue
-            pid = uri.split(":")[-1] if ":" in uri else ""
-            if not pid:
+            if not (uri.split(":")[-1] if ":" in uri else ""):
                 continue
+            ordered_uris.append(uri)
+            if len(ordered_uris) >= limit:
+                break
+
+        def _fetch(uri: str) -> dict:
+            pid = uri.split(":")[-1]
             try:
                 pdata = sp.playlist(pid, fields="id,name,images,tracks.total,owner.display_name")
-                seen[uri] = {
-                    "name": pdata.get("name", ""),
+                return {
+                    "name": pdata.get("name", "") or "Untitled",
                     "uri": uri,
                     "id": pid,
                     "cover": (pdata.get("images") or [{}])[0].get("url"),
                     "track_count": (pdata.get("tracks") or {}).get("total", 0),
                     "owner": (pdata.get("owner") or {}).get("display_name"),
                 }
-            except Exception:
-                # Fallback: minimal entry without cover
-                seen[uri] = {
-                    "name": uri,
+            except Exception as e:
+                # Try a tighter retry asking only for the name — some Spotify-
+                # editorial playlists return on minimal queries even when full
+                # ones 404. If even that fails, label it clearly so the tile
+                # doesn't show the raw URI as the name.
+                try:
+                    pdata = sp.playlist(pid, fields="name")
+                    label = pdata.get("name", "") or "Playlist (unavailable)"
+                except Exception:
+                    label = "Playlist (unavailable)"
+                return {
+                    "name": label,
                     "uri": uri,
                     "id": pid,
                     "cover": None,
                     "track_count": 0,
                     "owner": None,
+                    "_error": type(e).__name__,
                 }
-            if len(seen) >= limit:
-                break
-        return list(seen.values())
+
+        # Parallel fetch — 4 workers, ordered by encounter order.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(_fetch, ordered_uris))
+        return results
     except Exception:
         return None
+
+
+def _spotify_error_to_dict(e: Exception) -> dict:
+    """Map a Spotify SDK exception to a structured agent-friendly dict.
+    Without this, write-tool exceptions propagate as a traceback and the
+    agent gives up with a generic error to the user."""
+    msg = str(e)
+    if "No active device" in msg or "NO_ACTIVE_DEVICE" in msg:
+        return {
+            "error": "no_active_device",
+            "message": "Open Spotify and start any track first to register a device, then retry.",
+        }
+    if "PREMIUM_REQUIRED" in msg or "Premium" in msg:
+        return {"error": "premium_required", "message": "Spotify Premium required for playback control."}
+    if "404" in msg or "Resource not found" in msg:
+        return {"error": "not_found", "message": "Spotify couldn't find that resource."}
+    if "Token expired" in msg or "401" in msg:
+        return {"error": "auth", "message": "Spotify token expired — reconnect via /setup."}
+    return {"error": "spotify_error", "message": msg[:200]}
 
 
 def run_spotify_tool(name: str, inp: dict):
@@ -333,13 +377,19 @@ def run_spotify_tool(name: str, inp: dict):
     if name == "spotify_now_playing":
         return get_now_playing() or {"status": "nothing playing"}
     if name == "spotify_play_pause":
-        current = sp.current_playback()
-        if current and current.get("is_playing"):
-            sp.pause_playback()
-            return {"action": "paused"}
-        sp.start_playback()
-        return {"action": "playing"}
+        try:
+            current = sp.current_playback()
+            if current and current.get("is_playing"):
+                sp.pause_playback()
+                return {"action": "paused"}
+            sp.start_playback()
+            return {"action": "playing"}
+        except Exception as e:
+            return _spotify_error_to_dict(e)
     if name == "spotify_skip":
-        sp.next_track()
-        return {"action": "skipped"}
+        try:
+            sp.next_track()
+            return {"action": "skipped"}
+        except Exception as e:
+            return _spotify_error_to_dict(e)
     raise ValueError(f"Unknown spotify tool: {name}")

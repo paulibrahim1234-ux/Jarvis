@@ -214,7 +214,7 @@ export function NBMETrackerWidget() {
   }
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
@@ -238,7 +238,7 @@ export function NBMETrackerWidget() {
                 if (!isAdding) setDraft(makeEmptyDraft());
                 setIsAdding((v) => !v);
               }}
-              className="text-xs px-2 py-1 rounded-md border border-white/10 hover:border-white/30 hover:bg-white/5 text-muted-foreground transition-colors"
+              className="text-xs px-2 py-1 rounded-md border border-foreground/10 hover:border-foreground/30 hover:bg-foreground/5 text-muted-foreground transition-colors"
             >
               {isAdding ? "Cancel" : "+ Add"}
             </button>
@@ -248,7 +248,7 @@ export function NBMETrackerWidget() {
 
       <CardContent className="flex-1 min-h-0 p-5 pt-0 space-y-3 overflow-y-auto">
         {isAdding && (
-          <div className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-2 text-xs">
+          <div className="rounded-lg border border-foreground/10 bg-black/20 p-3 space-y-2 text-xs">
             <div className="grid grid-cols-2 gap-2">
               <label className="flex flex-col gap-1">
                 <span className="text-muted-foreground">Exam</span>
@@ -257,7 +257,7 @@ export function NBMETrackerWidget() {
                   onChange={(e) =>
                     setDraft({ ...draft, exam_name: e.target.value })
                   }
-                  className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                  className="bg-black/40 border border-foreground/10 rounded px-2 py-1 text-xs"
                 >
                   {EXAM_PRESETS.map((p) => (
                     <option key={p} value={p}>
@@ -273,7 +273,7 @@ export function NBMETrackerWidget() {
                     onChange={(e) =>
                       setDraft({ ...draft, custom_exam_name: e.target.value })
                     }
-                    className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs mt-1"
+                    className="bg-black/40 border border-foreground/10 rounded px-2 py-1 text-xs mt-1"
                   />
                 )}
               </label>
@@ -285,7 +285,7 @@ export function NBMETrackerWidget() {
                   onChange={(e) =>
                     setDraft({ ...draft, date_taken: e.target.value })
                   }
-                  className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                  className="bg-black/40 border border-foreground/10 rounded px-2 py-1 text-xs"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -298,7 +298,7 @@ export function NBMETrackerWidget() {
                   onChange={(e) =>
                     setDraft({ ...draft, raw_score: e.target.value })
                   }
-                  className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                  className="bg-black/40 border border-foreground/10 rounded px-2 py-1 text-xs"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -311,7 +311,7 @@ export function NBMETrackerWidget() {
                   onChange={(e) =>
                     setDraft({ ...draft, percentile: e.target.value })
                   }
-                  className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                  className="bg-black/40 border border-foreground/10 rounded px-2 py-1 text-xs"
                 />
               </label>
             </div>
@@ -321,20 +321,20 @@ export function NBMETrackerWidget() {
                 rows={2}
                 value={draft.notes}
                 onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
-                className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs resize-none"
+                className="bg-black/40 border border-foreground/10 rounded px-2 py-1 text-xs resize-none"
               />
             </label>
             <div className="flex justify-end gap-2 pt-1">
               <button
                 onClick={resetForm}
-                className="px-3 py-1 rounded-md border border-white/10 hover:border-white/30 text-xs"
+                className="px-3 py-1 rounded-md border border-foreground/10 hover:border-foreground/30 text-xs"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="px-3 py-1 rounded-md bg-emerald-600/80 hover:bg-emerald-500 text-white text-xs disabled:opacity-50"
+                className="px-3 py-1 rounded-md bg-emerald-600/80 hover:bg-emerald-500 text-foreground text-xs disabled:opacity-50"
               >
                 {saving ? "Saving..." : "Add score"}
               </button>
@@ -354,13 +354,13 @@ export function NBMETrackerWidget() {
               Loading...
             </div>
           ) : chartData.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center gap-4 border border-dashed border-white/10 rounded-lg px-4 text-center">
+            <div className="h-full flex flex-col items-center justify-center gap-4 border border-dashed border-foreground/10 rounded-lg px-4 text-center">
               <div className="text-sm text-muted-foreground leading-snug">
                 Track your shelf scores here. Add your first NBME or UWSA score to start.
               </div>
               <button
                 onClick={() => setIsAdding(true)}
-                className="px-5 py-2.5 rounded-md bg-emerald-600/80 hover:bg-emerald-500 text-white text-sm font-medium transition-colors"
+                className="px-5 py-2.5 rounded-md bg-emerald-600/80 hover:bg-emerald-500 text-foreground text-sm font-medium transition-colors"
               >
                 + Add score
               </button>
@@ -446,7 +446,7 @@ export function NBMETrackerWidget() {
             {recentList.map((s) => (
               <div
                 key={s.id}
-                className="flex items-center gap-2 text-xs py-1 px-2 rounded hover:bg-white/5 group"
+                className="flex items-center gap-2 text-xs py-1 px-2 rounded hover:bg-foreground/5 group"
               >
                 <span className="font-medium truncate min-w-0 flex-shrink">{s.exam_name}</span>
                 <span className="text-muted-foreground shrink-0">&middot;</span>
@@ -466,7 +466,7 @@ export function NBMETrackerWidget() {
                   onBlur={() => setPendingDelete(null)}
                   className={`text-xs px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ${
                     pendingDelete === s.id
-                      ? "bg-red-600/80 text-white opacity-100"
+                      ? "bg-red-600/80 text-foreground opacity-100"
                       : "text-muted-foreground hover:text-red-400"
                   }`}
                   title={pendingDelete === s.id ? "Click again to confirm" : "Delete"}

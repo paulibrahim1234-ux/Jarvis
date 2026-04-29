@@ -53,19 +53,34 @@ export function WeekWidget() {
 
   useEffect(() => {
     const range = rangeForNextDays(7);
-    fetchCalendar(range)
-      .then((data) => {
-        if (data.auth_needed) {
-          setAuthUrl(data.auth_url ?? `${BACKEND}/auth/microsoft`);
-        } else if (data.available && Array.isArray(data.events)) {
-          setEvents(data.events as RawCalendarEvent[]);
-          setLive(true);
-        }
-      })
-      .catch(() => {
-        /* backend offline — leave empty; render empty-state */
-      })
-      .finally(() => setLoading(false));
+    const load = (initial: boolean) => {
+      fetchCalendar(range)
+        .then((data) => {
+          if (data.auth_needed) {
+            setAuthUrl(data.auth_url ?? `${BACKEND}/auth/microsoft`);
+          } else if (data.available && Array.isArray(data.events)) {
+            setEvents(data.events as RawCalendarEvent[]);
+            setLive(true);
+          }
+        })
+        .catch(() => {
+          /* backend offline — leave empty; render empty-state */
+        })
+        .finally(() => {
+          if (initial) setLoading(false);
+        });
+    };
+    load(true);
+    // Poll every 5 min, matching the backend calendar cache TTL. Pause
+    // when tab is hidden — the other data widgets (briefing, anki, email)
+    // all do this; week was the lone widget that fetched once on mount
+    // and never refreshed, so a new event added later wouldn't show up
+    // until manual reload.
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      load(false);
+    }, 300_000);
+    return () => clearInterval(id);
   }, []);
 
   const grouped = useMemo(() => {
@@ -79,7 +94,7 @@ export function WeekWidget() {
   const unavailable = !loading && !live;
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-white/10 bg-card hover:border-white/15 transition-colors">
+    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-3">
         <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2">
           This Week
@@ -148,7 +163,7 @@ function DayColumn({
 }) {
   return (
     <div className="min-h-0 flex flex-col">
-      <div className="mb-2 rounded-md bg-white/[0.03] px-3 py-1.5 shrink-0">
+      <div className="mb-2 rounded-md bg-foreground/[0.03] px-3 py-1.5 shrink-0">
         <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           {day.label}
         </p>
@@ -184,7 +199,7 @@ function DayColumn({
                 <div
                   key={event.id}
                   onClick={handleClick}
-                  className="cursor-pointer flex items-start gap-2 rounded-lg px-3 py-2 text-xs hover:bg-white/10 transition-colors"
+                  className="cursor-pointer flex items-start gap-2 rounded-lg px-3 py-2 text-xs hover:bg-foreground/10 transition-colors"
                 >
                   <span className="font-mono text-muted-foreground/60 shrink-0 w-16 pt-0.5">
                     {event.isAllDay || event.ongoing ? "all-day" : formatTime(event.start)}
