@@ -93,6 +93,7 @@ export function SpotifyWidget() {
   const [searchResults, setSearchResults] = useState<QueueItem[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [moods, setMoods] = useState<Mood[]>(() => loadMoods());
+  const [playError, setPlayError] = useState<string | null>(null);
 
   // Resize observer on the OUTER tile (stable across branch swaps).
   useEffect(() => {
@@ -211,13 +212,20 @@ export function SpotifyWidget() {
         uri.startsWith("spotify:album:") ||
         uri.startsWith("spotify:artist:")
       ) {
-        await playSpotifyContext(uri);
+        const res = await playSpotifyContext(uri);
+        if (res && res.ok === false) {
+          setPlayError(res.message || res.error || "Playback failed");
+          setTimeout(() => setPlayError(null), 6000);
+          return;
+        }
       } else {
         await playSpotifyURI(uri);
       }
+      setPlayError(null);
       setTimeout(poll, 1200);
     } catch {
-      /* ignore */
+      setPlayError("Couldn't reach Jarvis backend — try again.");
+      setTimeout(() => setPlayError(null), 6000);
     }
   }
 
@@ -324,6 +332,16 @@ export function SpotifyWidget() {
         ref={contentRef}
         className="flex-1 min-h-0 px-3 pb-2 pt-1 overflow-hidden flex flex-col gap-1.5"
       >
+        {/* Playback-error banner — surfaces "no active device" / "playlist
+            unavailable" instead of silently swallowing the failure. */}
+        {playError && (
+          <div
+            role="alert"
+            className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-200"
+          >
+            {playError}
+          </div>
+        )}
         {/* Tab strip */}
         <div className="flex items-center gap-0 border-b border-white/10 overflow-x-auto no-scrollbar">
           {visibleTabs.map((t) => (

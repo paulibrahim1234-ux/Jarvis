@@ -18,7 +18,8 @@ SCOPES = (
     "user-read-recently-played "
     "playlist-read-private "
     "playlist-read-collaborative "
-    "user-library-read"
+    "user-library-read "
+    "user-top-read"
 )
 
 SPOTIFY_TOOLS = [
@@ -244,14 +245,38 @@ def play_context_uri(uri: str) -> dict:
     """Play a context (playlist/album/artist) via the Spotify Web API.
 
     Uses PUT /v1/me/player/play with {"context_uri": uri}.
-    Returns {ok: bool, error?: str}.
+    Returns {ok: bool, error?: str (machine code), message?: str (user-facing)}.
     """
     try:
         sp = _sp()
         sp.start_playback(context_uri=uri)
         return {"ok": True}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        msg = str(e)
+        # No device with active playback. User must open Spotify and play
+        # at least one track manually to register a device with the API.
+        if "No active device" in msg or "NO_ACTIVE_DEVICE" in msg:
+            return {
+                "ok": False,
+                "error": "no_active_device",
+                "message": "Open Spotify and start any track first, then try the mood tile again.",
+            }
+        # 404 on the context URI — Spotify-editorial playlists were locked
+        # down to non-commercial clients in late 2024, so most 37i9... IDs
+        # return Resource not found. User can replace via the Edit button.
+        if "Resource not found" in msg or "404" in msg:
+            return {
+                "ok": False,
+                "error": "playlist_unavailable",
+                "message": "Spotify can't access this playlist for your account. Click Edit on the Moods tab to swap in one of your own playlists.",
+            }
+        if "PREMIUM_REQUIRED" in msg or "Premium" in msg or "403" in msg:
+            return {
+                "ok": False,
+                "error": "premium_required",
+                "message": "Playback control requires Spotify Premium.",
+            }
+        return {"ok": False, "error": "unknown", "message": msg}
 
 
 def get_recently_played_playlists(limit: int = 8) -> list[dict] | None:

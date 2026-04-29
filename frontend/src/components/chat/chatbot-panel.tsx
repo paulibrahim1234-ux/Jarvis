@@ -210,9 +210,16 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
       const isAbort = err instanceof Error && err.name === "AbortError";
       if (isAbort) return; // handleStop already appended the cancelled message
       const isOffline = err instanceof TypeError && err.message.includes("fetch");
+      const rawMsg = err instanceof Error ? err.message : "Something went wrong.";
+      // Detect Anthropic 401 specifically — token expired or wrong format.
+      // Backend forwards the SDK message verbatim, so look for the markers.
+      const isAuthError =
+        /401|Invalid authentication|authentication_error/i.test(rawMsg);
       const errText = isOffline
         ? "⚠️ Can't reach the Jarvis backend."
-        : `⚠️ ${err instanceof Error ? err.message : "Something went wrong."}`;
+        : isAuthError
+        ? "⚠️ Claude credentials are invalid or expired.\n\nFix:\n• If you use the Claude Code subscription: refresh your token by running `claude` in a terminal, then restart the Jarvis backend.\n• If you use an API key: paste a valid `ANTHROPIC_API_KEY` into `backend/.env` and restart the backend (`launchctl kickstart -k gui/$UID/com.jarvis.backend`)."
+        : `⚠️ ${rawMsg}`;
       setMessages((prev) => [...prev, { id: prev.length + 1, role: "jarvis", text: errText }]);
     } finally {
       setIsTyping(false);

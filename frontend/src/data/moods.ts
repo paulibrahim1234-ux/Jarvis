@@ -4,19 +4,25 @@ export interface Mood {
   playlistId: string;
 }
 
+// Defaults seeded from the user's own Spotify library (private repo, OK to
+// hardcode private IDs). The Spotify-editorial 37i9dQZF1... IDs that ship
+// in many tutorials no longer resolve for non-commercial Web API clients
+// (Spotify deprecated that access in late 2024 — see Web API changelog),
+// so picking real user-owned playlists is the only thing that actually
+// plays without a 404. Edit Moods → Replace playlist… to swap.
 export const DEFAULT_MOODS: Mood[] = [
-  { name: "Studying", emoji: "📚", playlistId: "37i9dQZF1DWZeKCadgRdKQ" },
-  { name: "Lo-fi",    emoji: "🎧", playlistId: "37i9dQZF1DWWQRwui0ExPn" },
-  { name: "Chilling", emoji: "☁️", playlistId: "37i9dQZF1DX4WYpdgoIcn6" },
-  { name: "Coding",   emoji: "💻", playlistId: "37i9dQZF1DX5trt9i14X7j" },
-  { name: "Workout",  emoji: "💪", playlistId: "37i9dQZF1DX76Wlfdnj7AP" },
-  { name: "Run",      emoji: "🏃", playlistId: "37i9dQZF1DWSJHnPb1f0X3" },
-  { name: "Sleep",    emoji: "😴", playlistId: "37i9dQZF1DWZd79rJ6a7lp" },
-  { name: "Coffee",   emoji: "☕", playlistId: "37i9dQZF1DX9vYRBO9gjDe" },
-  { name: "Driving",  emoji: "🚗", playlistId: "37i9dQZF1DX9wC1KY45plY" },
-  { name: "Pump-Up",  emoji: "🔥", playlistId: "37i9dQZF1DX76t638V6CA8" },
-  { name: "Dinner",   emoji: "🍷", playlistId: "37i9dQZF1DX4xuWVBs4FgJ" },
-  { name: "Focus",    emoji: "🧠", playlistId: "37i9dQZF1DX8NTLI2TtZa6" },
+  { name: "Studying", emoji: "📚", playlistId: "7FT5LXHXnf5FRy2PYlPTDN" },  // calm classical reading music
+  { name: "Lo-fi",    emoji: "🎧", playlistId: "5SDPei4m0IuABIYRsDJcBC" },  // Chill Drive — Lofi Hip Hop
+  { name: "Chilling", emoji: "☁️", playlistId: "5dGBsIih0E2PCAgvMlvRBn" },  // GOOD MOOD SHIT!!!
+  { name: "Coding",   emoji: "💻", playlistId: "5SDPei4m0IuABIYRsDJcBC" },  // Chill Drive — Lofi
+  { name: "Workout",  emoji: "💪", playlistId: "2heqVugafAhVJtDuW3dV0r" },  // Gym Motivation
+  { name: "Run",      emoji: "🏃", playlistId: "4nzyDY8X1m0AQRV5SDrZlQ" },  // Running
+  { name: "Sleep",    emoji: "😴", playlistId: "54OYFjQKKwSrZLIkTryYND" },  // Piano & Violin
+  { name: "Coffee",   emoji: "☕", playlistId: "7FT5LXHXnf5FRy2PYlPTDN" },  // calm classical reading
+  { name: "Driving",  emoji: "🚗", playlistId: "5SDPei4m0IuABIYRsDJcBC" },  // Chill Drive
+  { name: "Pump-Up",  emoji: "🔥", playlistId: "4Cy9kER42gAhQWdUO4bZbN" },  // really hype shit
+  { name: "Dinner",   emoji: "🍷", playlistId: "54OYFjQKKwSrZLIkTryYND" },  // Piano & Violin
+  { name: "Focus",    emoji: "🧠", playlistId: "7FT5LXHXnf5FRy2PYlPTDN" },  // calm classical reading
 ];
 
 export const MOODS_STORAGE_KEY = "jarvis-moods-v1";
