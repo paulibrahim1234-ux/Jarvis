@@ -4,7 +4,7 @@ Auth endpoints for Outlook (Microsoft device flow) and Spotify (OAuth callback).
 
 from html import escape as _h
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 
 router = APIRouter(prefix="/auth")
@@ -95,11 +95,15 @@ _CLAUDE_PROBE_CACHE: dict = {"checked_at": 0.0, "ok": None, "error": None}
 _CLAUDE_PROBE_TTL = 300.0  # seconds
 
 
-def _probe_claude(force: bool = False) -> dict:
+def _probe_claude(force: bool = False, allow_refresh: bool = True) -> dict:
     """Make a 1-token request to Anthropic to verify credentials are live.
 
     Returns {ok: bool, error: str | None, checked_at: float}.
     Cached for _CLAUDE_PROBE_TTL seconds unless force=True.
+
+    On a 401, if `allow_refresh=True` we attempt one OAuth refresh and
+    retry — so a freshly-expired token heals itself on the next probe
+    rather than showing "invalid_credential" until the user notices.
 
     A successful return DOES NOT just mean "token exists" — it confirms
     Anthropic accepts it. This is the difference between the old
@@ -132,6 +136,21 @@ def _probe_claude(force: bool = False) -> dict:
         except Exception as e:
             msg = str(e)
             if "401" in msg or "authentication_error" in msg or "Invalid authentication" in msg:
+                # Try ONE OAuth refresh before reporting invalid. This is
+                # the auto-heal path: probe runs every 2 min from the
+                # frontend, so an expired token heals on the next tick
+                # without any user action.
+                if allow_refresh:
+                    try:
+                        from agent import claude_oauth
+                        result_r = claude_oauth.refresh_now(force=True)
+                        if result_r.get("ok") and result_r.get("action") == "refreshed":
+                            # Recursively re-probe ONCE without allowing
+                            # another refresh (avoids infinite loops if
+                            # the new token is somehow also bad).
+                            return _probe_claude(force=True, allow_refresh=False)
+                    except Exception:
+                        pass
                 code = "invalid_credential"
             elif "429" in msg:
                 code = "rate_limited"  # token works but throttled — treat as ok
@@ -142,6 +161,27 @@ def _probe_claude(force: bool = False) -> dict:
             result = {"ok": False, "error": code, "error_detail": msg[:200], "checked_at": now}
     _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=result["ok"], error=result.get("error"))
     return {**result, "cached": False}
+
+
+@router.get("/anthropic/oauth-status")
+def anthropic_oauth_status():
+    """Diagnostics: where is the credential stored, when does it expire,
+    is the auto-refresher running?"""
+    try:
+        from agent.claude_oauth import status
+        return status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/anthropic/refresh")
+def anthropic_force_refresh(request: Request):
+    """Force an OAuth refresh now. Useful after manually rotating tokens
+    or as a manual unstick if the auto-refresher hasn't fired yet."""
+    from api._security import _require_local_origin
+    _require_local_origin(request)
+    from agent import claude_oauth
+    return claude_oauth.refresh_now(force=True)
 
 
 @router.get("/anthropic/status")

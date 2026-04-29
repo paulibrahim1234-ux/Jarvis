@@ -72,6 +72,26 @@ async def lifespan(app: FastAPI):
     # Kick off cache warmup without blocking server startup.
     loop = asyncio.get_running_loop()
     loop.run_in_executor(_WARMUP_EXECUTOR, _run_warmup)
+
+    # Start the Claude OAuth auto-refresher. This:
+    #   1. Eagerly refreshes the access token RIGHT NOW if it's expired
+    #      or near expiry (within 30 min) — handles the "backend boots
+    #      after a long absence" case so chat is healthy from request 1.
+    #   2. Launches a daemon thread that polls every 60s and proactively
+    #      refreshes when there's <30 min of headroom left, so a user
+    #      mid-chat never feels a 401.
+    # The eager part runs synchronously here (uses Keychain + a single
+    # HTTPS POST — fast, ~300 ms). The thread is a daemon so backend
+    # shutdown doesn't hang on it.
+    try:
+        from agent.claude_oauth import start_background_refresher
+        start_background_refresher()
+    except Exception:
+        # Best-effort. If Keychain access is denied or refresh fails,
+        # the existing /auth/anthropic/status probe still surfaces the
+        # problem and the user can update the token via /setup.
+        pass
+
     yield
     _WARMUP_EXECUTOR.shutdown(wait=False)
 
