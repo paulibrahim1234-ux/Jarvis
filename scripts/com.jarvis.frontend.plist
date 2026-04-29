@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jarvis.frontend</string>
+
+	<!--
+	  Invoke node directly with npm-cli.js. We avoid running `npm run dev`
+	  via the npm symlink because npm's shebang is `#!/usr/bin/env node`
+	  and launchd has no PATH to resolve `node`. The fnm-installed Node
+	  v24.15.0 binary lives under ~/.local/share/fnm/, which is stable
+	  across shell sessions (unlike fnm_multishells which is per-shell).
+	-->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/paulibrahim/.local/share/fnm/node-versions/v24.15.0/installation/bin/node</string>
+		<string>/Users/paulibrahim/.local/share/fnm/node-versions/v24.15.0/installation/lib/node_modules/npm/bin/npm-cli.js</string>
+		<string>run</string>
+		<string>dev</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/paulibrahim/jarvis/frontend</string>
+
+	<!--
+	  Belt-and-suspenders: set PATH so any child processes (next dev's
+	  spawned workers, Turbopack, etc.) can also find node. launchd
+	  inherits a minimal PATH otherwise.
+	-->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/paulibrahim/.local/share/fnm/node-versions/v24.15.0/installation/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>NODE_ENV</key>
+		<string>development</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!--
+	  KeepAlive=true means launchd respawns the process if it exits
+	  for ANY reason (crash, OOM, manual kill). Combined with RunAtLoad,
+	  this gives "always on, auto-restart on crash, auto-start at login".
+	-->
+	<key>KeepAlive</key>
+	<true/>
+
+	<!--
+	  Throttle restart attempts so a chronic crash loop doesn't hammer
+	  the system. 10s = launchd waits at least 10s between respawns.
+	-->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>/Users/paulibrahim/Library/Logs/jarvis-frontend.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/paulibrahim/Library/Logs/jarvis-frontend.err.log</string>
+</dict>
+</plist>

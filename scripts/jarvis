@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+#
+# jarvis — control script for the Jarvis personal-OS dashboard.
+#
+# Manages two launchd-backed services:
+#   • com.jarvis.backend  — FastAPI on :8000
+#   • com.jarvis.frontend — Next.js dev server on :3000
+#
+# Both are configured RunAtLoad + KeepAlive=true, so once installed they
+# auto-start at login and auto-restart on crash. This script wraps the
+# common operations so you don't have to remember launchctl invocations.
+#
+# Usage:
+#   jarvis install        Load both plists into launchd (one-time setup).
+#   jarvis uninstall      Bootout + remove plists.
+#   jarvis start          Start (or restart) both services.
+#   jarvis stop           Stop both (will respawn at next login).
+#   jarvis restart        Kill + relaunch both.
+#   jarvis status         Show PID + health for both.
+#   jarvis logs [svc]     Tail logs. svc = backend|frontend|both (default).
+#   jarvis url            Print the dashboard URL.
+#   jarvis open           Open the dashboard in the default browser.
+#
+# Run `jarvis` with no args for help.
+
+set -euo pipefail
+
+# ── Constants ──────────────────────────────────────────────────────────────
+
+readonly REPO_ROOT="/Users/paulibrahim/jarvis"
+readonly LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+
+readonly BACKEND_LABEL="com.jarvis.backend"
+readonly FRONTEND_LABEL="com.jarvis.frontend"
+
+readonly BACKEND_PLIST_TARGET="$LAUNCH_AGENTS_DIR/${BACKEND_LABEL}.plist"
+readonly FRONTEND_PLIST_TARGET="$LAUNCH_AGENTS_DIR/${FRONTEND_LABEL}.plist"
+readonly FRONTEND_PLIST_SOURCE="$REPO_ROOT/scripts/com.jarvis.frontend.plist"
+
+readonly BACKEND_URL="http://localhost:8000"
+readonly FRONTEND_URL="http://localhost:3000"
+
+readonly BACKEND_OUT_LOG="$HOME/Library/Logs/jarvis-backend.out.log"
+readonly BACKEND_ERR_LOG="$HOME/Library/Logs/jarvis-backend.err.log"
+readonly FRONTEND_OUT_LOG="$HOME/Library/Logs/jarvis-frontend.out.log"
+readonly FRONTEND_ERR_LOG="$HOME/Library/Logs/jarvis-frontend.err.log"
+
+# Service identifiers used by `launchctl kickstart` etc.
+readonly BACKEND_SVC="gui/$UID/$BACKEND_LABEL"
+readonly FRONTEND_SVC="gui/$UID/$FRONTEND_LABEL"
+
+# ── Pretty output ──────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+  readonly C_BOLD=$'\033[1m'
+  readonly C_DIM=$'\033[2m'
+  readonly C_GREEN=$'\033[32m'
+  readonly C_RED=$'\033[31m'
+  readonly C_YELLOW=$'\033[33m'
+  readonly C_BLUE=$'\033[34m'
+  readonly C_RESET=$'\033[0m'
+else
+  readonly C_BOLD="" C_DIM="" C_GREEN="" C_RED="" C_YELLOW="" C_BLUE="" C_RESET=""
+fi
+
+ok()    { printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$1"; }
+warn()  { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$1"; }
+err()   { printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$1" >&2; }
+info()  { printf '%s•%s %s\n' "$C_BLUE" "$C_RESET" "$1"; }
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+# Returns 0 if a launchd service is loaded (regardless of running state).
+is_loaded() {
+  local label="$1"
+  launchctl print "gui/$UID/$label" >/dev/null 2>&1
+}
+
+# Returns 0 if the service is currently running (PID present).
+# Use POSIX [[:space:]] instead of \s — BSD awk on macOS doesn't honor \s.
+# Also anchor with `pid = ` (with the equals + space) so we don't pick up
+# job state or other lines containing "pid".
+get_pid() {
+  local label="$1"
+  launchctl print "gui/$UID/$label" 2>/dev/null \
+    | awk '/^[[:space:]]+pid = [0-9]+$/ { print $3; exit }'
+}
+
+# Probe an HTTP URL with a short timeout. Returns 0 if 2xx, else non-zero.
+probe_http() {
+  local url="$1"
+  curl -s -o /dev/null -m 2 -w '%{http_code}' "$url" 2>/dev/null \
+    | grep -qE '^2[0-9][0-9]$'
+}
+
+require_plist_source() {
+  if [[ ! -f "$FRONTEND_PLIST_SOURCE" ]]; then
+    err "frontend plist source not found at $FRONTEND_PLIST_SOURCE"
+    err "this script depends on the file shipped in the repo — re-clone or restore it"
+    exit 1
+  fi
+}
+
+# ── Subcommands ────────────────────────────────────────────────────────────
+
+cmd_install() {
+  require_plist_source
+  mkdir -p "$LAUNCH_AGENTS_DIR"
+
+  # Backend plist — should already exist; warn if missing.
+  if [[ ! -f "$BACKEND_PLIST_TARGET" ]]; then
+    warn "backend plist not found at $BACKEND_PLIST_TARGET — backend won't auto-start"
+    warn "create it manually following the pattern of the frontend plist"
+  fi
+
+  # Frontend plist — copy from repo if missing or out-of-date.
+  if [[ ! -f "$FRONTEND_PLIST_TARGET" ]] || ! cmp -s "$FRONTEND_PLIST_SOURCE" "$FRONTEND_PLIST_TARGET"; then
+    cp "$FRONTEND_PLIST_SOURCE" "$FRONTEND_PLIST_TARGET"
+    ok "installed $FRONTEND_PLIST_TARGET"
+  else
+    info "frontend plist already up-to-date"
+  fi
+
+  # Bootstrap into launchd. bootout first if already loaded so we get the
+  # latest version of the plist. Capture bootstrap stderr so failures are
+  # visible (the previous swallow-with-|| true hid real errors).
+  for label in "$BACKEND_LABEL" "$FRONTEND_LABEL"; do
+    local target="$LAUNCH_AGENTS_DIR/${label}.plist"
+    [[ -f "$target" ]] || continue
+    if is_loaded "$label"; then
+      launchctl bootout "gui/$UID/$label" 2>/dev/null || true
+      # launchd needs a beat to fully tear down the service before we
+      # can bootstrap a fresh one — without this sleep, bootstrap hits
+      # "service already loaded" race even though the print-check passed.
+      sleep 1
+    fi
+    local boot_err
+    if boot_err="$(launchctl bootstrap "gui/$UID" "$target" 2>&1)"; then
+      ok "loaded $label"
+    else
+      err "bootstrap failed for $label: $boot_err"
+    fi
+  done
+
+  ok "install complete — services will auto-start at login"
+  info "use 'jarvis status' to see what's running now"
+}
+
+cmd_uninstall() {
+  for label in "$BACKEND_LABEL" "$FRONTEND_LABEL"; do
+    if is_loaded "$label"; then
+      launchctl bootout "gui/$UID/$label" 2>/dev/null || true
+      ok "unloaded $label"
+    fi
+  done
+  # Note: we don't delete the plist files — that's destructive enough that
+  # the user should do it themselves with `rm`.
+  info "plist files left in place at $LAUNCH_AGENTS_DIR (rm to fully remove)"
+}
+
+cmd_start() {
+  for label in "$BACKEND_LABEL" "$FRONTEND_LABEL"; do
+    if ! is_loaded "$label"; then
+      warn "$label not loaded — run 'jarvis install' first"
+      continue
+    fi
+    # `kickstart` (no -k) starts the service if not running, no-op if already running.
+    launchctl kickstart "gui/$UID/$label" 2>/dev/null || true
+    ok "started $label"
+  done
+}
+
+cmd_stop() {
+  # Bootout stops the service AND removes from launchd; service won't
+  # respawn until next login (or `jarvis install`/`start`).
+  # Use kickstart -k -p instead if you just want to kill without unloading,
+  # but that's racier with KeepAlive=true.
+  for label in "$BACKEND_LABEL" "$FRONTEND_LABEL"; do
+    if is_loaded "$label"; then
+      launchctl bootout "gui/$UID/$label" 2>/dev/null || true
+      ok "stopped $label"
+    else
+      info "$label not loaded"
+    fi
+  done
+  warn "services will stay stopped until 'jarvis start' OR your next login"
+}
+
+cmd_restart() {
+  for label in "$BACKEND_LABEL" "$FRONTEND_LABEL"; do
+    if ! is_loaded "$label"; then
+      warn "$label not loaded — skipping (run 'jarvis install' first)"
+      continue
+    fi
+    launchctl kickstart -k "gui/$UID/$label" 2>/dev/null || true
+    ok "restarted $label"
+  done
+  # Give them a beat to come up before the implicit status check.
+  sleep 2
+  cmd_status
+}
+
+cmd_status() {
+  local backend_pid frontend_pid
+  backend_pid="$(get_pid "$BACKEND_LABEL" || true)"
+  frontend_pid="$(get_pid "$FRONTEND_LABEL" || true)"
+
+  printf '\n%s%-12s %-10s %-10s %s%s\n' "$C_BOLD" "service" "loaded" "pid" "health" "$C_RESET"
+  printf '%s%-12s %-10s %-10s %s%s\n' "$C_DIM" "──────────" "──────" "─────" "─────────" "$C_RESET"
+
+  # Backend row
+  local b_loaded="no" b_health="—"
+  is_loaded "$BACKEND_LABEL" && b_loaded="yes"
+  if probe_http "$BACKEND_URL/health"; then
+    b_health="${C_GREEN}up${C_RESET}    $BACKEND_URL"
+  elif [[ -n "$backend_pid" ]]; then
+    b_health="${C_YELLOW}starting${C_RESET}"
+  else
+    b_health="${C_RED}down${C_RESET}"
+  fi
+  printf '%-12s %-10s %-10s %s\n' "backend" "$b_loaded" "${backend_pid:-—}" "$b_health"
+
+  # Frontend row
+  local f_loaded="no" f_health="—"
+  is_loaded "$FRONTEND_LABEL" && f_loaded="yes"
+  if probe_http "$FRONTEND_URL"; then
+    f_health="${C_GREEN}up${C_RESET}    $FRONTEND_URL"
+  elif [[ -n "$frontend_pid" ]]; then
+    f_health="${C_YELLOW}starting${C_RESET}"
+  else
+    f_health="${C_RED}down${C_RESET}"
+  fi
+  printf '%-12s %-10s %-10s %s\n' "frontend" "$f_loaded" "${frontend_pid:-—}" "$f_health"
+  printf '\n'
+}
+
+cmd_logs() {
+  local target="${1:-both}"
+  case "$target" in
+    backend|be)
+      info "tailing backend logs (Ctrl+C to stop)"
+      tail -F "$BACKEND_OUT_LOG" "$BACKEND_ERR_LOG"
+      ;;
+    frontend|fe)
+      info "tailing frontend logs (Ctrl+C to stop)"
+      tail -F "$FRONTEND_OUT_LOG" "$FRONTEND_ERR_LOG"
+      ;;
+    both|"")
+      info "tailing both services (Ctrl+C to stop)"
+      tail -F "$BACKEND_OUT_LOG" "$BACKEND_ERR_LOG" "$FRONTEND_OUT_LOG" "$FRONTEND_ERR_LOG"
+      ;;
+    *)
+      err "unknown target: $target (expected: backend | frontend | both)"
+      exit 1
+      ;;
+  esac
+}
+
+cmd_url() {
+  printf '%s\n' "$FRONTEND_URL"
+}
+
+cmd_open() {
+  open "$FRONTEND_URL"
+}
+
+cmd_help() {
+  cat <<'EOF'
+jarvis — control the Jarvis dashboard services
+
+Usage:
+  jarvis install              Load both launchd plists (one-time setup)
+  jarvis uninstall            Unload both services from launchd
+  jarvis start                Start both services
+  jarvis stop                 Stop both (won't respawn until login or `start`)
+  jarvis restart              Kill + relaunch both
+  jarvis status               Show PID + health for both
+  jarvis logs [target]        Tail logs (target = backend | frontend | both)
+  jarvis url                  Print the dashboard URL
+  jarvis open                 Open the dashboard in your default browser
+
+Both services are configured KeepAlive=true and RunAtLoad=true once
+installed, so they auto-start at login and auto-restart on crash. The
+'install' subcommand is idempotent — safe to re-run after editing a plist.
+
+Logs:
+  Backend:  ~/Library/Logs/jarvis-backend.{out,err}.log
+  Frontend: ~/Library/Logs/jarvis-frontend.{out,err}.log
+EOF
+}
+
+# ── Dispatcher ─────────────────────────────────────────────────────────────
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    install)    cmd_install "$@" ;;
+    uninstall)  cmd_uninstall "$@" ;;
+    start|up)   cmd_start "$@" ;;
+    stop|down)  cmd_stop "$@" ;;
+    restart|reload) cmd_restart "$@" ;;
+    status|st)  cmd_status "$@" ;;
+    logs|log|tail) cmd_logs "$@" ;;
+    url)        cmd_url "$@" ;;
+    open)       cmd_open "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)
+      err "unknown subcommand: $cmd"
+      printf '\n'
+      cmd_help
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
