@@ -391,7 +391,15 @@ export async function deleteNBMEScore(id: string): Promise<void> {
   if (!r.ok) throw new Error(`nbme delete ${r.status}`);
 }
 
-export async function fetchAuthStatus(): Promise<Record<string, boolean>> {
+export interface AuthStatus {
+  claude: boolean;
+  claude_error?: string | null;
+  outlook: boolean;
+  spotify: boolean;
+  anki: boolean;
+}
+
+export async function fetchAuthStatus(): Promise<AuthStatus> {
   try {
     const r = await fetch(`${BACKEND}/auth/status`, {
       signal: AbortSignal.timeout(3000),
@@ -401,6 +409,21 @@ export async function fetchAuthStatus(): Promise<Record<string, boolean>> {
   } catch {
     return { claude: false, outlook: false, spotify: false, anki: false };
   }
+}
+
+/** Force-refresh the Anthropic credential probe (bypass server-side cache).
+ * Use after the user updates the token via /setup. */
+export async function fetchAnthropicStatus(force = false): Promise<{
+  ok: boolean;
+  error: string | null;
+  error_detail?: string;
+  checked_at: number;
+  cached: boolean;
+}> {
+  const url = `${BACKEND}/auth/anthropic/status${force ? "?force=true" : ""}`;
+  const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (!r.ok) throw new Error(`anthropic status ${r.status}`);
+  return r.json();
 }
 
 export async function addEmailToCalendar(body: {

@@ -81,24 +81,38 @@ export function AnkiStatsWidget() {
           const reviewedToday = data.reviewedToday ?? 0;
           const streak = data.streak ?? 0;
           const retention = data.retention ?? 0;
+          const learning = data.learning ?? 0;
+          const suspended = data.suspended ?? 0;
+          const availableTotal = data.available_total ?? 0;
+          const suggestedCount = data.suggested_count ?? 0;
 
-          // Backend bug: returns available:true with all zeros when Anki is closed
+          // Detect Anki actually closed (vs. user just having all cards
+          // suspended). The old "all zeros = closed" heuristic was wrong:
+          // an AnKing user with 43k suspended cards legitimately has 0 due
+          // and 0 reviewed today. Now we check `suspended` — if it's > 0
+          // then AnkiConnect IS reading the collection, the user just
+          // doesn't have any active.
           const ankiClosed =
             data.available === true &&
             due === 0 &&
             reviewedToday === 0 &&
             streak === 0 &&
-            retention === 0;
+            retention === 0 &&
+            suspended === 0 &&
+            learning === 0;
 
           if (ankiClosed) {
             setLiveStatus("closed");
-            // still update stats to zeros so the display is consistent
             setStats({
               due: 0,
               reviewedToday: 0,
               newCards: data.newCards ?? 0,
               streak: 0,
               retention: 0,
+              learning: 0,
+              suspended: 0,
+              available_total: 0,
+              suggested_count: 0,
             });
             return;
           }
@@ -109,6 +123,10 @@ export function AnkiStatsWidget() {
             newCards: data.newCards ?? 0,
             streak,
             retention,
+            learning,
+            suspended,
+            available_total: availableTotal,
+            suggested_count: suggestedCount,
           });
           setLiveStatus("live");
           setFetchError(null);
@@ -191,6 +209,29 @@ export function AnkiStatsWidget() {
   const streak = stats?.streak ?? 0;
   const newCards = stats?.newCards ?? 0;
   const retention = stats?.retention ?? 0;
+  const learning = stats?.learning ?? 0;
+  const suspended = stats?.suspended ?? 0;
+  const availableTotal = stats?.available_total ?? 0;
+  const suggestedCount = stats?.suggested_count ?? 0;
+
+  // "All cards suspended" state: collection has cards but none are
+  // unsuspended. Common for AnKing-style workflows where you only
+  // unsuspend cards encountered in UWorld.
+  const allSuspended =
+    suspended > 0 && availableTotal === 0 && due === 0 && learning === 0;
+  // Auto-route to Suggested tab on first load when there's something to do
+  // and no cards are due. Only run once — the user can click back to Stats.
+  const autoRouteRef = useRef(false);
+  useEffect(() => {
+    if (autoRouteRef.current) return;
+    if (liveStatus !== "live") return;
+    if (due === 0 && suggestedCount > 0) {
+      autoRouteRef.current = true;
+      setTab("suggested");
+    } else if (due > 0) {
+      autoRouteRef.current = true; // user has work to do — don't override their tab choice later
+    }
+  }, [liveStatus, due, suggestedCount]);
   // When due=0 and reviewedToday>0, the session is done → 100%.
   // When both are 0 (no activity), stay at 0%.
   const progressPct =
@@ -337,8 +378,30 @@ export function AnkiStatsWidget() {
                   cards due
                 </div>
                 <div className="mt-1.5 text-[11px] text-muted-foreground/70">
-                  {reviewedToday} reviewed &middot; {newCards} new
+                  {reviewedToday} reviewed &middot; {learning} learning &middot; {newCards} new
                 </div>
+                {/* Real-state context: explain why due=0 when relevant. */}
+                {allSuspended && (
+                  <div className="mt-1.5 text-[10px] text-amber-300/80">
+                    all {suspended.toLocaleString()} cards suspended
+                  </div>
+                )}
+                {/* Suggested-cards CTA — prominent when due is empty. */}
+                {suggestedCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setTab("suggested")}
+                    className={
+                      "mt-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors " +
+                      (due === 0
+                        ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30"
+                        : "text-muted-foreground/70 hover:text-foreground hover:bg-white/5")
+                    }
+                    title="Open the Suggested tab to unsuspend UWorld-mapped cards"
+                  >
+                    {suggestedCount} suggested {suggestedCount === 1 ? "card" : "cards"} to unsuspend →
+                  </button>
+                )}
                 {isVeryLarge && liveStatus === "live" && (
                   <div className="mt-1 text-[10px] text-muted-foreground/50">
                     live from AnkiConnect

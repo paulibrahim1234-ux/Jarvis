@@ -29,6 +29,16 @@ export interface AnkiStats {
   streak: number; // days
   newCards: number;
   retention: number; // percentage
+
+  // Iter-3 enrichment — surface the real state instead of "0 due" looking broken.
+  // `learning` = cards in the learning queue right now (re-review steps).
+  // `suspended` = cards user has parked (AnKing default-suspend workflow).
+  // `available_total` = non-suspended, non-buried cards (the active pool).
+  // `suggested_count` = UWorld-mapped cards waiting to be unsuspended.
+  learning?: number;
+  suspended?: number;
+  available_total?: number;
+  suggested_count?: number;
 }
 
 // iMessage

@@ -18,6 +18,7 @@ _ALLOWED = {
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REDIRECT_URI",
     "MS_CLIENT_ID", "MS_TENANT_ID",
     "UWORLD_USERNAME", "UWORLD_PASSWORD",
+    "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
 }
 
 
@@ -53,7 +54,15 @@ def setup_page():
     except Exception:
         anki_ok = False
 
-    claude_ok = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN"))
+    # Live probe — actually try the credential against Anthropic. The old
+    # bool(env_var_set) check let expired tokens look healthy until the
+    # user tried to chat. /auth/anthropic/status caches the result for
+    # 5 min so loading /setup is still fast.
+    try:
+        from api.auth import _probe_claude
+        claude_ok = bool(_probe_claude(force=False).get("ok"))
+    except Exception:
+        claude_ok = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN"))
 
     def badge(ok: bool) -> str:
         return (
@@ -90,9 +99,45 @@ def save_credentials(
     ms_tenant_id: str = Form(""),
     uworld_username: str = Form(""),
     uworld_password: str = Form(""),
+    anthropic_token: str = Form(""),
 ):
     _require_local_origin(request)
     saved = []
+
+    # ── Claude / Anthropic ────────────────────────────────────────────────
+    # Accept either an API key (sk-ant-api...) or an OAuth token (sk-ant-oat...).
+    # The agent.jarvis client distinguishes them by prefix and uses the
+    # right auth header. After writing, we hot-reload the in-memory clients
+    # so chat works WITHOUT a backend restart.
+    if service == "claude":
+        token = anthropic_token.strip()
+        if token:
+            if token.startswith("sk-ant-oat"):
+                _write_env("CLAUDE_CODE_OAUTH_TOKEN", token)
+                os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token
+                # Clear the API-key var so it doesn't shadow the new OAuth token
+                # (the resolver picks ANTHROPIC_API_KEY first).
+                os.environ.pop("ANTHROPIC_API_KEY", None)
+                _write_env("ANTHROPIC_API_KEY", "")
+                saved.append("CLAUDE_CODE_OAUTH_TOKEN")
+            else:
+                _write_env("ANTHROPIC_API_KEY", token)
+                os.environ["ANTHROPIC_API_KEY"] = token
+                saved.append("ANTHROPIC_API_KEY")
+            # Hot-reload the Anthropic clients so chat picks up the new
+            # credential without a backend restart. Also bust the auth probe
+            # cache so /auth/status shows the live result on next call.
+            try:
+                from agent import jarvis as _jarvis
+                _jarvis.reload_anthropic_clients()
+            except Exception:
+                pass
+            try:
+                from api.auth import _CLAUDE_PROBE_CACHE
+                _CLAUDE_PROBE_CACHE.update(checked_at=0.0, ok=None, error=None)
+            except Exception:
+                pass
+        return RedirectResponse("/setup", status_code=303)
 
     if service == "spotify":
         if spotify_client_id.strip():
@@ -216,6 +261,31 @@ _PAGE = """<!DOCTYPE html>
       <span>📧 Microsoft: {ms_auth_badge}</span>
       <span>🃏 Anki: {anki_badge}</span>
     </div>
+  </div>
+
+  <!-- Claude / Anthropic -->
+  <div class="card">
+    <h2>🤖 Claude (chat)</h2>
+    <p>
+      Powers the chat panel. Paste either an <strong>API key</strong>
+      (<code>sk-ant-api...</code> from <a class="hint-link" href="https://console.anthropic.com/settings/keys" target="_blank">console.anthropic.com</a>)
+      OR a <strong>Claude Code OAuth token</strong> (<code>sk-ant-oat...</code>,
+      run <code>claude</code> in your terminal and copy the token from
+      <code>~/.claude/.credentials.json</code>).
+    </p>
+    <div class="status-row">
+      <span>Auth: {claude_badge}</span>
+    </div>
+    <form method="post" action="/setup/credentials">
+      <input type="hidden" name="service" value="claude">
+      <label>API key OR OAuth token</label>
+      <input type="password" name="anthropic_token" placeholder="sk-ant-api... or sk-ant-oat..." autocomplete="off">
+      <p class="hint">
+        Saved to <code>backend/.env</code>. Jarvis hot-reloads the Anthropic
+        client in-process so chat works immediately — no backend restart needed.
+      </p>
+      <button type="submit">Save Claude Credential</button>
+    </form>
   </div>
 
   <!-- Spotify -->

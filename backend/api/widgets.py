@@ -87,18 +87,44 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
 def anki_stats():
     def _compute():
         try:
+            # Six queries in one batched invoke (AnkiConnect runs them
+            # sequentially server-side, but we save 5 HTTP roundtrips).
             results = anki_invoke_multi([
                 {"action": "findCards", "params": {"query": "is:due"}},
                 {"action": "findCards", "params": {"query": "rated:1"}},
                 {"action": "findCards", "params": {"query": "is:new is:due"}},
+                {"action": "findCards", "params": {"query": "is:learn"}},
+                {"action": "findCards", "params": {"query": "is:suspended"}},
+                {"action": "findCards", "params": {"query": "-is:suspended -is:buried"}},
             ])
             due_ids = results[0] or []
             reviewed_ids = results[1] or []
             new_ids = results[2] or []
+            learn_ids = results[3] or []
+            suspended_ids = results[4] or []
+            available_ids = results[5] or []
+
+            # How many UWorld-mapped cards are awaiting unsuspend? Read the
+            # pre-built index without hitting Anki — instant dict read.
+            suggested_count = 0
+            try:
+                incorrects, _ = _load_uworld_incorrect()
+                if incorrects:
+                    index = _load_anki_qid_index()
+                    qids = {str(i.get("uworld_qid", "")) for i in incorrects if i.get("uworld_qid")}
+                    suggested_count = sum(len(index.get(q, []) or []) for q in qids)
+            except Exception:
+                # Don't let suggestion-counting break the main widget.
+                suggested_count = 0
+
             return {
                 "due": len(due_ids),
                 "reviewedToday": len(reviewed_ids),
                 "newCards": len(new_ids),
+                "learning": len(learn_ids),
+                "suspended": len(suspended_ids),
+                "available_total": len(available_ids),
+                "suggested_count": suggested_count,
                 "streak": _compute_streak(),
                 "retention": _compute_retention(),
                 "available": True,

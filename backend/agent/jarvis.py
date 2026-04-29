@@ -16,19 +16,41 @@ from agent import memory
 # We use AsyncAnthropic so that chat_async can await the API call without
 # blocking the FastAPI event loop. The sync `client` is kept for the
 # backwards-compatible sync wrapper and for memory.extract_facts_async.
-_raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or ""
-if _raw.startswith("sk-ant-oat"):
-    client = anthropic.Anthropic(
-        auth_token=_raw,
-        default_headers={"anthropic-beta": "oauth-2025-04-20"},
+def _build_anthropic_clients():
+    """Build (sync, async) Anthropic clients from current env vars.
+
+    Extracted so /setup endpoints can rebuild clients in-process after a
+    credential update — without this, an expired token would persist on
+    the module-level `client` reference until backend restart.
+    """
+    raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or ""
+    if raw.startswith("sk-ant-oat"):
+        return (
+            anthropic.Anthropic(
+                auth_token=raw,
+                default_headers={"anthropic-beta": "oauth-2025-04-20"},
+            ),
+            anthropic.AsyncAnthropic(
+                auth_token=raw,
+                default_headers={"anthropic-beta": "oauth-2025-04-20"},
+            ),
+        )
+    return (
+        anthropic.Anthropic(api_key=raw),
+        anthropic.AsyncAnthropic(api_key=raw),
     )
-    async_client = anthropic.AsyncAnthropic(
-        auth_token=_raw,
-        default_headers={"anthropic-beta": "oauth-2025-04-20"},
-    )
-else:
-    client = anthropic.Anthropic(api_key=_raw)
-    async_client = anthropic.AsyncAnthropic(api_key=_raw)
+
+
+client, async_client = _build_anthropic_clients()
+
+
+def reload_anthropic_clients():
+    """Re-instantiate clients after a credential change. Other modules that
+    `from agent.jarvis import async_client` directly will keep the stale
+    reference — they should `from agent import jarvis` and access via
+    `jarvis.async_client` to pick up the fresh client."""
+    global client, async_client
+    client, async_client = _build_anthropic_clients()
 
 BASE_SYSTEM_PROMPT = """You are Jarvis, a personal AI assistant for a medical student (MS3, surgery rotation). You control their Mac directly — no OAuth or Azure setup needed for most things.
 

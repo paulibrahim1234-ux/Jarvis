@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { BACKEND } from "@/lib/api";
+import { BACKEND, fetchAuthStatus, type AuthStatus } from "@/lib/api";
 import { type Theme, getInitialTheme, applyTheme, persistTheme } from "@/lib/theme";
 
 type ServiceStatus = "up" | "down" | "unknown";
@@ -10,6 +10,29 @@ export function Topbar() {
   const [now, setNow] = useState<Date | null>(null);
   const [backend, setBackend] = useState<ServiceStatus>("unknown");
   const [theme, setTheme] = useState<Theme>("dark");
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+
+  // Credential health — refreshes every 2 min on the client. The backend
+  // caches the live Anthropic probe for 5 min, so this hits real Anthropic
+  // at most every 5 min but the UI reflects user-driven changes (e.g.
+  // pasting a new token at /setup) within the next polling tick.
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const s = await fetchAuthStatus();
+        if (!cancelled) setAuthStatus(s);
+      } catch {
+        /* ignore */
+      }
+    };
+    probe();
+    const id = setInterval(probe, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     setNow(new Date());
@@ -139,6 +162,36 @@ export function Topbar() {
             {statusLabel}
           </span>
         </span>
+
+        {/* Claude credential health — only show when we have a verdict.
+            Hide while loading; show a green dot when valid; show an amber
+            "Re-auth Claude" link when invalid (clicks → /setup). */}
+        {authStatus !== null && !authStatus.claude && (
+          <a
+            href={`${BACKEND}/setup`}
+            target="_blank"
+            rel="noreferrer"
+            className="hidden sm:inline-flex items-center gap-1.5 rounded-full border px-2 py-[2px] hover:opacity-90 transition-opacity"
+            style={{
+              borderColor: "rgba(245, 158, 11, 0.4)",
+              backgroundColor: "rgba(245, 158, 11, 0.12)",
+              fontSize: "10px",
+              color: "rgb(252, 211, 77)",
+              letterSpacing: "0.04em",
+              textDecoration: "none",
+            }}
+            title={`Claude auth: ${authStatus.claude_error ?? "invalid"}. Click to update credentials.`}
+          >
+            <span style={{
+              width: 6, height: 6, borderRadius: 999,
+              backgroundColor: "rgb(245, 158, 11)",
+              display: "inline-block",
+            }} />
+            <span style={{ textTransform: "uppercase", fontWeight: 500 }}>
+              Re-auth Claude
+            </span>
+          </a>
+        )}
 
         {/* Theme toggle */}
         <button

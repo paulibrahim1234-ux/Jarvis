@@ -85,6 +85,73 @@ def spotify_status():
 
 # ── Status overview ───────────────────────────────────────────────────────────
 
+# ── Claude credential health probe ────────────────────────────────────────────
+# Cache the live-probe result so periodic /auth/status calls from the topbar
+# don't burn a request per check. 5 min strikes the right balance: long
+# enough to be cheap, short enough that an expired token surfaces quickly.
+
+import time as _t
+_CLAUDE_PROBE_CACHE: dict = {"checked_at": 0.0, "ok": None, "error": None}
+_CLAUDE_PROBE_TTL = 300.0  # seconds
+
+
+def _probe_claude(force: bool = False) -> dict:
+    """Make a 1-token request to Anthropic to verify credentials are live.
+
+    Returns {ok: bool, error: str | None, checked_at: float}.
+    Cached for _CLAUDE_PROBE_TTL seconds unless force=True.
+
+    A successful return DOES NOT just mean "token exists" — it confirms
+    Anthropic accepts it. This is the difference between the old
+    `bool(env_var_set)` check (which let expired tokens look healthy) and
+    a real liveness probe.
+    """
+    import os
+    now = _t.time()
+    if not force and _CLAUDE_PROBE_CACHE["checked_at"] and \
+       (now - _CLAUDE_PROBE_CACHE["checked_at"]) < _CLAUDE_PROBE_TTL:
+        return {
+            "ok": _CLAUDE_PROBE_CACHE["ok"],
+            "error": _CLAUDE_PROBE_CACHE["error"],
+            "checked_at": _CLAUDE_PROBE_CACHE["checked_at"],
+            "cached": True,
+        }
+    raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or ""
+    if not raw:
+        result = {"ok": False, "error": "no_credential", "checked_at": now}
+    else:
+        try:
+            from agent import jarvis as _jarvis
+            # 1-token request — cheapest call that exercises real auth.
+            _jarvis.client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "."}],
+            )
+            result = {"ok": True, "error": None, "checked_at": now}
+        except Exception as e:
+            msg = str(e)
+            if "401" in msg or "authentication_error" in msg or "Invalid authentication" in msg:
+                code = "invalid_credential"
+            elif "429" in msg:
+                code = "rate_limited"  # token works but throttled — treat as ok
+                _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=True, error=None)
+                return {"ok": True, "error": "rate_limited", "checked_at": now, "cached": False}
+            else:
+                code = "unknown"
+            result = {"ok": False, "error": code, "error_detail": msg[:200], "checked_at": now}
+    _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=result["ok"], error=result.get("error"))
+    return {**result, "cached": False}
+
+
+@router.get("/anthropic/status")
+def anthropic_status(force: bool = False):
+    """Live credential probe + cached result.
+    Call ?force=true to bypass the 5-min cache (e.g. after updating the
+    credential via /setup/credentials)."""
+    return _probe_claude(force=force)
+
+
 @router.get("/status")
 def all_status():
     import os
@@ -117,8 +184,11 @@ def all_status():
         except Exception:
             return False
 
+    # Use cached live-probe result so /auth/status stays cheap.
+    claude_probe = _probe_claude(force=False)
     return {
-        "claude": bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")),
+        "claude": bool(claude_probe.get("ok")),
+        "claude_error": claude_probe.get("error"),
         "outlook": _outlook_ok(),
         "spotify": sp_ok(),
         "anki": _anki_ok(),

@@ -11,6 +11,8 @@ import {
   createConversation,
   getConversation,
   deleteConversation,
+  fetchAnthropicStatus,
+  BACKEND,
   type ConversationMeta,
 } from "@/lib/api";
 
@@ -42,6 +44,10 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   const [isTyping, setIsTyping] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isNarrow, setIsNarrow] = useState(false);
+  // Proactive credential health — checked on mount + every 2 min so the
+  // user sees a banner BEFORE typing into a broken chat. Backend caches
+  // the actual Anthropic probe for 5 min so this poll is cheap.
+  const [credBanner, setCredBanner] = useState<{ ok: boolean; error: string | null } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -98,6 +104,26 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages, isTyping]);
+
+  // Probe Anthropic creds on mount + every 2 min. Surface a banner above
+  // the chat input when invalid so the user knows BEFORE typing.
+  useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const s = await fetchAnthropicStatus();
+        if (!cancelled) setCredBanner({ ok: s.ok, error: s.error });
+      } catch {
+        /* ignore — chat will still render its existing 401 fallback */
+      }
+    };
+    probe();
+    const id = setInterval(probe, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   const refreshConversations = useCallback(async () => {
     try {
@@ -345,6 +371,42 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
             }}
           />
         </div>
+
+        {/* Credential health banner — proactive: shown BEFORE the user
+            tries to chat against an expired token. Click → /setup form
+            with a paste-new-token field that hot-reloads the in-process
+            Anthropic client. */}
+        {credBanner && credBanner.ok === false && (
+          <div
+            role="alert"
+            className="mx-4 mt-2 mb-1 rounded-md border px-3 py-2 text-[12px] leading-snug"
+            style={{
+              borderColor: "rgba(245, 158, 11, 0.4)",
+              backgroundColor: "rgba(245, 158, 11, 0.08)",
+              color: "rgb(252, 211, 77)",
+            }}
+          >
+            <div className="font-medium">
+              {credBanner.error === "no_credential"
+                ? "No Claude credential set"
+                : credBanner.error === "invalid_credential"
+                ? "Claude credential invalid or expired"
+                : "Claude unreachable"}
+            </div>
+            <div className="mt-1 text-[11px] opacity-90">
+              Update your token at{" "}
+              <a
+                href={`${BACKEND}/setup`}
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:opacity-100"
+              >
+                /setup
+              </a>
+              {" "}— Jarvis hot-reloads the client, no restart needed.
+            </div>
+          </div>
+        )}
 
         {/* Messages */}
         <ScrollArea className="flex-1 min-h-0">
