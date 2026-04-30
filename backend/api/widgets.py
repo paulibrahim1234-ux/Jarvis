@@ -281,6 +281,32 @@ _UWORLD_STUB_PATH = _Path(__file__).resolve().parent.parent / "storage" / "uworl
 _UWORLD_HISTORY_PATH = _Path(__file__).resolve().parent.parent / "storage" / "uworld_history.json"
 
 
+def _sanitize_test_seq(items: list[dict]) -> list[dict]:
+    """Null out bogus test_seq values (>40) without modifying the file.
+
+    Legacy records have test_seq populated from the session's percentile
+    (e.g. "58") — UWorld's URL routing treats those as out-of-range and
+    shows the loading spinner. The frontend already handles `test_seq ==
+    null` by falling back to the test-overview URL, so sanitizing at read
+    time gives graceful degradation without nuking records (the prior
+    "clear and re-scrape" approach lost wrongs whenever the re-scrape
+    couldn't fetch every cleared test in one pass)."""
+    for i in items:
+        s = i.get("test_seq")
+        if s in (None, ""):
+            continue
+        try:
+            n = int(s)
+        except (TypeError, ValueError):
+            i["test_seq"] = None
+            continue
+        if n < 1 or n > 40:
+            i["test_seq"] = None
+        else:
+            i["test_seq"] = n  # store as int for the frontend
+    return items
+
+
 def _load_uworld_incorrect() -> tuple[list[dict], str]:
     """Return (incorrect_items, source_label) — source is "scraped" or "stub"."""
     for path, label in ((_UWORLD_HISTORY_PATH, "scraped"), (_UWORLD_STUB_PATH, "stub")):
@@ -290,7 +316,7 @@ def _load_uworld_incorrect() -> tuple[list[dict], str]:
             items = data.get("incorrect", []) if isinstance(data, dict) else []
             found = [i for i in items if isinstance(i, dict) and i.get("uworld_qid")]
             if found:
-                return found, label
+                return _sanitize_test_seq(found), label
         except Exception:
             continue
     return [], "stub_empty"
@@ -360,7 +386,12 @@ def _load_uworld_data() -> dict:
     return {
         "sessions": sessions,
         "weak_topics": weak_topics,
-        "incorrect": data.get("incorrect", []) if isinstance(data, dict) else [],
+        # Sanitize bogus test_seq (legacy percentile values) so the
+        # frontend's per-question deep-link falls back to test-overview
+        # gracefully instead of building a broken URL.
+        "incorrect": _sanitize_test_seq(
+            data.get("incorrect", []) if isinstance(data, dict) else []
+        ),
         "available": True,
         "source": source_label,
         "scraped_at": data.get("scraped_at") if isinstance(data, dict) else None,

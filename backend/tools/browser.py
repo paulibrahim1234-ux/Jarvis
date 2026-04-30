@@ -685,7 +685,11 @@ def _uworld_scrape_history() -> dict:
     QBANK_ID = os.environ.get("JARVIS_UWORLD_QBANK_ID", "2")
 
     # How many tests to pull detail for per refresh (env knob, default 10)
-    _results_limit = int(os.environ.get("JARVIS_UWORLD_RESULTS_LIMIT", "10"))
+    # Bumped from 10 to 100 — a previous bug cleared most users' wrong
+    # records, and a 10-test limit meant a single Refresh wouldn't
+    # repopulate the backlog. 100 covers the typical 3-month UWorld
+    # workload with headroom; override via JARVIS_UWORLD_RESULTS_LIMIT.
+    _results_limit = int(os.environ.get("JARVIS_UWORLD_RESULTS_LIMIT", "100"))
 
     # ── Helper: persist history atomically ──────────────────────────────────
     def _persist(payload: dict):
@@ -972,29 +976,16 @@ def _uworld_scrape_history() -> dict:
     existing_data = _load_existing()
     existing_incorrects: list[dict] = existing_data.get("incorrect", [])
 
-    # One-time migration: prior versions wrote the session percentile
-    # (e.g. "58") into per-question test_seq. Real test_seq is 1..40
-    # (the question's position in the testQuestionInfoList). Detect
-    # bogus values and drop those records so the scraper re-fetches
-    # them with the corrected logic below.
-    def _seq_is_bogus(s) -> bool:
-        if s in (None, ""):
-            return False
-        try:
-            return int(s) > 40
-        except (TypeError, ValueError):
-            return False
-    bogus_test_ids = {
-        str(i.get("test_id", ""))
-        for i in existing_incorrects
-        if _seq_is_bogus(i.get("test_seq")) and i.get("test_id")
-    }
-    if bogus_test_ids:
-        log.info(f"[uworld] Clearing {len(bogus_test_ids)} test(s) with bogus test_seq for re-scrape")
-        existing_incorrects = [
-            i for i in existing_incorrects
-            if str(i.get("test_id", "")) not in bogus_test_ids
-        ]
+    # NOTE: an earlier version cleared records with bogus test_seq (>40,
+    # the legacy percentile bug) to force re-scrape. That nuked ~70
+    # sessions worth of wrongs because the scraper's per-tick limit
+    # (_results_limit, default 10) couldn't refetch them all in one run,
+    # leaving the user with empty wrong-question lists for almost every
+    # session. The migration is REMOVED — bogus test_seq values are now
+    # sanitized at read time in _load_uworld_data() and the per-question
+    # URL falls back to the test overview when seq is invalid. Going
+    # forward, new scrapes get correct test_seq; old data degrades
+    # gracefully without losing the wrongs themselves.
 
     # Index by test_id to skip already-cached tests (incremental).
     existing_test_ids: set[str] = {
