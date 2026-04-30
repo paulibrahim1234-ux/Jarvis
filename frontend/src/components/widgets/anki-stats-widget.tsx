@@ -11,6 +11,9 @@ import {
   fetchAnkiStats,
   fetchAnkiSuggestions,
   unsuspendAnkiCards,
+  refreshUWorld,
+  rebuildAnkiQidIndex,
+  getAnkiBuildIndexStatus,
   type AnkiSuggestion,
 } from "@/lib/api";
 import type { AnkiStats } from "@/lib/types";
@@ -178,6 +181,57 @@ export function AnkiStatsWidget() {
       return next;
     });
   };
+
+  // Re-run the full UWorld → Anki suggestion pipeline. Use case: user
+  // just finished a UWorld exam, wants to see the freshly-missed cards
+  // surfaced for unsuspend without restarting the backend.
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [pipelineMsg, setPipelineMsg] = useState<string | null>(null);
+  const handleRefreshPipeline = useCallback(async () => {
+    if (pipelineRunning) return;
+    setPipelineRunning(true);
+    setPipelineMsg("Scraping UWorld history…");
+    try {
+      // Step 1: rescrape UWorld so uworld_history.json reflects today's exam.
+      try {
+        await refreshUWorld();
+      } catch (e) {
+        // Don't block on UWorld scrape failures — it's the slowest step
+        // and may need browser focus. The user can still rebuild the
+        // Anki index against existing scrape data.
+        setPipelineMsg(`UWorld scrape skipped (${e instanceof Error ? e.message : "error"}); continuing…`);
+      }
+
+      // Step 2: kick off the Anki QID index rebuild (background thread on backend).
+      setPipelineMsg("Re-indexing Anki cards…");
+      await rebuildAnkiQidIndex();
+
+      // Step 3: poll status until done (or 60s budget).
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 60_000) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const s = await getAnkiBuildIndexStatus();
+          if (!s.running) break;
+          if (s.total > 0) {
+            setPipelineMsg(`Indexing… ${s.percent}% (${s.progress}/${s.total})`);
+          }
+        } catch {
+          break;
+        }
+      }
+
+      // Step 4: re-fetch suggestions so the panel reflects the new index.
+      setPipelineMsg("Loading suggestions…");
+      await loadSuggestions();
+      setPipelineMsg("Refreshed.");
+    } catch (e) {
+      setPipelineMsg(e instanceof Error ? e.message : "Refresh failed");
+    } finally {
+      setPipelineRunning(false);
+      setTimeout(() => setPipelineMsg(null), 4000);
+    }
+  }, [pipelineRunning, loadSuggestions]);
 
   const handleUnsuspend = async () => {
     if (selected.size === 0) return;
@@ -468,6 +522,9 @@ export function AnkiStatsWidget() {
             submitting={submitting}
             toast={toast}
             onRefresh={loadSuggestions}
+            onRefreshPipeline={handleRefreshPipeline}
+            pipelineRunning={pipelineRunning}
+            pipelineMsg={pipelineMsg}
           />
         )}
       </CardContent>
@@ -486,6 +543,9 @@ function SuggestedPanel(props: {
   submitting: boolean;
   toast: string | null;
   onRefresh: () => void;
+  onRefreshPipeline: () => void;
+  pipelineRunning: boolean;
+  pipelineMsg: string | null;
 }) {
   const {
     suggestions,
@@ -498,6 +558,9 @@ function SuggestedPanel(props: {
     submitting,
     toast,
     onRefresh,
+    onRefreshPipeline,
+    pipelineRunning,
+    pipelineMsg,
   } = props;
 
   if (loading && suggestions.length === 0) {
@@ -547,6 +610,32 @@ function SuggestedPanel(props: {
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
+      {/* Refresh-pipeline header — re-run UWorld scrape + Anki index
+          rebuild + suggestion fetch. Use after a new exam. */}
+      <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
+        <span className="text-muted-foreground/70">
+          {suggestions.length} suggested
+        </span>
+        <div className="flex items-center gap-2">
+          {pipelineMsg && (
+            <span className="text-muted-foreground/70 truncate max-w-[180px]" title={pipelineMsg}>
+              {pipelineMsg}
+            </span>
+          )}
+          <button
+            onClick={onRefreshPipeline}
+            disabled={pipelineRunning}
+            title="Rescrape UWorld + rebuild Anki index"
+            className={`rounded-md px-2 py-1 text-[11px] transition-colors ${
+              pipelineRunning
+                ? "bg-foreground/5 text-muted-foreground cursor-wait"
+                : "bg-foreground/5 hover:bg-foreground/10 text-foreground/80"
+            }`}
+          >
+            {pipelineRunning ? "Refreshing…" : "↻ Refresh"}
+          </button>
+        </div>
+      </div>
       <div className="flex-1 min-h-0 overflow-y-auto space-y-1 pr-1">
         {suggestions.map((s) => {
           const checked = selected.has(s.card_id);

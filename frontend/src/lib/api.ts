@@ -205,6 +205,35 @@ export async function unsuspendAnkiCards(
   return r.json();
 }
 
+/** Re-run the Anki QID index build (a one-shot scan that maps every
+ * suspended UWorld AnKing card to its Step::<qid> tag). Resumable —
+ * already-indexed cards are skipped. Returns immediately; status can be
+ * polled at /widgets/anki/build-index/status. */
+export async function rebuildAnkiQidIndex(): Promise<{ status: string; progress?: number; total?: number; error?: string }> {
+  const r = await fetch(`${BACKEND}/widgets/anki/build-index`, {
+    method: "POST",
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) throw new Error(`anki build-index ${r.status}`);
+  return r.json();
+}
+
+/** Poll the index-build progress. */
+export async function getAnkiBuildIndexStatus(): Promise<{
+  running: boolean;
+  progress: number;
+  total: number;
+  percent: number;
+  index_size: number;
+  error: string | null;
+}> {
+  const r = await fetch(`${BACKEND}/widgets/anki/build-index/status`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!r.ok) throw new Error(`anki build-index status ${r.status}`);
+  return r.json();
+}
+
 export interface StudyStreakDay {
   date: string; // YYYY-MM-DD
   minutes: number; // 0 means no review activity that day
@@ -253,6 +282,26 @@ export type EmailAccountFolders = {
   account_email: string;
   folders: EmailFolder[];
 };
+
+/** Fetch the full plain-text body of one Outlook email by id. Used by
+ * the EmailPreviewModal to show the email content inline without
+ * leaving the dashboard. */
+export async function fetchEmailBody(id: string): Promise<{
+  available: boolean;
+  id?: string;
+  subject?: string;
+  sender_name?: string;
+  sender_email?: string;
+  received_at?: string;
+  body?: string;
+  error?: string;
+}> {
+  const url = new URL(`${BACKEND}/widgets/email/body`);
+  url.searchParams.set("id", id);
+  const r = await fetch(url.toString(), { signal: AbortSignal.timeout(20000) });
+  if (!r.ok) return { available: false, error: `HTTP ${r.status}` };
+  return r.json();
+}
 
 export async function fetchEmailFolders(): Promise<{
   accounts: EmailAccountFolders[];

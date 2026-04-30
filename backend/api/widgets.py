@@ -743,7 +743,11 @@ def imessage_widget(include_groups: bool = False, limit: int = 25):
         except Exception as e:
             return {"available": False, "error": str(e)}
 
-    return _cached(cache_key, 30, _compute)
+    # 8s TTL — short enough that an iMessage reply the user just sent
+    # shows up on the next poll, long enough to absorb burst-loads
+    # from rapid widget re-renders. chat.db read is fast (~30ms) so
+    # this is cheap.
+    return _cached(cache_key, 8, _compute)
 
 
 # ── Email (Outlook desktop first, then Graph API fallback) ────────────────────
@@ -781,6 +785,43 @@ def _compute_email(folder: str = "", account: str = ""):
             "least one account is signed in."
         ),
     }
+
+
+# ── Email body fetch (for inline preview) ────────────────────────────────────
+
+@router.get("/widgets/email/body")
+def email_body(id: str = Query(..., description="Outlook message id")):
+    """Fetch the full plain-text body for one Outlook email so the dashboard
+    can render an inline preview (not just the metadata snippet).
+
+    Cached for 5 min per id — bodies are immutable, so the only reason
+    they'd change is a fresh fetch from a new id. Empty/error responses
+    are cached at 10s only (negative-result rule from `_cached`)."""
+    msg_id = (id or "").strip()
+    if not msg_id:
+        return {"available": False, "error": "missing id"}
+
+    def _compute():
+        try:
+            from tools.desktop_apps import _outlook_read_email
+            data = _outlook_read_email(message_id=msg_id)
+            if data.get("error"):
+                return {"available": False, "error": data["error"]}
+            return {
+                "available": True,
+                "id": data.get("id", msg_id),
+                "subject": data.get("subject", ""),
+                "sender_name": data.get("sender_name", ""),
+                "sender_email": data.get("sender_email", ""),
+                "received_at": data.get("received_at", ""),
+                "body": data.get("body", ""),
+                # html omitted — Outlook HTML can be huge and the dashboard
+                # renders plain text. Add a separate ?html=true if needed.
+            }
+        except Exception as e:
+            return {"available": False, "error": str(e)}
+
+    return _cached(f"email_body::{msg_id}", 300, _compute)
 
 
 @router.get("/widgets/email")

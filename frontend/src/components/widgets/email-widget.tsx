@@ -8,6 +8,7 @@ import {
   fetchEmails,
   fetchEmailFolders,
   addEmailToCalendar,
+  fetchEmailBody,
   type EmailFolder,
   type EmailAccountFolders,
   BACKEND,
@@ -289,6 +290,24 @@ export function EmailWidget() {
     return base;
   }, [emails, tab, search, importantEmails, newsletterEmails]);
 
+  // Pre-compute chrono.parse() for the visible list — was being run inside
+  // the row JSX on every render, O(n) NLP parses per render at 50 emails.
+  // Now: parsed once per email per filtered-set change, O(1) lookup at render.
+  const chronoDates = useMemo(() => {
+    const m = new Map<string, Date | null>();
+    const now = Date.now();
+    for (const e of filtered) {
+      try {
+        const parsed = chrono.parse((e.subject ?? "") + " " + (e.preview ?? ""));
+        const d = parsed.length > 0 ? parsed[0].start.date() : null;
+        m.set(e.id, d && d.getTime() > now ? d : null);
+      } catch {
+        m.set(e.id, null);
+      }
+    }
+    return m;
+  }, [filtered]);
+
   const isWide = containerWidth > 500;
 
   return (
@@ -427,7 +446,7 @@ export function EmailWidget() {
           </div>
         ) : (
           <ScrollArea className="h-full">
-            <div className={isWide ? "grid grid-cols-2 gap-1.5" : "divide-y divide-white/[0.04]"}>
+            <div className={isWide ? "grid grid-cols-2 gap-1.5" : "divide-y divide-foreground/[0.04]"}>
               {filtered.map((email) => (
                 <div
                   key={email.id}
@@ -524,14 +543,12 @@ export function EmailWidget() {
                       </p>
                     )}
 
-                    {/* Row 4: calendar pill — only when chrono finds a future date */}
+                    {/* Row 4: calendar pill — only when chrono finds a future date.
+                        Reads from the memoized map (computed once per filtered list)
+                        to avoid O(n) NLP parses per render. */}
                     {(() => {
-                      const parsed = chrono.parse(
-                        (email.subject ?? "") + " " + (email.preview ?? "")
-                      );
-                      if (!parsed.length) return null;
-                      const d = parsed[0].start.date();
-                      if (d <= new Date()) return null;
+                      const d = chronoDates.get(email.id);
+                      if (!d) return null;
                       const label = d.toLocaleDateString("en-US", {
                         weekday: "short",
                         month: "short",
@@ -576,12 +593,53 @@ function EmailPreviewModal({
   onClose: () => void;
   onOpenOutlook: () => void;
 }) {
-  // Close on ESC
+  // Lazy-fetch the FULL plain-text body when the modal opens. The list
+  // payload only ships the snippet preview; we hit /widgets/email/body
+  // for the real body (cached 5 min server-side).
+  const [bodyState, setBodyState] = useState<{
+    loading: boolean;
+    body: string | null;
+    error: string | null;
+  }>({ loading: true, body: null, error: null });
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setBodyState({ loading: true, body: null, error: null });
+    fetchEmailBody(email.id)
+      .then((data) => {
+        if (cancelled) return;
+        if (data.available && data.body) {
+          setBodyState({ loading: false, body: data.body, error: null });
+        } else {
+          setBodyState({
+            loading: false,
+            body: null,
+            error: data.error ?? "Body unavailable",
+          });
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setBodyState({
+          loading: false,
+          body: null,
+          error: e instanceof Error ? e.message : "Fetch failed",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [email.id]);
+
+  // Close on ESC. Also focus the dialog on mount for screen-reader pickup.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", handler);
+    // Move focus into the dialog so keyboard users land inside it.
+    dialogRef.current?.focus();
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
@@ -594,14 +652,22 @@ function EmailPreviewModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-xl border border-foreground/10 bg-card shadow-2xl flex flex-col max-h-[80vh]"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="email-preview-subject"
+        tabIndex={-1}
+        className="w-full max-w-md rounded-xl border border-foreground/10 bg-card shadow-2xl flex flex-col max-h-[80vh] outline-none focus-visible:ring-2 focus-visible:ring-foreground/20"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="p-4 pb-3 border-b border-foreground/[0.06] shrink-0">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-foreground leading-tight truncate">
+              <p
+                id="email-preview-subject"
+                className="text-sm font-semibold text-foreground leading-tight truncate"
+              >
                 {email.subject}
               </p>
               <p className="text-[11px] text-muted-foreground/80 mt-0.5 truncate">
@@ -649,9 +715,25 @@ function EmailPreviewModal({
           </div>
         </div>
 
-        {/* Body */}
+        {/* Body — lazy-loads the full plain-text via /widgets/email/body.
+            Falls back to the list snippet if the fetch fails (e.g. message
+            id not addressable in this Outlook account). */}
         <div className="flex-1 min-h-0 overflow-y-auto p-4 text-sm text-foreground/80 leading-relaxed whitespace-pre-wrap">
-          {email.preview || <span className="text-muted-foreground/50 italic">No preview available</span>}
+          {bodyState.loading ? (
+            <span className="text-muted-foreground/50 italic">Loading body…</span>
+          ) : bodyState.body ? (
+            bodyState.body
+          ) : email.preview ? (
+            <>
+              <span className="text-muted-foreground/50 italic text-xs block mb-2">
+                Preview only — couldn&apos;t load full body
+                {bodyState.error ? `: ${bodyState.error}` : ""}
+              </span>
+              {email.preview}
+            </>
+          ) : (
+            <span className="text-muted-foreground/50 italic">No preview available</span>
+          )}
         </div>
 
         {/* Footer */}

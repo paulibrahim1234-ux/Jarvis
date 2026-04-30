@@ -103,11 +103,27 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [showPanel]);
 
+  // localStorage on iOS Safari throws QuotaExceededError when storage is
+  // near full (~5MB cap, easy to hit with cached app data). Wrap every
+  // setItem so the layout-change handler can never crash the grid with
+  // an unhandled exception that React bubbles to an error boundary.
+  const safeSet = (key: string, value: string) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // Silently drop — better to lose layout persistence than to crash.
+      // A future enhancement: surface a one-time toast.
+    }
+  };
+  const safeRemove = (key: string) => {
+    try { localStorage.removeItem(key); } catch { /* ignore */ }
+  };
+
   const onLayoutChange = useCallback(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (_current: any, allLayouts: any) => {
       setLayouts(allLayouts);
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify(allLayouts));
+      safeSet(LAYOUT_KEY, JSON.stringify(allLayouts));
     },
     []
   );
@@ -117,7 +133,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
-      localStorage.setItem(HIDDEN_KEY, JSON.stringify([...next]));
+      safeSet(HIDDEN_KEY, JSON.stringify([...next]));
       return next;
     });
   }, []);
@@ -125,8 +141,8 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
   const resetLayout = useCallback(() => {
     setLayouts({ lg: DEFAULT_LAYOUT });
     setHiddenWidgets(new Set());
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify({ lg: DEFAULT_LAYOUT }));
-    localStorage.removeItem(HIDDEN_KEY);
+    safeSet(LAYOUT_KEY, JSON.stringify({ lg: DEFAULT_LAYOUT }));
+    safeRemove(HIDDEN_KEY);
   }, []);
 
   const visibleKeys = ALL_KEYS.filter((k) => !hiddenWidgets.has(k));

@@ -154,10 +154,14 @@ export function IMessageWidget() {
         });
     };
     load();
+    // Faster poll (15s) so an iMessage reply the user sent on their phone
+    // or in Messages.app reflects within ~20s instead of ~90s. Backend
+    // cache TTL was also dropped to 8s so we're not hitting chat.db
+    // every poll.
     const t = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
       load();
-    }, 60_000);
+    }, 15_000);
     return () => {
       alive = false;
       clearInterval(t);

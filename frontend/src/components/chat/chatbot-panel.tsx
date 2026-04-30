@@ -265,14 +265,14 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   return (
     <div
       ref={containerRef}
-      className={`flex h-full ${embedded ? "rounded-xl border border-white/10 bg-card" : ""}`}
-      style={!embedded ? { background: "oklch(0.13 0.005 260)" } : undefined}
+      className={`flex h-full ${embedded ? "rounded-xl border border-foreground/10 bg-card" : ""}`}
+      style={!embedded ? { background: "var(--surface-0)" } : undefined}
     >
       {/* ── Sidebar ── */}
       {showSidebar && (
         <div
           className="flex w-40 shrink-0 flex-col border-r"
-          style={{ borderColor: "oklch(1 0 0 / 6%)" }}
+          style={{ borderColor: "var(--border-subtle)" }}
         >
           <div className="flex h-10 items-center justify-between px-3">
             <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground/70">
@@ -299,8 +299,8 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                   onClick={() => loadConversation(c.id)}
                   className={`group flex cursor-pointer items-center gap-1.5 rounded px-2 py-1.5 text-xs transition-colors ${
                     activeId === c.id
-                      ? "bg-white/10 text-foreground"
-                      : "text-muted-foreground/80 hover:bg-white/5"
+                      ? "bg-foreground/10 text-foreground"
+                      : "text-muted-foreground/80 hover:bg-foreground/5"
                   }`}
                 >
                   <MessageSquare className="h-3 w-3 shrink-0 opacity-50" />
@@ -328,10 +328,23 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
           }`}
         >
           <div className="flex items-center gap-2">
-            {(isNarrow || !sidebarOpen) && (
+            {/* Sidebar toggle — always visible (was previously hidden when
+                sidebar was already open in normal-width layouts, leaving
+                no way to collapse it). */}
+            {!isNarrow && (
               <button
                 onClick={() => setSidebarOpen((s) => !s)}
-                title="Toggle chat list"
+                title={sidebarOpen ? "Hide chat list" : "Show chat list"}
+                aria-label={sidebarOpen ? "Hide chat list" : "Show chat list"}
+                className="text-muted-foreground/60 hover:text-foreground transition-colors"
+              >
+                <Menu className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {isNarrow && !sidebarOpen && (
+              <button
+                onClick={() => setSidebarOpen(true)}
+                title="Show chat list"
                 className="text-muted-foreground/60 hover:text-foreground transition-colors"
               >
                 <Menu className="h-3.5 w-3.5" />
@@ -339,7 +352,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
             )}
             <div
               className="h-2 w-2 rounded-full pulse-live"
-              style={{ backgroundColor: "oklch(0.65 0.18 250)" }}
+              style={{ backgroundColor: "var(--brand)" }}
             />
             <h2 className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
               Jarvis
@@ -367,7 +380,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
             className="pointer-events-none absolute inset-x-0 bottom-0 h-px"
             style={{
               background:
-                "linear-gradient(90deg, transparent, oklch(1 0 0 / 6%) 50%, transparent)",
+                "linear-gradient(90deg, transparent, var(--border-subtle) 50%, transparent)",
             }}
           />
         </div>
@@ -431,8 +444,8 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                   <div
                     className="max-w-[85%] rounded-2xl rounded-bl-md border-l-2 px-3.5 py-2.5 text-sm leading-relaxed text-foreground whitespace-pre-wrap"
                     style={{
-                      background: "oklch(0.18 0.008 260)",
-                      borderLeftColor: "oklch(0.65 0.18 250 / 40%)",
+                      background: "var(--surface-1)",
+                      borderLeftColor: "var(--border-accent)",
                     }}
                   >
                     {msg.text}
@@ -446,27 +459,27 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                 <div
                   className="flex items-center gap-1 rounded-2xl rounded-bl-md border-l-2 px-4 py-3"
                   style={{
-                    background: "oklch(0.18 0.008 260)",
-                    borderLeftColor: "oklch(0.65 0.18 250 / 40%)",
+                    background: "var(--surface-1)",
+                    borderLeftColor: "var(--border-accent)",
                   }}
                 >
                   <span
                     className="typing-dot inline-block h-1.5 w-1.5 rounded-full"
-                    style={{ backgroundColor: "oklch(0.6 0 0)" }}
+                    style={{ backgroundColor: "var(--ink-muted)" }}
                   />
                   <span
                     className="typing-dot inline-block h-1.5 w-1.5 rounded-full"
-                    style={{ backgroundColor: "oklch(0.6 0 0)" }}
+                    style={{ backgroundColor: "var(--ink-muted)" }}
                   />
                   <span
                     className="typing-dot inline-block h-1.5 w-1.5 rounded-full"
-                    style={{ backgroundColor: "oklch(0.6 0 0)" }}
+                    style={{ backgroundColor: "var(--ink-muted)" }}
                   />
                 </div>
                 <button
                   type="button"
                   onClick={handleStop}
-                  className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground border border-white/10 rounded px-1.5 py-0.5 transition-colors"
+                  className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground border border-foreground/10 rounded px-1.5 py-0.5 transition-colors"
                   title="Stop generation"
                 >
                   Stop
@@ -483,8 +496,8 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
           <div
             className="chat-input-glow flex items-center gap-2 rounded-xl border px-3 py-1.5 transition-all"
             style={{
-              borderColor: "oklch(1 0 0 / 8%)",
-              background: "oklch(0.16 0.005 260)",
+              borderColor: "var(--border-default)",
+              background: "var(--surface-2)",
             }}
           >
             <Input
@@ -503,7 +516,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
               className="h-8 w-8 shrink-0 rounded-lg transition-colors"
               style={
                 input.trim() && !isTyping
-                  ? { backgroundColor: "oklch(0.65 0.18 250)", color: "white" }
+                  ? { backgroundColor: "var(--brand)", color: "white" }
                   : {}
               }
             >
