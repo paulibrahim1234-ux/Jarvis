@@ -1006,7 +1006,7 @@ end tell
         "artist": parts[1] or None,
         "album": parts[2] or None,
         "duration_ms": duration_ms,
-        "position_s": round(position_s),
+        "position_s": position_s,
         "state": parts[5] if len(parts) > 5 else "unknown",
         "uri": parts[6] if len(parts) > 6 else None,
         "volume": int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None,

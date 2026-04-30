@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,7 @@ _ADDRESSBOOK_ROOT = Path.home() / "Library" / "Application Support" / "AddressBo
 # Cache the lookup map so we don't hit the DB on every request.
 _CACHE: dict = {"lookup": None, "ts": 0.0}
 _TTL_SECONDS = 300  # refresh every 5 min
+_CACHE_LOCK = threading.Lock()  # prevents duplicate _build_lookup() calls on concurrent misses
 
 
 def _normalize(handle: str) -> str:
@@ -58,6 +60,7 @@ def _build_lookup() -> dict[str, str]:
         return {}
 
     lookup: dict[str, str] = {}
+    con = None
     try:
         # Read-only — no chance of writing even if something went wrong.
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
@@ -99,10 +102,15 @@ def _build_lookup() -> dict[str, str]:
             if key and key not in lookup:
                 lookup[key] = name.strip()
 
-        con.close()
     except Exception:
         # DB might be locked or schema may have drifted — empty lookup is fine.
         return {}
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
     return lookup
 
@@ -116,9 +124,19 @@ def get_lookup(force_refresh: bool = False) -> dict[str, str]:
         and now - _CACHE["ts"] < _TTL_SECONDS
     ):
         return _CACHE["lookup"]
-    lookup = _build_lookup()
-    _CACHE["lookup"] = lookup
-    _CACHE["ts"] = now
+    with _CACHE_LOCK:
+        # Re-check under the lock — another thread may have populated it while
+        # we waited for the lock.
+        now = time.time()
+        if (
+            not force_refresh
+            and _CACHE["lookup"] is not None
+            and now - _CACHE["ts"] < _TTL_SECONDS
+        ):
+            return _CACHE["lookup"]
+        lookup = _build_lookup()
+        _CACHE["lookup"] = lookup
+        _CACHE["ts"] = now
     return lookup
 
 

@@ -97,6 +97,7 @@ export function SpotifyWidget() {
   const [searching, setSearching] = useState(false);
   const [moods, setMoods] = useState<Mood[]>(() => loadMoods());
   const [playError, setPlayError] = useState<string | null>(null);
+  const trackRef = useRef<Track | null>(null);
 
   // Resize observer on the OUTER tile (stable across branch swaps).
   useEffect(() => {
@@ -117,6 +118,7 @@ export function SpotifyWidget() {
         setPayload(data);
         if (data.track) {
           setTrack(data.track);
+          trackRef.current = data.track;
           setProgressMs(data.track.progress_ms);
           setLive(true);
         } else if (!data.available) {
@@ -139,15 +141,19 @@ export function SpotifyWidget() {
     return () => clearInterval(id);
   }, [poll]);
 
-  // Tick progress locally between polls
+  // Tick progress locally between polls — read duration from ref to avoid
+  // stale closure: when the track changes, the ref updates synchronously
+  // while the interval's captured `track` value would lag one render cycle,
+  // causing progress to momentarily exceed 100%.
   useEffect(() => {
     if (!live || !track?.is_playing) return;
     const id = setInterval(() => {
-      if (!track) return;
-      setProgressMs((p) => Math.min(p + 1000, track.duration_ms));
+      const currentTrack = trackRef.current;
+      if (!currentTrack) return;
+      setProgressMs((p) => Math.min(p + 1000, currentTrack.duration_ms));
     }, 1000);
     return () => clearInterval(id);
-  }, [live, track?.is_playing, track?.duration_ms]);
+  }, [live, track?.is_playing]);
 
   const webOk = Boolean(payload?.web_api_connected);
 

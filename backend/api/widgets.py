@@ -213,7 +213,7 @@ def _compute_retention() -> int:
         reviews = anki_invoke("cardReviews", deck="*", startID=start_id)
         if not reviews:
             return 0
-        correct = sum(1 for r in reviews if r[3] > 1)
+        correct = sum(1 for r in reviews if len(r) > 3 and r[3] > 1)
         return round(correct / len(reviews) * 100)
     except Exception:
         return 0
@@ -469,7 +469,10 @@ def _load_anki_qid_index() -> dict:
 
 
 @router.get("/widgets/anki/suggestions")
-def anki_suggestions(limit: int = 250):  # was 50 — too small for the typical AnKing UWorld backlog
+def anki_suggestions(
+    limit: int = 2000,  # raised from 250 — need all qids; 2000 covers even large backlogs
+    qid_filter: str = "",  # comma-separated qids to restrict results to a specific session
+):
     """Suspended AnKing cards mapped to UWorld wrong-question QIDs.
 
     SAFE BY DEFAULT — never queries AnkiConnect at request time.
@@ -479,13 +482,25 @@ def anki_suggestions(limit: int = 250):  # was 50 — too small for the typical 
     (verified twice this session — Anki goes "Application Not Responding").
     The index is built ONCE in the background; lookups are instant dict reads.
     If the index is missing, return empty + a hint.
+
+    qid_filter: optional comma-separated list of UWorld QIDs to restrict results
+    to a specific session (e.g. "2679,17121,12027"). When provided, only cards
+    matching those exact QIDs are returned — used by the QBank expand panel.
     """
     incorrects, source = _load_uworld_incorrect()
     if not incorrects:
         return {"suggestions": [], "available": True, "source": "stub_empty", "qid_count": 0}
 
     index = _load_anki_qid_index()
-    qids = sorted({str(i.get("uworld_qid", "")) for i in incorrects if i.get("uworld_qid")})
+    all_qids = sorted({str(i.get("uworld_qid", "")) for i in incorrects if i.get("uworld_qid")})
+    # Apply optional per-session filter so the QBank expand panel can request
+    # only cards relevant to the session the user just clicked, rather than
+    # getting all suggestions and doing a client-side count that may truncate.
+    if qid_filter:
+        filter_set = {q.strip() for q in qid_filter.split(",") if q.strip()}
+        qids = [q for q in all_qids if q in filter_set]
+    else:
+        qids = all_qids
     if not index:
         return {
             "suggestions": [],
@@ -833,6 +848,9 @@ def email_widget(
     # Canonical default key (both empty) must match what warm_widgets and
     # briefing_widget use: "email::::".  The formula is:
     #   "email::" + folder + "::" + account  → for defaults → "email::::"
+    # Truncate inputs so a malformed/long value can't flood the LRU cache.
+    folder = folder[:64]
+    account = account[:64]
     cache_key = "email::" + folder + "::" + account
     return _cached(cache_key, 60, lambda: _compute_email(folder=folder, account=account), _SEM_EMAIL)
 
@@ -904,12 +922,11 @@ def _compute_calendar():
 @router.get("/widgets/calendar")
 def calendar_widget(start: str = "", end: str = ""):
     # 10 min cache — Calendar.app AppleScript takes 30-60s on user's
-    # 12-calendar setup. The single-permit semaphore caused the FIRST
-    # caller to get None (no cache yet, sem held by in-flight compute)
-    # while later callers got real data — frontend then never refetched.
-    # Drop the sem here; FastAPI's threadpool absorbs the parallel hits
-    # and the first compute populates the cache for everyone after.
-    cached = _cached("calendar", 600, _compute_calendar)
+    # 12-calendar setup. Pass _SEM_CALENDAR so concurrent warm + read requests
+    # don't both fire AppleScript in parallel; the semaphore's cold-start
+    # fallback in _cached ensures the first caller still gets data even if
+    # the semaphore can't be acquired immediately.
+    cached = _cached("calendar", 600, _compute_calendar, _SEM_CALENDAR)
     if cached:
         # Apply date-range filtering when both start and end are provided.
         # Events now carry ISO 8601 in `start` (parsed from AppleScript human
@@ -1086,7 +1103,7 @@ def spotify_widget():
 
     if now.get("track") or now.get("state") in ("playing", "paused"):
         duration_ms = now.get("duration_ms", 0) or 0
-        progress_ms = int(now.get("position_s", 0) or 0) * 1000
+        progress_ms = int((now.get("position_s", 0) or 0) * 1000)
         album_art = _spotify_album_art(now)
         track_block = {
             "title": now.get("track"),
@@ -1456,23 +1473,9 @@ def briefing_widget():
                 convos = (cached_im[1] or {}).get("conversations") or []
             else:
                 convos = get_conversations(limit=25, messages_per_thread=1, include_groups=False)
-            try:
-                from tools.contacts import resolve as _resolve_contact
-            except Exception:
-                _resolve_contact = None
-            count = 0
-            for c in convos:
-                unread = int(c.get("unread_count") or 0)
-                if unread <= 0:
-                    continue
-                handle = c.get("handle") or c.get("contact", "")
-                resolved = None
-                if _resolve_contact:
-                    try:
-                        resolved = _resolve_contact(handle)
-                    except Exception:
-                        resolved = None
-                count += unread
+            # Sum unread counts only — no contact resolution needed here
+            # (the iMessage widget already resolves names; briefing only needs a count).
+            count = sum(int(c.get("unread_count") or 0) for c in convos)
             return count
         except Exception as e:
             errors.append(f"imessage: {e}")
@@ -1672,3 +1675,62 @@ def email_add_to_calendar(body: AddToCalendarBody, request: Request):
     if "error" in result:
         return {"ok": False, "error": result["error"]}
     return {"ok": True, "event_id": result.get("event_id")}
+
+
+# ── Email mark-as-read ────────────────────────────────────────────────────────
+
+class MarkReadBody(BaseModel):
+    id: str
+
+
+@router.post("/widgets/email/mark-read")
+def email_mark_read(body: MarkReadBody, request: Request):
+    """Mark an Outlook message as read by its integer id.
+
+    Uses the same folder-iteration lookup as open_outlook_email in
+    tools/desktop_apps.py — tries inbox first, then all mail folders.
+    Also busts email cache keys so the next list refresh reflects the change.
+    """
+    _require_local_origin(request)
+    msg_id = (body.id or "").strip()
+    if not msg_id or not msg_id.isdigit():
+        return {"ok": False, "error": "id must be a numeric Outlook message id"}
+
+    safe_id = msg_id
+    script = f"""
+tell application "Microsoft Outlook"
+    try
+        set theMsg to first message of inbox whose id is {safe_id}
+        set is read of theMsg to true
+        return "marked_read"
+    on error
+        try
+            repeat with f in mail folders
+                try
+                    set theMsg to first message of f whose id is {safe_id}
+                    set is read of theMsg to true
+                    return "marked_read"
+                end try
+            end repeat
+        end try
+        return "not_found"
+    end try
+end tell
+"""
+    result = _osascript(script, timeout=15)
+    output = result.get("output", "")
+    if result.get("error"):
+        return {"ok": False, "error": result["error"]}
+
+    # Bust all email cache entries so the next poll shows read: true.
+    with _CACHE_LOCK:
+        stale_keys = [k for k in _CACHE if k.startswith("email::")]
+        for k in stale_keys:
+            del _CACHE[k]
+
+    if "marked_read" in output:
+        return {"ok": True}
+    # "not_found" still means the request ran cleanly — message may already
+    # be read or in a folder the script couldn't enumerate. Return ok=True
+    # so the frontend still updates optimistically.
+    return {"ok": True, "note": output or "not_found"}

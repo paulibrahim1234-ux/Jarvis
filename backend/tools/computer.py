@@ -288,6 +288,21 @@ def _safe_shell(command: str, cwd: str | None = None) -> dict:
                 if frag in arg or frag in resolved:
                     return {"error": f"blocked: cat path contains disallowed fragment {frag!r}"}
 
+    if cmd in ("python", "python3"):
+        # Block inline code execution via -c to prevent arbitrary code injection.
+        for arg in args:
+            if arg == "-c" or arg.startswith("-c"):
+                return {"error": "blocked: python -c inline code execution is not allowed"}
+
+    if cmd == "open":
+        # Only allow opening URLs (http/https) or flags (starting with -).
+        # Block filesystem paths so Jarvis can't open arbitrary local files.
+        for arg in args:
+            if arg.startswith("-"):
+                continue  # flags like -a, -g, -n are fine
+            if not (arg.startswith("http://") or arg.startswith("https://")):
+                return {"error": f"blocked: open only accepts http/https URLs, not: {arg!r}"}
+
     if cmd == "curl":
         # Reject upload/mutation flags — only GET-style requests allowed.
         _CURL_BLOCKED_FLAGS = {

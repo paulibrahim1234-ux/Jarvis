@@ -48,6 +48,7 @@ export function PomodoroWidget() {
   const [customInput, setCustomInput] = useState("");
   const [secondsLeft, setSecondsLeft] = useState(DEFAULT_WORK_MINUTES * 60);
   const [sessionsCompleted, setSessionsCompleted] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
 
   const workSeconds = workMinutes * 60;
   const breakSeconds = breakMinutes(workMinutes) * 60;
@@ -76,20 +77,30 @@ export function PomodoroWidget() {
   // On mount, rehydrate sessionsCompleted from localStorage
   useEffect(() => {
     const todayKey = `jarvis.pomodoro.${getTodayKey()}`;
-    const stored = localStorage.getItem(todayKey);
-    if (stored) {
-      const parsed = parseInt(stored, 10);
-      if (!isNaN(parsed)) {
-        setSessionsCompleted(parsed);
+    try {
+      const stored = localStorage.getItem(todayKey);
+      if (stored) {
+        const parsed = parseInt(stored, 10);
+        if (!isNaN(parsed)) {
+          setSessionsCompleted(parsed);
+        }
       }
+    } catch {
+      // localStorage unavailable (QuotaExceeded, private mode, etc.)
     }
+    setHydrated(true);
   }, []);
 
-  // Whenever sessionsCompleted changes, persist to localStorage
+  // Whenever sessionsCompleted changes (after hydration), persist to localStorage
   useEffect(() => {
+    if (!hydrated) return;
     const todayKey = `jarvis.pomodoro.${getTodayKey()}`;
-    localStorage.setItem(todayKey, String(sessionsCompleted));
-  }, [sessionsCompleted]);
+    try {
+      localStorage.setItem(todayKey, String(sessionsCompleted));
+    } catch {
+      // QuotaExceededError — silently ignore
+    }
+  }, [sessionsCompleted, hydrated]);
 
   useEffect(() => {
     if (state !== "running" && state !== "break") return;
@@ -155,7 +166,7 @@ export function PomodoroWidget() {
             <Button
               size="sm"
               onClick={() => setState("running")}
-              className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0 h-7 w-7 p-0"
+              className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0 min-h-[44px] min-w-[44px] p-0"
             >
               &#9654;
             </Button>
@@ -165,7 +176,7 @@ export function PomodoroWidget() {
               size="sm"
               variant="outline"
               onClick={() => setState("paused")}
-              className="border-foreground/10 hover:bg-foreground/5 h-7 w-7 p-0"
+              className="border-foreground/10 hover:bg-foreground/5 min-h-[44px] min-w-[44px] p-0"
             >
               &#10074;&#10074;
             </Button>
@@ -174,7 +185,7 @@ export function PomodoroWidget() {
             <Button
               size="sm"
               onClick={() => setState("running")}
-              className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0 h-7 w-7 p-0"
+              className="bg-emerald-600 hover:bg-emerald-500 text-foreground border-0 min-h-[44px] min-w-[44px] p-0"
             >
               &#9654;
             </Button>
@@ -184,7 +195,7 @@ export function PomodoroWidget() {
               size="sm"
               variant="outline"
               onClick={reset}
-              className="border-foreground/10 hover:bg-foreground/5 h-7 px-2"
+              className="border-foreground/10 hover:bg-foreground/5 min-h-[44px] px-2"
             >
               Skip
             </Button>

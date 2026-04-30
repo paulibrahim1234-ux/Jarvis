@@ -977,7 +977,7 @@ def _uworld_scrape_history() -> dict:
     results_scraped = 0
 
     # Sort sessions by date descending (most recent first), cap at limit
-    sessions_to_scrape = api_sessions[:_results_limit]
+    sessions_to_scrape = sorted(api_sessions, key=lambda s: s.get("date", ""), reverse=True)[:_results_limit]
 
     for sess in sessions_to_scrape:
         test_id = sess.get("test_id", "")

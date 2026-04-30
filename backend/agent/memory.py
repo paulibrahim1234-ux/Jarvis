@@ -456,11 +456,12 @@ def dashboard_snapshot() -> str:
     """Sync wrapper — safe from non-async contexts."""
     import asyncio
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # we're inside an async context — caller should await dashboard_snapshot_async
-            return "(dashboard unavailable in sync path)"
+        asyncio.get_running_loop()
+        # A running loop means we're inside an async context — caller should
+        # await dashboard_snapshot_async instead of calling this sync wrapper.
+        return "(dashboard unavailable in async context)"
     except RuntimeError:
+        # No running loop — safe to use asyncio.run().
         pass
     try:
         return asyncio.run(dashboard_snapshot_async())
