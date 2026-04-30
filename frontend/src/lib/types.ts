@@ -56,8 +56,10 @@ export interface QBankSession {
   platform: "uworld" | "truelearn";
   date: string;
   score: number; // percentage
-  total: number;
-  correct: number;
+  // Backend returns null for stub/stale sessions (see widgets.py
+  // `stale_data` path) — types must reflect that.
+  total: number | null;
+  correct: number | null;
   topics: string[];
 }
 
@@ -68,13 +70,16 @@ export interface WeakTopic {
   trend: "improving" | "declining" | "stable";
 }
 
-// NBME
+// NBME — field names match the backend payload (api/widgets.py NBMEScore).
+// Old shape (exam/date/score) was a type lie that any future consumer
+// importing this would silently fail on.
 export interface NBMEScore {
   id: string;
-  exam: string;
-  date: string;
-  score: number;
-  percentile?: number;
+  exam_name: string;
+  date_taken: string;
+  raw_score: number;
+  percentile?: number | null;
+  notes?: string | null;
 }
 
 // Pomodoro

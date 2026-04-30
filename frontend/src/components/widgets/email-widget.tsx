@@ -129,14 +129,26 @@ export function EmailWidget() {
     return () => ro.disconnect();
   }, []);
 
-  // Resolve the current tab to a folder name (or "" for Inbox/All/Unread).
+  // Resolve the current tab to a folder name (or "" for client-side virtual
+  // tabs). Important + Newsletters are computed from the All-folder fetch,
+  // not from a backend folder lookup — sending those keys as folder names
+  // would cause AppleScript folder resolution to fail and fall back to inbox.
   const activeFolder = useMemo(() => {
-    if (tab === ALL_TAB || tab === UNREAD_TAB) return "";
+    if (
+      tab === ALL_TAB ||
+      tab === UNREAD_TAB ||
+      tab === IMPORTANT_TAB ||
+      tab === NEWSLETTERS_TAB
+    ) return "";
     return tab;
   }, [tab]);
 
-  // Show folder-origin chips only in All/Unread views.
-  const showFolderChips = tab === ALL_TAB || tab === UNREAD_TAB;
+  // Show folder-origin chips when the current tab isn't a single-folder view.
+  const showFolderChips =
+    tab === ALL_TAB ||
+    tab === UNREAD_TAB ||
+    tab === IMPORTANT_TAB ||
+    tab === NEWSLETTERS_TAB;
 
   // Generation counter — prevents stale tab responses from overwriting newer results.
   const folderGen = useRef<string>("");
@@ -383,6 +395,15 @@ export function EmailWidget() {
               className="w-full rounded-md bg-foreground/[0.04] border border-foreground/[0.06] px-2.5 py-1 text-[11px] text-foreground/80 placeholder:text-muted-foreground/40 outline-none focus:border-foreground/15 focus:bg-foreground/[0.06] transition-colors"
             />
           </div>
+          {/* Disclosure: Important/Newsletters tabs filter only the
+              currently-loaded list (backend caps at 25 most recent).
+              Without this, users wonder why a known-important old email
+              isn't surfacing. */}
+          {(tab === IMPORTANT_TAB || tab === NEWSLETTERS_TAB) && (
+            <div className="px-4 pb-1.5 text-[10px] text-muted-foreground/50">
+              Filtering the {emails.length} most recent emails — older mail won&apos;t appear here.
+            </div>
+          )}
         </>
       )}
 

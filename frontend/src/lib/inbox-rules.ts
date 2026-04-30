@@ -28,5 +28,8 @@ export function scoreEmail(e: Email): number {
 }
 
 export function isNewsletter(e: Email): boolean {
-  return NEWSLETTER_PATTERNS.some((p) => p.test(e.from));
+  // Test the raw email address, not the display name. "Canvas Notifications
+  // <noreply@canvas.rowan.edu>" has the noreply marker only in from_email.
+  const addr = e.from_email || e.from || "";
+  return NEWSLETTER_PATTERNS.some((p) => p.test(addr));
 }

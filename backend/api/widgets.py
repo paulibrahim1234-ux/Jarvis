@@ -469,7 +469,7 @@ def _load_anki_qid_index() -> dict:
 
 
 @router.get("/widgets/anki/suggestions")
-def anki_suggestions(limit: int = 50):
+def anki_suggestions(limit: int = 250):  # was 50 — too small for the typical AnKing UWorld backlog
     """Suspended AnKing cards mapped to UWorld wrong-question QIDs.
 
     SAFE BY DEFAULT — never queries AnkiConnect at request time.

@@ -690,10 +690,15 @@ end tell
         line = line.strip().lstrip(",").strip()
         parts = line.split("|||")
         if len(parts) >= 2 and parts[0].strip():
+            # Normalize start/end to ISO 8601 — matches what _calendar_events
+            # produces. Without this, downstream consumers that filter by
+            # `start.startswith("YYYY-MM-DD")` (e.g. the morning briefing)
+            # silently drop every Outlook event because the raw AppleScript
+            # string is "Tuesday, April 29, 2026 at 7:30:00 AM".
             events.append({
                 "title": parts[0].strip(),
-                "start": parts[1].strip(),
-                "end": parts[2].strip() if len(parts) > 2 else "",
+                "start": _applescript_dt_to_iso(parts[1].strip()),
+                "end": _applescript_dt_to_iso(parts[2].strip()) if len(parts) > 2 else "",
                 "location": parts[3].strip() if len(parts) > 3 else "",
                 "calendar": "Outlook",
                 "event_id": parts[4].strip() if len(parts) > 4 else None,

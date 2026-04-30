@@ -354,6 +354,9 @@ def get_recent_messages(contact_handles: list[str], limit: int = 20) -> list[dic
     if not contact_handles:
         return []
     conn = _connect()
+    # Initialize before the try so a query exception doesn't leave `rows`
+    # undefined and trigger a NameError when the comprehension below runs.
+    rows: list = []
     try:
         placeholders = ",".join("?" for _ in contact_handles)
         rows = conn.execute(
@@ -367,6 +370,10 @@ def get_recent_messages(contact_handles: list[str], limit: int = 20) -> list[dic
             """,
             (*contact_handles, limit),
         ).fetchall()
+    except sqlite3.Error:
+        # Schema drift, lock timeout, etc. — return an empty list instead
+        # of crashing the agent tool dispatch.
+        rows = []
     finally:
         conn.close()
 

@@ -130,7 +130,10 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
 
   return (
     <div className="mt-1 mb-2 rounded-lg border border-foreground/10 bg-foreground/[0.03] px-3 py-3 text-xs">
-      {/* Header row */}
+      {/* Header row — single "Open in UWorld" affordance lives here, not
+          duplicated per system group. (Was previously rendered inside
+          groups.map() which produced N copies all linking to the same
+          test results URL.) */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div>
           <span className="font-semibold text-foreground/90">
@@ -147,13 +150,26 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
             </span>
           )}
         </div>
-        <button
-          onClick={onClose}
-          className="text-muted-foreground/50 hover:text-muted-foreground transition-colors shrink-0 text-sm leading-none"
-          aria-label="Collapse"
-        >
-          ×
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {testResultsUrl && (
+            <a
+              href={testResultsUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[10px] text-blue-400/80 hover:text-blue-400 transition-colors"
+              title="Opens test results overview in UWorld"
+            >
+              Open in UWorld ↗
+            </a>
+          )}
+          <button
+            onClick={onClose}
+            className="text-muted-foreground/50 hover:text-muted-foreground transition-colors text-sm leading-none"
+            aria-label="Collapse"
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       {!session.test_id ? (
@@ -170,17 +186,6 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
                   <span className="font-medium text-foreground/80 uppercase tracking-wide text-[10px]">
                     {g.system}
                   </span>
-                  {testResultsUrl && (
-                    <a
-                      href={testResultsUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[10px] text-blue-400/80 hover:text-blue-400 transition-colors"
-                      title="Opens test results overview — navigate to individual questions there"
-                    >
-                      Open in UWorld ↗
-                    </a>
-                  )}
                 </div>
                 <div className="space-y-0.5 pl-1">
                   {g.questions.map((q) => (
@@ -518,9 +523,13 @@ export function UWorldWidget() {
               <TabsTrigger value="uworld" className="text-xs data-[state=active]:bg-foreground/10">
                 UWorld {uworldSessions.length > 0 && <span className="ml-1 text-muted-foreground/50">({uworldSessions.length})</span>}
               </TabsTrigger>
-              <TabsTrigger value="truelearn" className="text-xs data-[state=active]:bg-foreground/10">
-                TrueLearn
-              </TabsTrigger>
+              {/* Only show TrueLearn tab when there's data — hides the
+                  always-empty placeholder for users who don't use it. */}
+              {trueLearnSessions.length > 0 && (
+                <TabsTrigger value="truelearn" className="text-xs data-[state=active]:bg-foreground/10">
+                  TrueLearn <span className="ml-1 text-muted-foreground/50">({trueLearnSessions.length})</span>
+                </TabsTrigger>
+              )}
             </TabsList>
             <TabsContent value="uworld" className="flex-1 min-h-0 mt-0">
               <ScrollArea className="h-full">
@@ -528,11 +537,13 @@ export function UWorldWidget() {
                 <WeakTopicsSection topics={weakTopics} />
               </ScrollArea>
             </TabsContent>
-            <TabsContent value="truelearn" className="flex-1 min-h-0 mt-0">
-              <ScrollArea className="h-full">
-                <SessionList sessions={trueLearnSessions} incorrects={incorrects} />
-              </ScrollArea>
-            </TabsContent>
+            {trueLearnSessions.length > 0 && (
+              <TabsContent value="truelearn" className="flex-1 min-h-0 mt-0">
+                <ScrollArea className="h-full">
+                  <SessionList sessions={trueLearnSessions} incorrects={incorrects} />
+                </ScrollArea>
+              </TabsContent>
+            )}
           </Tabs>
         )}
       </CardContent>

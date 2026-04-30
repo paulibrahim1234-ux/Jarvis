@@ -243,11 +243,11 @@ export const mockWeakTopics: WeakTopic[] = [
 ];
 
 export const mockNBMEScores: NBMEScore[] = [
-  { id: "1", exam: "NBME 25", date: "Jan 15", score: 198, percentile: 32 },
-  { id: "2", exam: "NBME 26", date: "Feb 5", score: 210, percentile: 45 },
-  { id: "3", exam: "NBME 27", date: "Feb 28", score: 218, percentile: 55 },
-  { id: "4", exam: "NBME 29", date: "Mar 20", score: 225, percentile: 63 },
-  { id: "5", exam: "NBME 30", date: "Apr 5", score: 232, percentile: 72 },
+  { id: "1", exam_name: "NBME 25", date_taken: "2026-01-15", raw_score: 198, percentile: 32 },
+  { id: "2", exam_name: "NBME 26", date_taken: "2026-02-05", raw_score: 210, percentile: 45 },
+  { id: "3", exam_name: "NBME 27", date_taken: "2026-02-28", raw_score: 218, percentile: 55 },
+  { id: "4", exam_name: "NBME 29", date_taken: "2026-03-20", raw_score: 225, percentile: 63 },
+  { id: "5", exam_name: "NBME 30", date_taken: "2026-04-05", raw_score: 232, percentile: 72 },
 ];
 
 export const mockPomodoroSessions: PomodoroSession[] = [

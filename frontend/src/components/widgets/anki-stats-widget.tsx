@@ -273,17 +273,28 @@ export function AnkiStatsWidget() {
   // unsuspend cards encountered in UWorld.
   const allSuspended =
     suspended > 0 && availableTotal === 0 && due === 0 && learning === 0;
-  // Auto-route to Suggested tab on first load when there's something to do
-  // and no cards are due. Only run once — the user can click back to Stats.
+  // First-ever-load auto-route hint. Was previously running on EVERY page
+  // reload (autoRouteRef is per-mount), permanently burying the Stats view
+  // for any user with no due cards. Now: persist a one-time flag in
+  // localStorage so the auto-route fires at most once across all sessions.
+  const AUTO_ROUTE_KEY = "jarvis-anki-auto-route-shown-v1";
   const autoRouteRef = useRef(false);
   useEffect(() => {
     if (autoRouteRef.current) return;
     if (liveStatus !== "live") return;
+    let alreadyShown = false;
+    try { alreadyShown = localStorage.getItem(AUTO_ROUTE_KEY) === "1"; } catch { /* ignore */ }
+    if (alreadyShown) {
+      autoRouteRef.current = true;
+      return;
+    }
     if (due === 0 && suggestedCount > 0) {
       autoRouteRef.current = true;
+      try { localStorage.setItem(AUTO_ROUTE_KEY, "1"); } catch { /* ignore */ }
       setTab("suggested");
     } else if (due > 0) {
-      autoRouteRef.current = true; // user has work to do — don't override their tab choice later
+      autoRouteRef.current = true;
+      try { localStorage.setItem(AUTO_ROUTE_KEY, "1"); } catch { /* ignore */ }
     }
   }, [liveStatus, due, suggestedCount]);
   // When due=0 and reviewedToday>0, the session is done → 100%.
@@ -306,7 +317,11 @@ export function AnkiStatsWidget() {
   const LiveDot = () => {
     if (liveStatus === "loading") return <span className="sr-only">loading</span>;
     if (liveStatus === "live") {
-      const hasActivity = due > 0 || reviewedToday > 0;
+      // Cards in the learning queue count as activity too — the user has
+      // in-progress reviews. Without this, a user studying actively (21
+      // cards in learning steps, due=0 because they're between intervals)
+      // sees a misleading "no recent activity" indicator.
+      const hasActivity = due > 0 || reviewedToday > 0 || learning > 0;
       if (hasActivity) {
         return (
           <>

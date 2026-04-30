@@ -65,11 +65,27 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
         const parsed: ReactGridLayout.Layouts = JSON.parse(savedLayout);
         // Sanity-check: if any widget overflows its breakpoint's column count, fall back to default for that breakpoint.
         const sanitized: ReactGridLayout.Layouts = {};
-        for (const [bp, items] of Object.entries(parsed)) {
-          const cols = BREAKPOINT_COLS[bp] ?? 12;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const hasOverflow = (items as any[]).some((item: any) => (item.x + item.w) > cols);
-          sanitized[bp] = hasOverflow ? DEFAULT_LAYOUT : items;
+        if (parsed && typeof parsed === "object") {
+          for (const [bp, items] of Object.entries(parsed)) {
+            if (!Array.isArray(items)) continue;
+            const cols = BREAKPOINT_COLS[bp] ?? 12;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const hasOverflow = (items as any[]).some((item: any) => (item.x + item.w) > cols);
+            sanitized[bp] = hasOverflow ? DEFAULT_LAYOUT : (items as ReactGridLayout.Layout[]);
+          }
+        }
+        // Schema migration: any widget present in DEFAULT_LAYOUT but absent
+        // from saved layouts (e.g. user upgraded and a new widget was
+        // added) renders at (0,0) on top of existing widgets. Append the
+        // missing keys with their default positions so new widgets land
+        // sensibly.
+        for (const bp of Object.keys(sanitized)) {
+          const existing = sanitized[bp] as ReactGridLayout.Layout[];
+          const haveKeys = new Set(existing.map((l) => l.i));
+          const missing = DEFAULT_LAYOUT.filter((l) => !haveKeys.has(l.i));
+          if (missing.length) {
+            sanitized[bp] = [...existing, ...missing];
+          }
         }
         setLayouts(sanitized);
       } catch { /* keep default */ }

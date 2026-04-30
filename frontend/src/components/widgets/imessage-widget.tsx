@@ -219,12 +219,33 @@ export function IMessageWidget() {
           </span>
         )}
         {expandedConvo && (
-          <button
-            onClick={() => setExpanded(null)}
-            className="text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Back
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Open the active thread in native Messages.app — was missing
+                from the inline-thread view, leaving no way to escalate to
+                the full app once expanded. */}
+            <button
+              onClick={async () => {
+                const ref = expandedConvo.is_group
+                  ? String(expandedConvo.chat_id)
+                  : (expandedConvo.handle || expandedConvo.contact);
+                const context = expandedConvo.is_group
+                  ? { chat_id: expandedConvo.chat_id, is_group: true, display_name: expandedConvo.contact }
+                  : { phone: expandedConvo.handle, chat_id: expandedConvo.chat_id, is_group: false, display_name: expandedConvo.contact };
+                await openInApp({ app: "messages", ref, context });
+              }}
+              className="text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+              title="Open this conversation in Messages.app"
+              aria-label="Open in Messages.app"
+            >
+              Open ↗
+            </button>
+            <button
+              onClick={() => setExpanded(null)}
+              className="text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Back
+            </button>
+          </div>
         )}
       </CardHeader>
 
@@ -346,17 +367,25 @@ function ConversationRow({
     onOpen(convo.chat_id);
   };
 
+  // Primary action: expand the thread INLINE in the widget. Was previously
+  // launching Messages.app for any click on the row, which forced the user
+  // to leave the dashboard for what's usually just a quick read. The
+  // "open in Messages" affordance moves to the secondary chevron button.
+  const handlePrimaryClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    onOpen(convo.chat_id);
+  };
+
   return (
     // Use a <div role="button"> as the outer container to avoid nesting
     // <button> inside <button> (invalid HTML — browsers auto-close the
-    // outer tag which breaks click routing and caused openInApp to fire
-    // on unintended clicks).
+    // outer tag which breaks click routing).
     <div
       role="button"
       tabIndex={0}
-      onClick={handleOpenInMessages}
+      onClick={handlePrimaryClick}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") handleOpenInMessages(e as unknown as React.MouseEvent);
+        if (e.key === "Enter" || e.key === " ") handlePrimaryClick(e as unknown as React.MouseEvent);
       }}
       className="w-full flex items-center gap-3 py-2.5 px-2 rounded-lg text-left hover:bg-foreground/5 transition-colors cursor-pointer border-b border-foreground/[0.04] last:border-0"
     >
@@ -397,11 +426,19 @@ function ConversationRow({
             )}
             <button
               type="button"
-              onClick={handleExpandInline}
+              onClick={(e) => {
+                // Stop propagation so the row's primary handler (inline
+                // expand) doesn't also fire — we explicitly want the
+                // native Messages.app for this affordance.
+                e.preventDefault();
+                e.stopPropagation();
+                handleOpenInMessages(e);
+              }}
               className="text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors text-[10px] px-1.5 py-0.5 rounded hover:bg-foreground/5"
-              title="Expand in widget"
+              title="Open in Messages.app"
+              aria-label="Open in Messages.app"
             >
-              ▾
+              ↗
             </button>
           </div>
         </div>

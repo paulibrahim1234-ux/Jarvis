@@ -321,12 +321,12 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
 
       {/* ── Main panel ── */}
       <div className="flex flex-1 min-w-0 flex-col">
-        {/* Header */}
-        <div
-          className={`relative flex h-10 items-center ${
-            embedded ? "widget-drag-handle cursor-move px-4" : "px-4"
-          }`}
-        >
+        {/* Header — no longer the drag target. Drag is handled by the
+            WidgetWrapper's centered grip pill at the top edge of the
+            card. The previous design (whole header = drag target) made
+            cursor 'move' on header buttons and caused accidental drags
+            on click. */}
+        <div className="relative flex h-10 items-center px-4">
           <div className="flex items-center gap-2">
             {/* Sidebar toggle — always visible (was previously hidden when
                 sidebar was already open in normal-width layouts, leaving
@@ -345,6 +345,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
               <button
                 onClick={() => setSidebarOpen(true)}
                 title="Show chat list"
+                aria-label="Show chat list"
                 className="text-muted-foreground/60 hover:text-foreground transition-colors"
               >
                 <Menu className="h-3.5 w-3.5" />
@@ -359,17 +360,25 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
             </h2>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <button
-              onClick={handleNewChat}
-              title="New chat"
-              className="text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-            >
-              <Plus className="h-3.5 w-3.5" />
-            </button>
+            {/* Only show "New chat" in the main header when the sidebar is
+                hidden — when sidebar is open it already has its own +
+                button next to "Chats" heading. Avoids two identical
+                affordances 200px apart. */}
+            {(!showSidebar) && (
+              <button
+                onClick={handleNewChat}
+                title="New chat"
+                aria-label="New chat"
+                className="text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            )}
             {messages.length > 1 && (
               <button
                 onClick={clearCurrent}
                 title="Clear current chat"
+                aria-label="Clear current chat"
                 className="text-muted-foreground/50 hover:text-muted-foreground transition-colors"
               >
                 <Trash2 className="h-3.5 w-3.5" />

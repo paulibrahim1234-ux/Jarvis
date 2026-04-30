@@ -70,7 +70,10 @@ interface SpotifyPayload {
   recently_played: RecentItem[] | null;
 }
 
-type Tab = "home" | "moods" | "now" | "library" | "recent" | "search" | "queue";
+// Recently-played tracks live on the Home tab now (as the "Recently played
+// playlists" row, derived from track context). Standalone "recent" track
+// listing was removed — RecentPane is no longer reachable.
+type Tab = "home" | "moods" | "now" | "library" | "search" | "queue";
 
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -403,13 +406,6 @@ export function SpotifyWidget() {
               items={payload?.playlists ?? null}
               webOk={webOk}
               isNarrow={isNarrow}
-              onPlay={onPlayUri}
-            />
-          )}
-          {tab === "recent" && (
-            <RecentPane
-              items={payload?.recently_played ?? null}
-              webOk={webOk}
               onPlay={onPlayUri}
             />
           )}
