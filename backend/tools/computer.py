@@ -133,7 +133,6 @@ _ALLOWED_SHELL_COMMANDS = {
     "curl",
     "ls",
     "cat",
-    "echo",
     "python",
     "python3",
     "open",
@@ -150,6 +149,8 @@ def run_computer_tool(name: str, inp: dict):
 
     if name == "open_url":
         url = inp["url"]
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return {"error": "blocked: only http/https URLs allowed"}
         subprocess.run(["open", url], timeout=5)
         return {"status": f"Opened {url}"}
 
@@ -226,6 +227,11 @@ def run_applescript(script: str) -> dict:
         "delete file",
         "eject ",
         "keystroke",
+        "key code",
+        "set the clipboard",
+        "perform action",
+        "set value of attribute",
+        "click menu item",
     )
     script_lower = script.lower()
     for pattern in _APPLESCRIPT_BLOCKED:

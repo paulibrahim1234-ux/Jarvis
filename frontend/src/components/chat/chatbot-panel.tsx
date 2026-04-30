@@ -42,7 +42,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   const [input, setInput] = useState("");
   const [nextId, setNextId] = useState(1);
   const [isTyping, setIsTyping] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isNarrow, setIsNarrow] = useState(false);
   // Proactive credential health — checked on mount + every 2 min so the
   // user sees a banner BEFORE typing into a broken chat. Backend caches

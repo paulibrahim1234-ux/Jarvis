@@ -48,7 +48,7 @@ Built for one med student. Open-sourced because the pattern works.
 | Pomodoro | Local | Standard work/break with persistent state |
 | Briefing | Aggregator | Morning summary of the day |
 
-**Jarvis the agent** — Claude (Sonnet/Opus) with tool access. He can search your Outlook for "OIER", read the email body to find a 7:30 AM appointment, create the calendar event, all in one turn. He can play a Spotify track by name, send an iMessage, draft an Outlook reply, look up your Anki retention. The toolbelt grows as the dashboard does.
+**Jarvis the agent** — Claude Opus 4.5 by default (falls back to Haiku on rate-limit). He can search your Outlook for "OIER", read the email body to find a 7:30 AM appointment, create the calendar event, all in one turn. He can play a Spotify track by name, send an iMessage, draft an Outlook reply, look up your Anki retention. The toolbelt grows as the dashboard does. OAuth token auto-refreshes in the background — no manual re-auth on expiry.
 
 ---
 
@@ -65,7 +65,7 @@ Built for one med student. Open-sourced because the pattern works.
 
 > **Don't write code? Follow the [foolproof walkthrough in SETUP.md](SETUP.md)** — every step is a prompt you copy-paste into Claude Code (or Codex). Your job is to click links and answer questions; Claude does the work.
 
-**Prereqs**: macOS, Node 18+, Python 3.11+, [Anki](https://apps.ankiweb.net/) + [AnkiConnect](https://ankiweb.net/shared/info/2055492159), an Anthropic API key (or Claude Code OAuth token), Outlook Classic (not "New Outlook").
+**Prereqs**: macOS, Node 18+, Python 3.11+, [Anki](https://apps.ankiweb.net/) + [AnkiConnect](https://ankiweb.net/shared/info/2055492159), an Anthropic API key **or** Claude Code subscription OAuth token, Outlook Classic (not "New Outlook"), Comet or Chrome as your default browser (for UWorld scraping).
 
 ```bash
 # Frontend
@@ -81,7 +81,7 @@ uvicorn main:app --reload
 # → http://localhost:8000
 ```
 
-Then visit `http://localhost:8000/setup` in your browser to paste Spotify / Microsoft / UWorld credentials into a form (which writes them to `backend/.env`, gitignored).
+Then visit `http://localhost:8000/setup` in your browser to paste Spotify / Microsoft / Anthropic credentials into a form (which writes them to `backend/.env`, gitignored). Credentials are hot-reloaded — no restart needed after a `/setup` update. Use the `jarvis` CLI (`jarvis restart`, `jarvis status`, `jarvis logs`) once launchd services are installed.
 
 For the macOS-app integrations to work, you'll need to grant Full Disk Access to the Python binary running the backend (so it can read iMessage's `chat.db`) and Automation permissions for the apps Jarvis drives. See [PERMISSIONS.md](PERMISSIONS.md) for the full list.
 

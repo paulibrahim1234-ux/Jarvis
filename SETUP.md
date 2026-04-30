@@ -195,7 +195,10 @@ If you want Jarvis to control Spotify with full features (search, play playlists
 1. Go to https://developer.spotify.com/dashboard.
 2. Click **Create app**, name it "Jarvis", any description, no website needed.
 3. **Redirect URI**: paste exactly `http://127.0.0.1:8000/auth/spotify/callback`.
-4. Save. On the app page, copy your **Client ID** and **Client Secret** (click "View client secret").
+4. Under **APIs used**, check "Web API".
+5. Save. On the app page, copy your **Client ID** and **Client Secret** (click "View client secret").
+
+> **Scopes used:** `user-read-currently-playing`, `user-read-playback-state`, `user-modify-playback-state`, `user-read-recently-played`, `playlist-read-private`, `playlist-read-collaborative`, `user-library-read`, `user-top-read`. All are requested automatically during the OAuth flow.
 
 > **Copy this prompt** (replace `CLIENT_ID` and `CLIENT_SECRET`)
 >
@@ -220,8 +223,11 @@ This pulls your real UWorld test history into the QBank widget and maps wrong qu
 
 **Manual step:**
 
-1. Open Comet (or your default browser) and log into https://www.uworld.com. Make sure you stay logged in.
-2. Find your **course ID** in the URL of your dashboard. After login, the URL looks like `https://apps.uworld.com/courseapp/usmle/v50/en-US/dashboard/12345678` — that 8-digit number is your course ID.
+1. Open **Comet** (Perplexity's browser — this is the required browser; Chrome works too but Comet is the default). Log into https://www.uworld.com.
+2. Navigate to your QBank dashboard and let it fully load — Jarvis reads auth tokens from the page's sessionStorage, which only populates on the dashboard/results pages (not the home or login page).
+3. Find your **course ID** in the URL of your dashboard. After login, the URL looks like `https://apps.uworld.com/courseapp/usmle/v50/en-US/dashboard/12345678` — that 8-digit number is your course ID.
+
+> **Session expiry:** UWorld sessions expire after roughly 24 hours of inactivity. When expired, the widget shows "UWorld session expired" — just log back in to Comet and click Refresh. Your historical wrong-question data is cached locally and never lost on expiry.
 
 > **Copy this prompt** (replace `MY_COURSE_ID`)
 >
@@ -340,6 +346,33 @@ If anything looks broken, paste one of these:
 > 2. If still frozen, force-quit Anki (Option-Cmd-Esc) and reopen it.
 > 3. Confirm AnkiConnect is responding (curl http://localhost:8765 with version action).
 > 4. Don't trigger any Anki-related Jarvis features until version returns OK.
+> ```
+
+### "Spotify shows nothing / widget is blank"
+
+Spotify has API rate limits (HTTP 429). When hit, the widget returns empty rather than hanging (by design — timeouts are set to 8 seconds with retries disabled). Steps:
+
+1. Wait 30–60 seconds. Spotify 429s are usually short.
+2. Check if Spotify Desktop is open and playing — the widget falls back to AppleScript when the Web API is rate-limited, so you should still see now-playing data.
+3. If the widget stays blank after 60 seconds, click the "Now" tab manually — that forces a fresh poll.
+4. If `web_api_connected` disappears permanently, your Spotify Developer app quota may be exhausted for the day. This resets at midnight UTC.
+
+### "Anki Suggested shows 0 cards / wrong count"
+
+This is almost always one of three things:
+
+1. **Index not built.** POST to `http://localhost:8000/widgets/anki/build-index` (or click Refresh → Build Index in the widget). Wait for the build to finish — takes ~30 seconds on first run.
+
+2. **Cards already unsuspended.** The widget only shows *suspended* cards. If you already unsuspended everything, count will be 0. That means you're done — check `is:suspended` in Anki browser to confirm.
+
+3. **UWorld wrong-question data is stale.** Click the UWorld widget's Refresh button to re-scrape (you must be logged into UWorld in Comet). After the scrape finishes, go to Anki → Suggested and refresh again.
+
+> ```
+> Anki suggestions showing 0 but I know I have wrong UWorld questions. Help:
+> 1. curl http://localhost:8000/widgets/anki/suggestions and show me qid_count and matched_qid_count.
+> 2. If qid_count is 0, the UWorld data is empty — run a UWorld refresh.
+> 3. If qid_count > 0 but matched_qid_count is 0, the AnKing index has no matches — rebuild the index (POST /widgets/anki/build-index).
+> 4. If both are > 0, check if the cards are already unsuspended: Anki → Browse → is:suspended tag:#AK_Step2
 > ```
 
 ### "Everything is broken, start over"

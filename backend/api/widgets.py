@@ -149,7 +149,11 @@ def anki_stats():
                 "available": True,
             }
         except Exception as e:
-            return {"error": str(e), "available": False}
+            err = str(e)
+            # Surface actionable message when AnkiConnect is unreachable
+            if "connection" in err.lower() or "refused" in err.lower() or "8765" in err:
+                err = "Open Anki to enable AnkiConnect (port 8765). Already open? Restart Anki and try again."
+            return {"error": err, "available": False}
     return _cached("anki_stats", 30, _compute)
 
 

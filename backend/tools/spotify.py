@@ -381,7 +381,7 @@ def _spotify_error_to_dict(e: Exception) -> dict:
     if "PREMIUM_REQUIRED" in msg or "Premium" in msg:
         return {"error": "premium_required", "message": "Spotify Premium required for playback control."}
     if "404" in msg or "Resource not found" in msg:
-        return {"error": "not_found", "message": "Spotify couldn't find that resource."}
+        return {"error": "not_found", "message": "Spotify can't access this playlist (likely a Spotify editorial playlist locked to premium). Click Edit on the Moods tab to swap in one of your own playlists."}
     if "Token expired" in msg or "401" in msg:
         return {"error": "auth", "message": "Spotify token expired — reconnect via /setup."}
     return {"error": "spotify_error", "message": msg[:200]}

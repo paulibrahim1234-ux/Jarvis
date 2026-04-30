@@ -781,56 +781,6 @@ function LibraryPane({
   );
 }
 
-function RecentPane({
-  items,
-  webOk,
-  onPlay,
-}: {
-  items: RecentItem[] | null;
-  webOk: boolean;
-  onPlay: (uri: string) => void;
-}) {
-  if (!webOk) return <Empty text="Connect Spotify to see recently played" />;
-  if (!items) return <Empty text="Loading…" />;
-  if (items.length === 0) return <Empty text="Nothing recent" />;
-  return (
-    <div className="h-full overflow-auto pr-1">
-      <ul className="space-y-0.5">
-        {items.map((t, i) => (
-          <li key={(t.uri ?? "") + i}>
-            <button
-              onClick={() => t.uri && onPlay(t.uri)}
-              className="w-full flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-foreground/5 text-left"
-            >
-              {t.album_art ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={t.album_art}
-                  alt=""
-                  className="h-7 w-7 rounded object-cover shrink-0"
-                />
-              ) : (
-                <div className="h-7 w-7 rounded bg-neutral-800 shrink-0" />
-              )}
-              <div className="min-w-0 flex-1">
-                <p className="truncate">{t.title}</p>
-                <p className="truncate text-[10px] text-muted-foreground/60">
-                  {t.artist}
-                </p>
-              </div>
-              {t.played_at && (
-                <span className="text-[9px] text-muted-foreground/50 shrink-0">
-                  {relTime(t.played_at)}
-                </span>
-              )}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 function SearchPane({
   query,
   setQuery,
@@ -1118,21 +1068,3 @@ function VolumeIcon() {
   );
 }
 
-// ── Utils ────────────────────────────────────────────────────────────────────
-
-function relTime(iso: string): string {
-  try {
-    const then = new Date(iso).getTime();
-    const diff = Date.now() - then;
-    if (!isFinite(diff) || diff < 0) return "";
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return "now";
-    if (m < 60) return `${m}m`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h`;
-    const d = Math.floor(h / 24);
-    return `${d}d`;
-  } catch {
-    return "";
-  }
-}

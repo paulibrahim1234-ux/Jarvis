@@ -312,10 +312,11 @@ def touch_facts(ids: list[int]) -> None:
         conn.close()
 
 
-def extract_facts_async(client, user_msg: str, assistant_reply: str) -> None:
+def extract_facts_async(user_msg: str, assistant_reply: str) -> None:
     """
     Fire a cheap Haiku call to extract durable user facts.
     Swallows all errors — fact extraction is best-effort.
+    Fetches the current Anthropic client at call time so reloads are picked up.
     """
     # Scrub PHI before sending to LLM; abort entirely on PHI markers.
     clean_user = _scrub_phi(user_msg or "")
@@ -323,6 +324,13 @@ def extract_facts_async(client, user_msg: str, assistant_reply: str) -> None:
         return
     clean_assistant = _scrub_phi(assistant_reply or "")
     if clean_assistant is None:
+        return
+
+    # Look up the live client at call time — avoids stale client after reload.
+    try:
+        from agent import jarvis as _jarvis_mod
+        client = _jarvis_mod.client
+    except Exception:
         return
 
     prompt = (

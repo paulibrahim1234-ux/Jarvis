@@ -229,9 +229,11 @@ async def chat_async(
         try:
             return await async_client.messages.create(**kwargs)
         except anthropic.AuthenticationError as e:
-            from agent import claude_oauth
+            from agent import claude_oauth, jarvis as _self
             if claude_oauth.refresh_on_401(e):
-                return await globals()["async_client"].messages.create(**kwargs)
+                # Use module-level reference so reload_anthropic_clients()
+                # update is visible (closure would hold the pre-refresh binding).
+                return await _self.async_client.messages.create(**kwargs)
             raise
         except anthropic.RateLimitError:
             # Try ONE fallback to Haiku (cheaper/looser limits) before
@@ -317,7 +319,7 @@ async def chat_async(
             async def _timed_extract():
                 try:
                     await asyncio.wait_for(
-                        asyncio.to_thread(memory.extract_facts_async, client, last_user, final_text),
+                        asyncio.to_thread(memory.extract_facts_async, last_user, final_text),
                         timeout=30.0,
                     )
                 except (asyncio.TimeoutError, Exception):

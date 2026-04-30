@@ -1029,11 +1029,7 @@ def _spotify_play_uri(uri: str) -> dict:
     result = _osascript(f'tell application "Spotify" to play track "{safe}"')
     if "error" in result:
         return result
-    for _ in range(3):
-        time.sleep(0.5)
-        np = _spotify_now_playing()
-        if np.get("track"):
-            return np
+    time.sleep(1.5)
     return _spotify_now_playing()
 
 
@@ -1064,11 +1060,7 @@ def _spotify_cmd(cmd: str) -> dict:
     result = _osascript(f'tell application "Spotify" to {cmd}')
     if "error" in result:
         return result
-    for _ in range(3):
-        time.sleep(0.5)
-        np = _spotify_now_playing()
-        if np.get("track"):
-            return np
+    time.sleep(1.5)
     return _spotify_now_playing()
 
 
@@ -1090,11 +1082,7 @@ def _spotify_search_play(query: str) -> dict:
     if "error" in result:
         # Fallback: argv-list call (no shell), URI already encoded.
         subprocess.run(["open", f"spotify:search:{_quote(query)}"], timeout=5)
-    for _ in range(3):
-        time.sleep(0.5)
-        np = _spotify_now_playing()
-        if np.get("track"):
-            return np
+    time.sleep(1.5)
     return _spotify_now_playing()
 
 
@@ -1536,7 +1524,7 @@ end tell
         # Fallback: look up the chat GUID in chat.db and open via imessage:// URL
         try:
             db_path = os.path.expanduser("~/Library/Messages/chat.db")
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             row = conn.execute(
                 "SELECT guid FROM chat WHERE ROWID = ?", (int(chat_id),)
             ).fetchone()

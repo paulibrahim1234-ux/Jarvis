@@ -91,8 +91,10 @@ def spotify_status():
 # enough to be cheap, short enough that an expired token surfaces quickly.
 
 import time as _t
+import threading as _threading
 _CLAUDE_PROBE_CACHE: dict = {"checked_at": 0.0, "ok": None, "error": None}
 _CLAUDE_PROBE_TTL = 300.0  # seconds
+_PROBE_CACHE_LOCK = _threading.Lock()
 
 
 def _probe_claude(force: bool = False, allow_refresh: bool = True) -> dict:
@@ -112,14 +114,15 @@ def _probe_claude(force: bool = False, allow_refresh: bool = True) -> dict:
     """
     import os
     now = _t.time()
-    if not force and _CLAUDE_PROBE_CACHE["checked_at"] and \
-       (now - _CLAUDE_PROBE_CACHE["checked_at"]) < _CLAUDE_PROBE_TTL:
-        return {
-            "ok": _CLAUDE_PROBE_CACHE["ok"],
-            "error": _CLAUDE_PROBE_CACHE["error"],
-            "checked_at": _CLAUDE_PROBE_CACHE["checked_at"],
-            "cached": True,
-        }
+    with _PROBE_CACHE_LOCK:
+        if not force and _CLAUDE_PROBE_CACHE["checked_at"] and \
+           (now - _CLAUDE_PROBE_CACHE["checked_at"]) < _CLAUDE_PROBE_TTL:
+            return {
+                "ok": _CLAUDE_PROBE_CACHE["ok"],
+                "error": _CLAUDE_PROBE_CACHE["error"],
+                "checked_at": _CLAUDE_PROBE_CACHE["checked_at"],
+                "cached": True,
+            }
     raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or ""
     if not raw:
         result = {"ok": False, "error": "no_credential", "checked_at": now}
@@ -154,12 +157,14 @@ def _probe_claude(force: bool = False, allow_refresh: bool = True) -> dict:
                 code = "invalid_credential"
             elif "429" in msg:
                 code = "rate_limited"  # token works but throttled — treat as ok
-                _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=True, error=None)
+                with _PROBE_CACHE_LOCK:
+                    _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=True, error=None)
                 return {"ok": True, "error": "rate_limited", "checked_at": now, "cached": False}
             else:
                 code = "unknown"
             result = {"ok": False, "error": code, "error_detail": msg[:200], "checked_at": now}
-    _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=result["ok"], error=result.get("error"))
+    with _PROBE_CACHE_LOCK:
+        _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=result["ok"], error=result.get("error"))
     return {**result, "cached": False}
 
 

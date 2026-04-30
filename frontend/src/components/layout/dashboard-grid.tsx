@@ -54,6 +54,8 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
   const [layouts, setLayouts] = useState<ReactGridLayout.Layouts>({ lg: DEFAULT_LAYOUT });
   const [hiddenWidgets, setHiddenWidgets] = useState<Set<string>>(new Set());
   const [showPanel, setShowPanel] = useState(false);
+  const [saveConfirm, setSaveConfirm] = useState(false);
+  const saveConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const BREAKPOINT_COLS: Record<string, number> = { lg: 12, md: 8, sm: 4 };
 
@@ -161,6 +163,13 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     safeRemove(HIDDEN_KEY);
   }, []);
 
+  const saveLayout = useCallback(() => {
+    safeSet(LAYOUT_KEY, JSON.stringify(layouts));
+    setSaveConfirm(true);
+    if (saveConfirmTimerRef.current) clearTimeout(saveConfirmTimerRef.current);
+    saveConfirmTimerRef.current = setTimeout(() => setSaveConfirm(false), 2000);
+  }, [layouts]);
+
   const visibleKeys = ALL_KEYS.filter((k) => !hiddenWidgets.has(k));
   const hiddenCount = hiddenWidgets.size;
   const totalCount = ALL_KEYS.length;
@@ -223,6 +232,31 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
             <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h5M20 20v-5h-5M20 9A8 8 0 0 0 6.3 6.3L4 9m16 6a8 8 0 0 1-13.7 2.7L4 15" />
           </svg>
           Reset
+        </button>
+        <div
+          aria-hidden
+          style={{ width: 1, height: 16, backgroundColor: "var(--border-default)" }}
+        />
+        <button
+          onClick={saveLayout}
+          className="flex items-center gap-1.5 px-3 h-8 transition-colors hover:text-foreground"
+          style={{
+            fontSize: "12px",
+            fontWeight: 500,
+            color: saveConfirm ? "var(--status-live)" : "var(--ink-tertiary)",
+          }}
+          title="Save layout"
+        >
+          {saveConfirm ? (
+            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          ) : (
+            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+            </svg>
+          )}
+          {saveConfirm ? "Saved" : "Save"}
         </button>
       </div>
 

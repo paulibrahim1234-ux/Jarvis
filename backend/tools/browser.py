@@ -1009,30 +1009,48 @@ def _uworld_scrape_history() -> dict:
     # gracefully without losing the wrongs themselves.
 
     # Index by test_id to skip already-cached tests (incremental).
+    # Build from BOTH incorrect entries AND the "scraped_test_ids" set that
+    # tracks sessions which were fetched but had 0 wrong answers. Without
+    # this second source, sessions with all-correct answers would never
+    # appear in existing_test_ids and would be re-fetched on every refresh.
+    scraped_test_ids_cached: set[str] = {
+        str(t) for t in existing_data.get("scraped_test_ids", []) if t
+    }
     existing_test_ids: set[str] = {
         str(i.get("test_id", "")) for i in existing_incorrects if i.get("test_id")
-    }
+    } | scraped_test_ids_cached
     existing_qids: set[str] = {str(i.get("uworld_qid", "")) for i in existing_incorrects}
     new_incorrects: list[dict] = list(existing_incorrects)
+    # Track all test_ids whose details we've fetched (regardless of wrong-answer count)
+    scraped_test_ids: set[str] = set(scraped_test_ids_cached)
 
     partial = False
     results_scraped = 0
 
+    log.info(f"[uworld] existing_test_ids size: {len(existing_test_ids)} (from {len(existing_incorrects)} incorrects + {len(scraped_test_ids_cached)} zero-wrong sessions)")
+
     # Sort sessions by date descending (most recent first), cap at limit
     sessions_to_scrape = sorted(api_sessions, key=lambda s: s.get("date", ""), reverse=True)[:_results_limit]
 
-    for sess in sessions_to_scrape:
+    for i, sess in enumerate(sessions_to_scrape):
         test_id = sess.get("test_id", "")
+        skip = test_id in existing_test_ids
+        log.info(f"[uworld] iter {i}/{len(sessions_to_scrape)} test_id={test_id!r} skip={skip}")
         if not test_id:
             continue
-        if test_id in existing_test_ids:
-            log.info(f"[uworld] Skipping test {test_id} (already cached)")
+        if skip:
             continue
 
-        detail = _uw_api_call(
-            f"https://gateway-api.uworld.com/api/qbank/GetTestRecordDetails/{test_id}",
-            wi, ti, authinfo, timeout=30,
-        )
+        try:
+            detail = _uw_api_call(
+                f"https://gateway-api.uworld.com/api/qbank/GetTestRecordDetails/{test_id}",
+                wi, ti, authinfo, timeout=30,
+            )
+        except Exception as exc:
+            log.warning(f"[uworld] GetTestRecordDetails/{test_id} exception: {exc}")
+            partial = True
+            time.sleep(0.3)
+            continue
         if isinstance(detail, dict) and "_error" in detail:
             log.warning(f"[uworld] GetTestRecordDetails/{test_id} failed: {detail}")
             partial = True
@@ -1086,6 +1104,9 @@ def _uworld_scrape_history() -> dict:
         log.info(f"[uworld] Test {test_id}: {wrong_count} new wrong QIDs from {len(q_list)} questions")
         results_scraped += 1
         existing_test_ids.add(test_id)
+        # Track as scraped even if 0 wrong answers — prevents re-fetching
+        # on every refresh for sessions that have all-correct answers.
+        scraped_test_ids.add(test_id)
         time.sleep(0.2)  # polite delay between requests
 
     # ── Step 5: Persist and return ────────────────────────────────────────────
@@ -1093,6 +1114,9 @@ def _uworld_scrape_history() -> dict:
         "sessions": api_sessions,
         "weak_topics": [],
         "incorrect": new_incorrects,
+        # Persist ALL scraped test_ids (not just ones with wrongs) so
+        # incremental refresh skips them on future runs.
+        "scraped_test_ids": sorted(scraped_test_ids),
         "scraped_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "scraped_from": f"https://gateway-api.uworld.com/api/qbank/GetTestRecords/{QBANK_ID}/0",
         "partial": partial,

@@ -308,7 +308,7 @@ def get_conversations(
             messages = []
             for mr in reversed(msg_rows):  # oldest → newest for UI
                 dt = _mac_ns_to_dt(mr["date"])
-                epoch_ms = int(mr["date"] / 1e6 + MAC_EPOCH_OFFSET * 1000) if mr["date"] else None
+                epoch_ms = (mr["date"] // 1_000_000) + MAC_EPOCH_OFFSET * 1000 if mr["date"] else None
                 # Sender name: only meaningful for group chats on incoming msgs.
                 sender: str | None = None
                 if is_group and not mr["is_from_me"] and mr["handle_id"]:
