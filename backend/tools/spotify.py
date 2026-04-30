@@ -66,8 +66,23 @@ def _auth():
 
 
 def _sp():
+    """Build a spotipy client configured to fail fast on rate-limits / network issues.
+
+    Defaults are: retries=3, status_retries=3, status_forcelist=429+5xx, with
+    backoff. When Spotify rate-limits the app for hours (Retry-After 33000s),
+    spotipy's default retry logic causes our /widgets/spotify endpoint to
+    hang for the full retry cycle — often >30s — and FastAPI workers pile
+    up. Set retries=0 + a tight per-request timeout so the widget endpoint
+    can return promptly with whatever info is available (cached or empty).
+    """
     import spotipy
-    return spotipy.Spotify(auth_manager=_auth())
+    return spotipy.Spotify(
+        auth_manager=_auth(),
+        retries=0,             # don't auto-retry — we'd rather see the failure quick
+        status_retries=0,
+        backoff_factor=0,
+        requests_timeout=8,    # per-call HTTP timeout in seconds
+    )
 
 
 def get_auth_url() -> str:

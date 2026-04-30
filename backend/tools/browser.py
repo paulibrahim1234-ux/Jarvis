@@ -872,13 +872,34 @@ def _uworld_scrape_history() -> dict:
     if isinstance(api_records, dict) and "_error" in api_records:
         log.warning(f"[uworld] GetTestRecords failed: {api_records}")
         existing = _load_existing()
+        err = str(api_records.get("_error", "unknown"))
+        # Give the user an actionable message instead of "HTTP 401". This
+        # is the most common failure mode and was being misread as a code
+        # bug ("are these bugs we added?") when it's just a stale browser
+        # session.
+        if "401" in err or "Unauthorized" in err.lower():
+            msg = (
+                "UWorld session expired. Open https://www.uworld.com in "
+                f"{BROWSER_APP} and log back in, then click Refresh. "
+                "(Showing your last cached data in the meantime.)"
+            )
+            status = "logged_out"
+        elif "403" in err:
+            msg = (
+                f"UWorld blocked the request (403). Try opening UWorld in "
+                f"{BROWSER_APP} fresh, then Refresh."
+            )
+            status = "logged_out"
+        else:
+            msg = f"UWorld scrape failed: {err}. Showing cached data."
+            status = "error"
         return {
-            "status": "error",
+            "status": status,
             "sessions": existing.get("sessions", []),
             "weak_topics": existing.get("weak_topics", []),
             "incorrect": existing.get("incorrect", []),
             "source": "cache",
-            "message": f"UWorld API call failed: {api_records.get('_error', 'unknown')}",
+            "message": msg,
         }
 
     if not isinstance(api_records, list):
