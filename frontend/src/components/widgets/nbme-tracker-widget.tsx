@@ -246,7 +246,7 @@ export function NBMETrackerWidget() {
         </div>
       </CardHeader>
 
-      <CardContent className="flex-1 min-h-0 p-5 pt-0 space-y-3 overflow-y-auto">
+      <CardContent className="flex-1 min-h-0 p-5 pt-0 flex flex-col gap-3 overflow-y-auto">
         {isAdding && (
           <div className="rounded-lg border border-foreground/10 bg-black/20 p-3 space-y-2 text-xs">
             <div className="grid grid-cols-2 gap-2">
@@ -348,7 +348,7 @@ export function NBMETrackerWidget() {
           </div>
         )}
 
-        <div className="w-full" style={{ height: 140 }}>
+        <div className="w-full flex-1 min-h-0" style={{ minHeight: 100 }}>
           {loading ? (
             <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
               Loading...
@@ -366,7 +366,7 @@ export function NBMETrackerWidget() {
               </button>
             </div>
           ) : (
-            <ResponsiveContainer width="100%" height={140}>
+            <ResponsiveContainer width="100%" height="100%">
               <AreaChart
                 data={chartData}
                 margin={{ top: 18, right: 12, left: -8, bottom: 0 }}

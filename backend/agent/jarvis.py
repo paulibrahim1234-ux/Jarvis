@@ -189,7 +189,7 @@ async def chat_async(
             memory.append_message(conversation_id, "user", str(content))
 
     # ── Build context: prefer DB history if frontend sent a short payload ──
-    db_history = memory.get_recent_messages(conversation_id, limit=40)
+    db_history = memory.get_recent_messages(conversation_id, limit=80)
     # Use DB history when present (source of truth); fall back to request payload.
     all_messages = db_history if db_history else list(messages)
 
@@ -201,12 +201,12 @@ async def chat_async(
     top_facts = memory.get_top_facts(limit=10)
     system_prompt = memory.build_system_prompt(BASE_SYSTEM_PROMPT, dashboard, top_facts)
 
-    # Default: Sonnet 4.5. Haiku is faster + cheaper but its agentic
-    # tool-use reasoning is noticeably weaker — multi-step queries
-    # ("find the email about X then add it to my calendar") often
-    # stalled on Haiku. Override per-request via the `model` query
-    # param on /chat, or globally via the JARVIS_MODEL env var.
-    model = model_override or os.getenv("JARVIS_MODEL", "claude-sonnet-4-5-20250929")
+    # Default: Opus 4.5 — smarter multi-step reasoning and richer
+    # answers than Sonnet. Opus has tighter rate limits, so the
+    # RateLimitError handler below cascades to Haiku-4.5 on 429s.
+    # Override per-request via the `model` query param on /chat, or
+    # globally via the JARVIS_MODEL env var.
+    model = model_override or os.getenv("JARVIS_MODEL", "claude-opus-4-5-20251101")
 
     import asyncio
 
@@ -221,7 +221,7 @@ async def chat_async(
         outer loop can surface a friendly message to the user."""
         kwargs = dict(
             model=model,
-            max_tokens=2048,
+            max_tokens=8192,
             system=system_prompt,
             tools=TOOLS,
             messages=all_messages,

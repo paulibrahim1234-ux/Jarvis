@@ -9,6 +9,7 @@ import {
   fetchEmailFolders,
   addEmailToCalendar,
   fetchEmailBody,
+  markEmailRead,
   type EmailFolder,
   type EmailAccountFolders,
   BACKEND,
@@ -482,6 +483,14 @@ export function EmailWidget() {
                         context: { subject: email.subject, from: email.from },
                       });
                     } else {
+                      // Optimistically mark as read in local state so the
+                      // unread dot disappears immediately without waiting for
+                      // the next 120s poll.
+                      if (!email.read) {
+                        setEmails((prev) =>
+                          prev.map((m) => (m.id === email.id ? { ...m, read: true } : m))
+                        );
+                      }
                       setPreviewEmail(email);
                     }
                   }}
@@ -627,6 +636,15 @@ function EmailPreviewModal({
   useEffect(() => {
     let cancelled = false;
     setBodyState({ loading: true, body: null, error: null });
+
+    // Fire-and-forget: tell Outlook to mark this message as read.
+    // Only bother if the email was unread when the modal opened; the parent
+    // component already flipped the local `read` flag optimistically so the
+    // dot disappears immediately.
+    if (!email.read) {
+      markEmailRead(email.id).catch(() => {/* swallow — best-effort */});
+    }
+
     fetchEmailBody(email.id)
       .then((data) => {
         if (cancelled) return;
@@ -651,7 +669,7 @@ function EmailPreviewModal({
     return () => {
       cancelled = true;
     };
-  }, [email.id]);
+  }, [email.id, email.read]);
 
   // Close on ESC. Also focus the dialog on mount for screen-reader pickup.
   useEffect(() => {

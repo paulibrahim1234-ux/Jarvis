@@ -231,10 +231,10 @@ export function MorningBriefing() {
     !loading && errors.length > 0 && (data ? hasAnyData(data) : false);
 
   return (
-    <Card className="group relative col-span-full overflow-hidden rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
+    <Card className="group relative col-span-full h-full flex flex-col overflow-hidden rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <div className="absolute inset-y-0 left-0 w-1 bg-gradient-to-b from-emerald-400 via-blue-500 to-emerald-400 bg-[length:100%_200%] animate-[gradient-y_3s_ease-in-out_infinite]" />
 
-      <CardHeader className="pl-6 p-5 pb-2">
+      <CardHeader className="pl-6 p-5 pb-2 shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400 font-bold text-lg">
             J
@@ -253,7 +253,7 @@ export function MorningBriefing() {
         </div>
       </CardHeader>
 
-      <CardContent className="pl-6 p-5 pt-3">
+      <CardContent className="pl-6 p-5 pt-3 flex-1 min-h-0 flex flex-col">
         {!loading && visibleLines.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No data yet — make sure Anki, Outlook, and Calendar.app are open.
@@ -286,6 +286,8 @@ export function MorningBriefing() {
                 some sources are warming up — refresh in 30s
               </p>
             )}
+            {/* Flex spacer: pushes rows to top and fills remaining card height */}
+            <div className="flex-1" />
           </>
         )}
       </CardContent>

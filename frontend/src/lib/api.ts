@@ -179,13 +179,21 @@ export async function refreshUWorld(): Promise<{
   }
 }
 
-export async function fetchAnkiSuggestions(): Promise<{
+export async function fetchAnkiSuggestions(opts?: {
+  /** Restrict results to specific UWorld QIDs (for a single session). */
+  qidFilter?: string[];
+}): Promise<{
   suggestions: AnkiSuggestion[];
   available: boolean;
   error?: string;
   source?: string;
 }> {
-  const r = await fetch(`${BACKEND}/widgets/anki/suggestions`, {
+  const params = new URLSearchParams();
+  if (opts?.qidFilter && opts.qidFilter.length > 0) {
+    params.set("qid_filter", opts.qidFilter.join(","));
+  }
+  const qs = params.toString();
+  const r = await fetch(`${BACKEND}/widgets/anki/suggestions${qs ? "?" + qs : ""}`, {
     signal: AbortSignal.timeout(30000),
   });
   if (!r.ok) throw new Error(`anki suggestions ${r.status}`);
@@ -473,6 +481,23 @@ export async function fetchAnthropicStatus(force = false): Promise<{
   const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
   if (!r.ok) throw new Error(`anthropic status ${r.status}`);
   return r.json();
+}
+
+/** Mark an Outlook email as read by its numeric id.
+ * Fire-and-forget safe — errors are swallowed by the caller. */
+export async function markEmailRead(id: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const r = await fetch(`${BACKEND}/widgets/email/mark-read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+    return r.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
 
 export async function addEmailToCalendar(body: {

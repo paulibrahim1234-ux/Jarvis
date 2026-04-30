@@ -14,9 +14,11 @@ import {
   fetchUWorldData,
   refreshUWorld,
   fetchAnkiSuggestions,
+  unsuspendAnkiCards,
   type UWorldSession,
   type UWorldWeakTopic,
   type UWorldIncorrect,
+  type AnkiSuggestion,
 } from "@/lib/api";
 import { openInApp } from "@/lib/open-apps";
 
@@ -70,8 +72,13 @@ interface SessionExpandPanelProps {
 }
 
 function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanelProps) {
+  // Anki inline panel state
   const [ankiLoading, setAnkiLoading] = useState(false);
+  const [ankiCards, setAnkiCards] = useState<AnkiSuggestion[] | null>(null);
+  const [ankiSelected, setAnkiSelected] = useState<Set<number>>(new Set());
   const [ankiMsg, setAnkiMsg] = useState<string | null>(null);
+  const [ankiSubmitting, setAnkiSubmitting] = useState(false);
+  const [ankiToast, setAnkiToast] = useState<string | null>(null);
 
   // Filter wrong questions to this session by test_id
   const sessionWrong = session.test_id
@@ -79,7 +86,6 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
     : [];
 
   const groups = groupBySystem(sessionWrong);
-  const hasData = session.test_id && sessionWrong.length > 0;
 
   // UWorld deep-link: use test results overview (no seq segment).
   // The /seq form (e.g. /results/{course}/{test_id}/0) only shows the
@@ -89,33 +95,66 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
     ? `https://apps.uworld.com/courseapp/usmle/v50/en-US/performance/test/results/${COURSE_ID}/${session.test_id}`
     : null;
 
+  // Fetch Anki suggestions for exactly this session's wrong QIDs.
+  // Uses the qid_filter param to avoid pulling all 250+ suggestions and
+  // then doing a client-side count that was previously cut off by the limit.
   const handleAnkiSuggest = async () => {
+    if (ankiLoading) return;
     setAnkiLoading(true);
     setAnkiMsg(null);
+    setAnkiCards(null);
+    setAnkiSelected(new Set());
     try {
-      // The /widgets/anki/suggestions endpoint pulls ALL incorrect QIDs —
-      // there's no per-QID filter param yet. We call it and let the user
-      // know how many total suggestions exist.
-      // GAP: endpoint does not accept a qid_filter param; would need backend
-      // change to filter to only this session's QIDs.
-      const result = await fetchAnkiSuggestions();
-      if (!result.available) {
+      const sessionQids = sessionWrong.map((q) => q.uworld_qid);
+      const result = await fetchAnkiSuggestions({ qidFilter: sessionQids });
+      if (!result.available && !result.suggestions?.length) {
         setAnkiMsg("Anki not reachable — is AnkiConnect running?");
+        setAnkiCards([]);
+      } else if (result.suggestions.length === 0) {
+        setAnkiMsg("No suspended Anki cards matched for this session");
+        setAnkiCards([]);
       } else {
-        const qids = sessionWrong.map((q) => q.uworld_qid);
-        const sessionSuggestions = result.suggestions.filter((s) =>
-          qids.includes(s.uworld_qid)
-        );
-        setAnkiMsg(
-          sessionSuggestions.length > 0
-            ? `${sessionSuggestions.length} suspended card${sessionSuggestions.length === 1 ? "" : "s"} found for this session`
-            : "No suspended Anki cards matched for this session"
-        );
+        setAnkiCards(result.suggestions);
+        // Auto-select all cards so the user can unsuspend with one click
+        setAnkiSelected(new Set(result.suggestions.map((s) => s.card_id)));
       }
     } catch {
       setAnkiMsg("Error reaching Anki suggestions");
+      setAnkiCards([]);
     } finally {
       setAnkiLoading(false);
+    }
+  };
+
+  const toggleAnkiCard = (id: number) => {
+    setAnkiSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleUnsuspend = async () => {
+    if (ankiSelected.size === 0 || ankiSubmitting) return;
+    setAnkiSubmitting(true);
+    try {
+      const ids = Array.from(ankiSelected);
+      const res = await unsuspendAnkiCards(ids);
+      if (res.errors && res.errors.length > 0) {
+        setAnkiToast(`Unsuspended ${res.unsuspended}. Errors: ${res.errors.join("; ")}`);
+      } else {
+        setAnkiToast(`Unsuspended ${res.unsuspended} card${res.unsuspended === 1 ? "" : "s"}`);
+      }
+      // Remove unsuspended cards from the list
+      const unsuspendedIds = new Set(ids);
+      setAnkiCards((prev) => (prev ?? []).filter((c) => !unsuspendedIds.has(c.card_id)));
+      setAnkiSelected(new Set());
+    } catch (e) {
+      setAnkiToast(e instanceof Error ? e.message : "Unsuspend failed");
+    } finally {
+      setAnkiSubmitting(false);
+      setTimeout(() => setAnkiToast(null), 4000);
     }
   };
 
@@ -204,19 +243,90 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
             ))}
           </div>
 
-          {/* Anki suggestions button */}
-          <div className="mt-3 flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="xs"
-              className="text-xs h-6 px-2 text-amber-300/80 hover:text-amber-300"
-              onClick={handleAnkiSuggest}
-              disabled={ankiLoading}
-            >
-              {ankiLoading ? "Checking Anki..." : "Suggest Anki cards"}
-            </Button>
-            {ankiMsg && (
-              <span className="text-[10px] text-muted-foreground/60">{ankiMsg}</span>
+          {/* Anki suggestions — inline card list with checkboxes + unsuspend button */}
+          <div className="mt-3 border-t border-foreground/5 pt-3">
+            {ankiCards === null ? (
+              /* Not loaded yet — show the trigger button */
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-xs h-6 px-2 text-amber-300/80 hover:text-amber-300"
+                onClick={handleAnkiSuggest}
+                disabled={ankiLoading}
+              >
+                {ankiLoading ? "Checking Anki…" : "Suggest Anki cards"}
+              </Button>
+            ) : ankiCards.length === 0 ? (
+              /* Loaded but empty */
+              <span className="text-[10px] text-muted-foreground/60">
+                {ankiMsg ?? "No suspended Anki cards matched for this session"}
+              </span>
+            ) : (
+              /* Loaded with cards — show checkboxes + unsuspend */
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-amber-300/80 font-medium uppercase tracking-wide">
+                    Anki — {ankiCards.length} suspended card{ankiCards.length === 1 ? "" : "s"}
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (ankiSelected.size === ankiCards.length) {
+                        setAnkiSelected(new Set());
+                      } else {
+                        setAnkiSelected(new Set(ankiCards.map((c) => c.card_id)));
+                      }
+                    }}
+                    className="text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                  >
+                    {ankiSelected.size === ankiCards.length ? "Deselect all" : "Select all"}
+                  </button>
+                </div>
+                {ankiCards.map((card) => {
+                  const checked = ankiSelected.has(card.card_id);
+                  return (
+                    <label
+                      key={card.card_id}
+                      className={`flex items-start gap-2 px-2 py-1.5 rounded-md cursor-pointer border transition-colors ${
+                        checked
+                          ? "bg-emerald-500/10 border-emerald-500/25"
+                          : "bg-foreground/[0.02] border-foreground/5 hover:bg-foreground/[0.04]"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleAnkiCard(card.card_id)}
+                        className="mt-0.5 accent-emerald-500 shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <div className="truncate text-[11px] text-foreground/80">
+                          {card.front || <span className="italic text-muted-foreground">(no preview)</span>}
+                        </div>
+                        <div className="mt-0.5 text-[10px] text-muted-foreground/50">
+                          UW {card.uworld_qid}
+                          {card.uworld_topic && ` · ${card.uworld_topic}`}
+                        </div>
+                      </div>
+                    </label>
+                  );
+                })}
+                {ankiToast && (
+                  <div className="text-[10px] text-emerald-400 text-center py-1">{ankiToast}</div>
+                )}
+                <button
+                  onClick={handleUnsuspend}
+                  disabled={ankiSelected.size === 0 || ankiSubmitting}
+                  className={`mt-1 w-full py-1.5 rounded-md text-[11px] font-medium transition-colors ${
+                    ankiSelected.size === 0 || ankiSubmitting
+                      ? "bg-foreground/5 text-muted-foreground cursor-not-allowed"
+                      : "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30"
+                  }`}
+                >
+                  {ankiSubmitting
+                    ? "Unsuspending…"
+                    : `Unsuspend${ankiSelected.size > 0 ? ` ${ankiSelected.size}` : ""} card${ankiSelected.size === 1 ? "" : "s"}`}
+                </button>
+              </div>
             )}
           </div>
         </>
