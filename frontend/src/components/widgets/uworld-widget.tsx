@@ -227,17 +227,35 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
                   </span>
                 </div>
                 <div className="space-y-0.5 pl-1">
-                  {g.questions.map((q) => (
-                    <div
-                      key={q.uworld_qid}
-                      className="flex items-center gap-2"
-                    >
-                      <span className="text-foreground/80">{q.uworld_topic_name || q.uworld_topic}</span>
-                      <span className="text-muted-foreground/40 font-mono text-[10px] shrink-0">
-                        #{q.uworld_qid}
-                      </span>
-                    </div>
-                  ))}
+                  {g.questions.map((q) => {
+                    // Per-question deep-link is now valid because test_seq
+                    // is set to the question's 1-based position in the test
+                    // (used to be the session's percentile, which UWorld
+                    // treated as an out-of-range seq and showed the loader).
+                    const qUrl =
+                      session.test_id && q.test_seq != null
+                        ? `https://apps.uworld.com/courseapp/usmle/v50/en-US/performance/test/results/${COURSE_ID}/${session.test_id}/${q.test_seq}`
+                        : null;
+                    const className = qUrl
+                      ? "flex items-center gap-2 cursor-pointer hover:bg-foreground/5 rounded px-1 -mx-1 transition-colors"
+                      : "flex items-center gap-2";
+                    return (
+                      <div
+                        key={q.uworld_qid}
+                        role={qUrl ? "button" : undefined}
+                        tabIndex={qUrl ? 0 : undefined}
+                        onClick={qUrl ? () => window.open(qUrl, "_blank", "noopener") : undefined}
+                        onKeyDown={qUrl ? (e) => { if (e.key === "Enter") window.open(qUrl, "_blank", "noopener"); } : undefined}
+                        className={className}
+                        title={qUrl ? "Open this question in UWorld" : undefined}
+                      >
+                        <span className="text-foreground/80">{q.uworld_topic_name || q.uworld_topic}</span>
+                        <span className="text-muted-foreground/40 font-mono text-[10px] shrink-0">
+                          #{q.uworld_qid}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ))}

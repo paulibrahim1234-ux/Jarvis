@@ -492,7 +492,41 @@ def anki_suggestions(
         return {"suggestions": [], "available": True, "source": "stub_empty", "qid_count": 0}
 
     index = _load_anki_qid_index()
-    all_qids = sorted({str(i.get("uworld_qid", "")) for i in incorrects if i.get("uworld_qid")})
+
+    # Sort qids by most-recently-missed first so the user sees today's
+    # incorrect-questions before old ones. Was string-sorted (so "10001" <
+    # "2001"), which interleaved old and new and pushed yesterday's qids
+    # past the truncation cap.
+    import datetime as _dt
+    def _parse_missed_at(s: str) -> _dt.datetime:
+        if not s:
+            return _dt.datetime.min
+        s = s.strip()
+        for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"):
+            try:
+                return _dt.datetime.strptime(s[:20], fmt)
+            except ValueError:
+                continue
+        return _dt.datetime.min
+
+    # For each qid, find the most-recent date it was missed (a card can
+    # appear in multiple sessions; treat the most recent miss as its
+    # "freshness" for ordering).
+    qid_latest: dict[str, _dt.datetime] = {}
+    for i in incorrects:
+        qid = str(i.get("uworld_qid", ""))
+        if not qid:
+            continue
+        dt = _parse_missed_at(str(i.get("missed_at", "")))
+        if qid not in qid_latest or dt > qid_latest[qid]:
+            qid_latest[qid] = dt
+
+    all_qids = sorted(
+        {str(i.get("uworld_qid", "")) for i in incorrects if i.get("uworld_qid")},
+        key=lambda q: (qid_latest.get(q, _dt.datetime.min), q),
+        reverse=True,
+    )
+
     # Apply optional per-session filter so the QBank expand panel can request
     # only cards relevant to the session the user just clicked, rather than
     # getting all suggestions and doing a client-side count that may truncate.

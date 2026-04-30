@@ -955,7 +955,12 @@ def _uworld_scrape_history() -> dict:
             "correct": int(correct_val),  # REAL correct count
             "topics": topics,             # REAL topics from API
             "test_id": test_id,
-            "test_seq": str(rec.get("percentile") or ""),
+            # Per-test session has no inherent sequence — leave null. The
+            # field is only meaningful on individual incorrect question
+            # records (set per-q below as their 1-based position in the
+            # testQuestionInfoList). Old code wrote percentile here which
+            # made downstream URL construction land on the loading screen.
+            "test_seq": None,
             "results_url": (
                 f"{UWORLD_APP_BASE}/performance/test/results/{COURSE_ID}/{test_id}/0"
             ),
@@ -966,7 +971,32 @@ def _uworld_scrape_history() -> dict:
     # ── Step 4: GetTestRecordDetails — get per-test wrong QIDs ───────────────
     existing_data = _load_existing()
     existing_incorrects: list[dict] = existing_data.get("incorrect", [])
-    # Index by test_id to skip already-cached tests (incremental)
+
+    # One-time migration: prior versions wrote the session percentile
+    # (e.g. "58") into per-question test_seq. Real test_seq is 1..40
+    # (the question's position in the testQuestionInfoList). Detect
+    # bogus values and drop those records so the scraper re-fetches
+    # them with the corrected logic below.
+    def _seq_is_bogus(s) -> bool:
+        if s in (None, ""):
+            return False
+        try:
+            return int(s) > 40
+        except (TypeError, ValueError):
+            return False
+    bogus_test_ids = {
+        str(i.get("test_id", ""))
+        for i in existing_incorrects
+        if _seq_is_bogus(i.get("test_seq")) and i.get("test_id")
+    }
+    if bogus_test_ids:
+        log.info(f"[uworld] Clearing {len(bogus_test_ids)} test(s) with bogus test_seq for re-scrape")
+        existing_incorrects = [
+            i for i in existing_incorrects
+            if str(i.get("test_id", "")) not in bogus_test_ids
+        ]
+
+    # Index by test_id to skip already-cached tests (incremental).
     existing_test_ids: set[str] = {
         str(i.get("test_id", "")) for i in existing_incorrects if i.get("test_id")
     }
@@ -1009,7 +1039,11 @@ def _uworld_scrape_history() -> dict:
             q_list = []
 
         wrong_count = 0
-        for q in q_list:
+        # 1-based enumerate so test_seq matches the URL pattern UWorld
+        # uses for individual-question deep-links:
+        #   /performance/test/results/{course}/{test_id}/{seq}
+        # Where seq is the question's position in the test (1..N).
+        for seq, q in enumerate(q_list, start=1):
             if not isinstance(q, dict):
                 continue
             qid = str(q.get("questionId") or q.get("qId") or q.get("id") or "")
@@ -1030,7 +1064,9 @@ def _uworld_scrape_history() -> dict:
                 "uworld_topic_name": q.get("topic") or "",
                 "missed_at": sess.get("date", ""),
                 "test_id": test_id,
-                "test_seq": sess.get("test_seq", ""),
+                # Position in the test (1-based). Replaces the prior bug
+                # where this was the session-level percentile.
+                "test_seq": seq,
             })
             existing_qids.add(qid)
             wrong_count += 1
