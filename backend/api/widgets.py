@@ -757,7 +757,12 @@ def anki_unsuspend(body: AnkiUnsuspendBody, request: Request):
 # ── iMessage ──────────────────────────────────────────────────────────────────
 
 @router.get("/widgets/imessage")
-def imessage_widget(include_groups: bool = False, limit: int = 25):
+def imessage_widget(include_groups: bool = True, limit: int = 25):
+    # Group chats are now ON by default — verified via the iMessage MCP that
+    # group-chat unreads (e.g. tapback "Laughed at..." in the family thread)
+    # were silently dropped before. The user's complaint about "messages
+    # still showing wrong ones" traced directly to this default. Pass
+    # ?include_groups=false to opt out per-request if needed.
     cache_key = f"imessage::{int(include_groups)}::{limit}"
 
     def _compute():
@@ -1506,7 +1511,7 @@ def briefing_widget():
             if cached_im and cached_im[0] > time.time():
                 convos = (cached_im[1] or {}).get("conversations") or []
             else:
-                convos = get_conversations(limit=25, messages_per_thread=1, include_groups=False)
+                convos = get_conversations(limit=25, messages_per_thread=1, include_groups=True)
             # Sum unread counts only — no contact resolution needed here
             # (the iMessage widget already resolves names; briefing only needs a count).
             count = sum(int(c.get("unread_count") or 0) for c in convos)
