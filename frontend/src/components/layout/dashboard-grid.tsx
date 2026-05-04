@@ -12,6 +12,12 @@ import "react-resizable/css/styles.css";
 
 const LAYOUT_KEY = "jarvis-layout-v4";
 const HIDDEN_KEY = "jarvis-hidden-widgets-v2";
+const DEEP_FOCUS_KEY = "jarvis-deep-focus-v1";
+const DEEP_FOCUS_EVENT = "jarvis-deep-focus-change";
+
+// In Deep Focus mode, only these widgets render. Sizes/positions inherited
+// from the user's saved layout — no re-layouting, just filter the list.
+const DEEP_FOCUS_KEYS = new Set(["chatbot", "briefing", "spotify"]);
 
 const WIDGET_LABELS: Record<string, string> = {
   briefing: "Morning Briefing",
@@ -61,6 +67,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
   const [layouts, setLayouts] = useState<ReactGridLayout.Layouts>({ lg: DEFAULT_LAYOUT });
   const [hiddenWidgets, setHiddenWidgets] = useState<Set<string>>(new Set());
   const [showPanel, setShowPanel] = useState(false);
+  const [deepFocus, setDeepFocus] = useState(false);
   const [saveConfirm, setSaveConfirm] = useState(false);
   const saveConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -121,6 +128,21 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     if (savedHidden) {
       try { setHiddenWidgets(new Set(JSON.parse(savedHidden))); } catch { /* keep default */ }
     }
+    try {
+      setDeepFocus(localStorage.getItem(DEEP_FOCUS_KEY) === "1");
+    } catch { /* ignore */ }
+  }, []);
+
+  // Listen for Deep Focus toggles from the topbar so the grid re-renders
+  // immediately. Same-tab updates use a CustomEvent (the storage event only
+  // fires across tabs).
+  useEffect(() => {
+    const onChange = (e: Event) => {
+      const ce = e as CustomEvent<{ enabled: boolean }>;
+      if (ce.detail) setDeepFocus(ce.detail.enabled);
+    };
+    window.addEventListener(DEEP_FOCUS_EVENT, onChange);
+    return () => window.removeEventListener(DEEP_FOCUS_EVENT, onChange);
   }, []);
 
   useLayoutEffect(() => {
@@ -195,7 +217,12 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     saveConfirmTimerRef.current = setTimeout(() => setSaveConfirm(false), 2000);
   }, [layouts]);
 
-  const visibleKeys = ALL_KEYS.filter((k) => !hiddenWidgets.has(k));
+  // In Deep Focus mode, restrict to the 3-widget set regardless of the
+  // user's saved hidden list — the toggle is meant to be a fast, reversible
+  // override that doesn't mutate their preferences.
+  const visibleKeys = deepFocus
+    ? ALL_KEYS.filter((k) => DEEP_FOCUS_KEYS.has(k) && !hiddenWidgets.has(k))
+    : ALL_KEYS.filter((k) => !hiddenWidgets.has(k));
   const hiddenCount = hiddenWidgets.size;
   const totalCount = ALL_KEYS.length;
   const visibleCount = totalCount - hiddenCount;
@@ -343,14 +370,8 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
       )}
 
       {/* Grid */}
-      {/* WHY the editMode-keyed remount: react-grid-layout v2 occasionally
-          retains internal drag listeners across `isDraggable` prop transitions.
-          Re-keying forces a clean remount when toggling edit mode, which is
-          the only way to guarantee a true zero-drag state outside edit mode.
-          The remount is cheap (only the grid items, not their content). */}
       {width > 0 && (
         <Responsive
-          key={editMode ? "editing" : "locked"}
           className="layout"
           layouts={layouts}
           breakpoints={{ lg: 900, md: 600, sm: 0 }}
@@ -358,10 +379,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
           rowHeight={30}
           width={width}
           onLayoutChange={onLayoutChange}
-          // When edit mode is OFF, point draggableHandle at a selector that
-          // can never match anything in the DOM. Combined with isDraggable=false,
-          // this provides two independent guarantees that drag cannot start.
-          draggableHandle={editMode ? ".widget-drag-handle" : ".__never_match__"}
+          draggableHandle=".widget-drag-handle"
           // draggableCancel prevents react-grid-layout from treating clicks on
           // interactive descendants as drag initiations when the user happens
           // to hold the mouse down on a button or input for more than the drag

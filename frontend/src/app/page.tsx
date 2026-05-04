@@ -2,7 +2,6 @@
 
 import { Topbar } from "@/components/layout/topbar";
 import { DashboardGrid } from "@/components/layout/dashboard-grid";
-import { DeepFocusOverlay } from "@/components/layout/deep-focus-overlay";
 import { WidgetWrapper } from "@/components/layout/widget-wrapper";
 import { ChatbotPanel } from "@/components/chat/chatbot-panel";
 import { MorningBriefing } from "@/components/widgets/morning-briefing";
@@ -42,7 +41,6 @@ export default function Home() {
       <main className="flex-1 overflow-y-auto p-4">
         <DashboardGrid widgets={widgets} />
       </main>
-      <DeepFocusOverlay />
     </div>
   );
 }
