@@ -26,8 +26,19 @@ const listeners = new Set<Listener>();
 // Module-level state: starts false (safe server-side default).
 let _editMode = false;
 
+// Toggle a body class so CSS can defensively kill drag affordances when off.
+// Why this exists alongside the React isDraggable wiring: react-grid-layout v2
+// sometimes retains drag listeners across prop transitions, so a CSS belt
+// (cursor:default + display:none on resize handles) backs up the JS suspenders.
+function applyEditModeClass(active: boolean) {
+  if (typeof document === "undefined") return;
+  if (active) document.body.classList.add("edit-mode-active");
+  else document.body.classList.remove("edit-mode-active");
+}
+
 function setEditMode(next: boolean) {
   _editMode = next;
+  applyEditModeClass(next);
   // Persist so the preference survives navigation reloads.
   try {
     localStorage.setItem(STORAGE_KEY, next ? "1" : "0");
@@ -56,9 +67,13 @@ export function useEditModeStore() {
       if (stored !== null) {
         const hydrated = stored === "1";
         _editMode = hydrated;
+        applyEditModeClass(hydrated);
         setLocal(hydrated);
         // Notify other already-mounted consumers so they're consistent.
         listeners.forEach((fn) => fn(hydrated));
+      } else {
+        // Default off — ensure the body class is also off so CSS rules apply.
+        applyEditModeClass(false);
       }
     } catch {
       /* ignore */
