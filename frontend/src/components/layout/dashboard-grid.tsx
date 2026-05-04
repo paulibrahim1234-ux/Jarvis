@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from "react";
 import { useEditModeStore } from "@/lib/edit-mode-store";
 import { Responsive as ResponsiveBase } from "react-grid-layout";
 
@@ -217,6 +217,20 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     saveConfirmTimerRef.current = setTimeout(() => setSaveConfirm(false), 2000);
   }, [layouts]);
 
+  // Decorate every layout item with `static: !editMode` so RGL hard-disables
+  // drag/resize at the GridItem layer when the user isn't in edit mode.
+  // See the comment block on the <Responsive layouts={decoratedLayouts} /> below.
+  const decoratedLayouts = useMemo(() => {
+    const result: ReactGridLayout.Layouts = {};
+    for (const [bp, items] of Object.entries(layouts)) {
+      result[bp] = (items as ReactGridLayout.Layout[]).map((it) => ({
+        ...it,
+        static: !editMode,
+      }));
+    }
+    return result;
+  }, [layouts, editMode]);
+
   // In Deep Focus mode, restrict to the 3-widget set regardless of the
   // user's saved hidden list — the toggle is meant to be a fast, reversible
   // override that doesn't mutate their preferences.
@@ -370,10 +384,25 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
       )}
 
       {/* Grid */}
+      {/*
+        WHY decoratedLayouts exists: react-grid-layout v2's grid-level
+        `isDraggable={false}` is occasionally bypassed (RGL caches drag
+        listeners across prop transitions in some scenarios), causing
+        clicks on plain divs/spans inside widgets to start a drag even
+        when the user thinks they're not in edit mode. The bullet-proof
+        fix is RGL's per-item `static: true` flag — at the GridItem
+        layer, RGL hard-codes `isDraggable=false, isResizable=false` for
+        any item with `static: true`. Setting `static: !editMode` on
+        every layout item gives one ironclad answer instead of relying
+        on the grid-level prop being honored.
+
+        The decoration is derived (not stored) so toggling edit mode
+        doesn't mutate the user's saved layout positions.
+      */}
       {width > 0 && (
         <Responsive
           className="layout"
-          layouts={layouts}
+          layouts={decoratedLayouts}
           breakpoints={{ lg: 900, md: 600, sm: 0 }}
           cols={BREAKPOINT_COLS}
           rowHeight={30}

@@ -17,7 +17,11 @@
 
 import { useState, useEffect } from "react";
 
-const STORAGE_KEY = "jarvis.editMode";
+// WHY .v2: the previous key persisted true across a broken release where
+// the dashboard couldn't reliably exit edit mode. Bumping the key forces
+// a clean default-false start for every existing user — no stale state
+// can survive across this fix.
+const STORAGE_KEY = "jarvis.editMode.v2";
 
 // Internal subscriber registry — call each listener when state changes.
 type Listener = (editMode: boolean) => void;
