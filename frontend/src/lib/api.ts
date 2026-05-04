@@ -179,6 +179,26 @@ export async function refreshUWorld(): Promise<{
   }
 }
 
+/**
+ * Open a UWorld question URL in the user's existing Comet UWorld tab,
+ * preserving the logged-in session. Falls back to opening in the default
+ * browser when no UWorld tab is currently open.
+ */
+export async function openUWorldQuestion(url: string): Promise<{ ok: boolean; navigated_existing_tab?: boolean; error?: string }> {
+  try {
+    const r = await fetch(`${BACKEND}/widgets/uworld/open-question`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+    return r.json();
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function fetchAnkiSuggestions(opts?: {
   /** Restrict results to specific UWorld QIDs (for a single session). */
   qidFilter?: string[];
@@ -514,6 +534,14 @@ export async function addEmailToCalendar(body: {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15000),
   });
+  // WHY explicit r.ok check: every other POST in this file guards against
+  // 4xx/5xx before calling r.json(). Without it, an error response's
+  // {detail: '...'} body doesn't match the typed return shape, so the caller
+  // sees ok: undefined (falsy) and the UI silently fails with no error message.
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({} as Record<string, string>));
+    return { ok: false, error: err.detail ?? err.message ?? `HTTP ${r.status}` };
+  }
   return r.json();
 }
 
@@ -536,10 +564,19 @@ export async function fetchSpotifyHome(): Promise<{
     owner?: string | null;
   }>;
   playlists?: Array<{ name: string; uri: string; id: string; cover?: string | null }>;
+  // Backend rate-limit signal — set when Spotify has 429'd Jarvis's app
+  // creds. The widget should render a banner instead of empty sections so
+  // the user knows it's a temporary upstream issue, not a Jarvis bug.
+  rate_limited?: boolean;
+  rate_limit_retry_in_seconds?: number;
+  rate_limit_message?: string;
 }> {
   const r = await fetch(`${BACKEND}/widgets/spotify/home`, {
     signal: AbortSignal.timeout(10000),
   });
-  if (!r.ok) return { available: false, error: r.statusText };
+  // WHY `HTTP ${r.status}` instead of r.statusText: HTTP/2 connections send
+  // an empty status text; r.statusText is "" on all HTTP/2 responses, making
+  // the error opaque. A numeric status code is always present and informative.
+  if (!r.ok) return { available: false, error: `HTTP ${r.status}` };
   return r.json();
 }

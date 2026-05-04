@@ -16,8 +16,11 @@ import { NBMETrackerWidget } from "@/components/widgets/nbme-tracker-widget";
 import { WeekWidget } from "@/components/widgets/week-widget";
 import { SpotifyWidget } from "@/components/widgets/spotify-widget";
 
+// MorningBriefing and SpotifyWidget manage their own WidgetWrapper so they
+// can forward status/lastUpdated props from inside the component where the
+// fetch state lives. All other widgets use the standard external wrapper.
 const widgets: Record<string, React.ReactNode> = {
-  briefing:  <WidgetWrapper><MorningBriefing /></WidgetWrapper>,
+  briefing:  <MorningBriefing />,
   calendar:  <WidgetWrapper><CalendarWidget /></WidgetWrapper>,
   email:     <WidgetWrapper><EmailWidget /></WidgetWrapper>,
   imessage:  <WidgetWrapper><IMessageWidget /></WidgetWrapper>,
@@ -25,7 +28,7 @@ const widgets: Record<string, React.ReactNode> = {
   pomodoro:  <WidgetWrapper><PomodoroWidget /></WidgetWrapper>,
   week:      <WidgetWrapper><WeekWidget /></WidgetWrapper>,
   streak:    <WidgetWrapper><StudyStreakWidget /></WidgetWrapper>,
-  spotify:   <WidgetWrapper><SpotifyWidget /></WidgetWrapper>,
+  spotify:   <SpotifyWidget />,
   qbank:     <WidgetWrapper><UWorldWidget /></WidgetWrapper>,
   nbme:      <WidgetWrapper><NBMETrackerWidget /></WidgetWrapper>,
   chatbot:   <ChatbotPanel embedded />,

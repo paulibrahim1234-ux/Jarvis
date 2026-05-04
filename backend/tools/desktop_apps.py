@@ -65,7 +65,14 @@ DESKTOP_TOOLS = [
     },
     {
         "name": "outlook_get_calendar_events",
-        "description": "Get upcoming calendar events from Microsoft Outlook desktop app.",
+        "description": (
+            "ONLY use this when the user explicitly asks for their OUTLOOK calendar "
+            "(e.g. 'what's on my Outlook calendar', 'check Outlook events'). "
+            "For general calendar questions like 'what's on my calendar today' or "
+            "'what's my next event', use calendar_get_events instead — Apple Calendar "
+            "is the user's primary view and includes their rotation feed plus any "
+            "Outlook events that sync into it."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -90,15 +97,37 @@ DESKTOP_TOOLS = [
     {
         "name": "outlook_search_inbox",
         "description": (
-            "Search Outlook Classic inbox for messages whose subject or sender contains a query. "
-            "Returns lightweight metadata (id, subject, sender, time). "
+            "Search Outlook Classic inbox for messages. "
+            "When natural_query is provided, Claude Haiku ranks candidates semantically — "
+            "use this for fuzzy intent searches like 'email about residency interview'. "
+            "The literal `query` is still used for AppleScript pre-filtering; pass an empty "
+            "string or broad term if you want Haiku to do all the ranking. "
+            "Returns lightweight metadata (id, subject, sender, time, body_preview). "
             "Pair with outlook_read_email to fetch the full body once you've narrowed it."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Substring to match in subject or sender (case-insensitive)"},
-                "max_results": {"type": "integer", "description": "Cap on hits (default 10)", "default": 10},
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Literal substring to match in subject/sender/name (case-insensitive). "
+                        "Pass an empty string to retrieve recent messages for Haiku to rank."
+                    ),
+                },
+                "natural_query": {
+                    "type": "string",
+                    "description": (
+                        "Free-form intent description sent to Claude Haiku for semantic ranking "
+                        "(e.g. 'find email about residency interview scheduling'). "
+                        "Optional — omit for plain keyword search."
+                    ),
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Max ranked results to return when natural_query is set (default 8)",
+                    "default": 8,
+                },
             },
             "required": ["query"],
         },
@@ -185,8 +214,12 @@ DESKTOP_TOOLS = [
     {
         "name": "calendar_get_events",
         "description": (
-            "Get upcoming events from Apple Calendar (all user calendars, including "
-            "rotation schedule from the one45 'Subscribed Calendar' feed)."
+            "PRIMARY calendar tool. Use this for any general calendar question — "
+            "'what's on my calendar', 'what's my next event', 'tomorrow's first thing', "
+            "'do I have anything this weekend'. Returns upcoming events from ALL of "
+            "the user's Apple Calendar calendars including their School calendar, "
+            "the one45 'Subscribed Calendar' rotation feed, and any Outlook events "
+            "that sync into Apple Calendar. Prefer this over outlook_get_calendar_events."
         ),
         "input_schema": {
             "type": "object",
@@ -236,7 +269,11 @@ def run_desktop_tool(name: str, inp: dict):
     if name == "outlook_send_email":
         return _outlook_send(inp["to"], inp["subject"], inp["body"])
     if name == "outlook_search_inbox":
-        return _outlook_search_inbox(inp["query"], inp.get("max_results", 10))
+        return _outlook_search_inbox(
+            query=inp["query"],
+            natural_query=inp.get("natural_query", ""),
+            top_k=inp.get("top_k", 8),
+        )
     if name == "outlook_read_email":
         return _outlook_read_email(
             message_id=inp.get("message_id", ""),
@@ -528,6 +565,80 @@ end tell
     return {"accounts": accounts}
 
 
+class OutlookNotRunningError(RuntimeError):
+    """Raised when Outlook Classic cannot be launched within the timeout."""
+
+
+class NewOutlookModeError(RuntimeError):
+    """Raised when New Outlook mode is detected (incompatible with Classic AppleScript API)."""
+
+
+def _ensure_outlook_running() -> None:
+    """Guarantee Microsoft Outlook Classic is running before any AppleScript call.
+
+    WHY this exists rather than relying on the "not running" error path: AppleScript
+    errors from a not-running app are opaque ("connection is invalid") and surface
+    long after the timeout. Proactive check + launch cuts the latency and returns a
+    user-legible message instead of a cryptic osascript stderr dump.
+
+    Steps:
+      1. Query System Events for the process name (non-activating check).
+      2. If absent, launch via `open -a "Microsoft Outlook"` (standard macOS app open).
+      3. Poll every 0.5 s up to 15 s for the process to appear.
+      4. Once running, probe for New Outlook mode via exchange-accounts count:
+         New Outlook swapped that property, so a specific AppleScript error signature
+         indicates the user is in New Outlook and the Classic API won't work.
+    """
+    def _is_running() -> bool:
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to (name of processes) contains "Microsoft Outlook"'],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip().lower() == "true"
+
+    try:
+        already_up = _is_running()
+    except Exception:
+        already_up = False  # if System Events fails, optimistically proceed
+
+    if not already_up:
+        subprocess.run(["open", "-a", "Microsoft Outlook"], check=False, timeout=5)
+        # Poll up to 15 s (30 × 0.5 s) for the process to appear in the process list.
+        # The 0.5 s interval is intentional: short enough that a fast machine doesn't
+        # wait unnecessarily, long enough to avoid hammering System Events.
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                if _is_running():
+                    break
+            except Exception:
+                pass
+        else:
+            raise OutlookNotRunningError(
+                "Microsoft Outlook did not start within 15 seconds. "
+                "Please open it manually and try again."
+            )
+
+    # New Outlook detection: Classic API exposes `exchange accounts`; New Outlook
+    # silently redirected that property and the script errors with a distinctive
+    # message that doesn't appear with Classic mode.
+    probe = subprocess.run(
+        ["osascript", "-e",
+         'tell application "Microsoft Outlook" to return count of exchange accounts'],
+        capture_output=True, text=True, timeout=8,
+    )
+    stderr = probe.stderr.strip().lower()
+    # New Outlook returns "Outlook got an error: Can't get exchange accounts." or
+    # a variant containing "can't get" — Classic returns a plain integer.
+    if "can't get" in stderr or "cannot get" in stderr:
+        raise NewOutlookModeError(
+            "New Outlook is active but the Classic AppleScript API is required. "
+            "Toggle off 'New Outlook' in Outlook → Help menu, then retry."
+        )
+
+
 def _count_outlook_accounts() -> dict:
     """Return count of exchange / imap / pop accounts."""
     script = """
@@ -589,6 +700,13 @@ def _outlook_inbox(
         folder: optional folder name (e.g. "Rowan class of 2027"). Empty = Inbox.
         account: optional account name OR email to restrict to a single account.
     """
+    # Ensure Outlook Classic is running — surfaces a user-legible error rather
+    # than a cryptic AppleScript "connection is invalid" failure mid-script.
+    try:
+        _ensure_outlook_running()
+    except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        return {"error": str(exc), "emails": []}
+
     import concurrent.futures
 
     counts = _count_outlook_accounts()
@@ -654,6 +772,11 @@ def _outlook_inbox(
 
 
 def _outlook_calendar(days: int = 30) -> dict:
+    # Ensure Outlook Classic is running before fetching calendar events.
+    try:
+        _ensure_outlook_running()
+    except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        return {"error": str(exc), "events": []}
     script = f"""
 tell application "Microsoft Outlook"
     set startDate to current date
@@ -707,6 +830,11 @@ end tell
 
 
 def _outlook_send(to: str, subject: str, body: str) -> dict:
+    # Ensure Outlook Classic is running before attempting to compose a message.
+    try:
+        _ensure_outlook_running()
+    except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        return {"error": str(exc)}
     # Escape for AppleScript (handles backslash, quote, newline, CR).
     to_s = _as_str(to)
     subj_s = _as_str(subject)
@@ -719,62 +847,136 @@ tell application "Microsoft Outlook"
     return "sent"
 end tell
 """
-    result = _osascript(script)
+    # 30 s timeout: SMTP/Exchange handoff after sleep or a network change can
+    # push past the default 15 s — mid-send kill leaves message state undefined.
+    # 30 s matches the other long-poll bands in this file (search uses 45 s).
+    result = _osascript(script, timeout=30)
     if "error" in result:
         return result
     return {"status": "sent", "to": to, "subject": subject}
 
 
-def _outlook_search_inbox(query: str, max_results: int = 10) -> dict:
-    """Search Outlook Classic for messages whose subject or sender contains `query`.
+def _outlook_search_inbox(
+    query: str,
+    natural_query: str = "",
+    top_k: int = 8,
+) -> dict:
+    """Search Outlook Classic inbox, optionally re-ranked by Claude Haiku.
 
-    Returns lightweight metadata (id, subject, sender, time, preview, has_body).
-    Use `_outlook_read_email` to fetch the full body once you've narrowed it.
+    Args:
+        query:         Literal substring for AppleScript pre-filter (case-insensitive).
+                       Pass "" to pull recent messages without keyword filtering.
+        natural_query: Free-form intent for Haiku semantic ranking.
+                       When omitted, results are returned in chronological order.
+        top_k:         Max ranked results returned when natural_query is set.
+
+    Flow:
+        1. Ensure Outlook Classic is running (structured error if not).
+        2. AppleScript pulls up to 200 candidates (offset 0).
+           - Each candidate: id, subject, sender_email, sender_name,
+             received_iso, body_preview (≤280 chars from the `content` property).
+        3. If zero candidates and a query was given, try offset 200, then 400
+           (hard cap 600 total) before giving up — avoids empty results when the
+           matching email is further down the inbox.
+        4. If natural_query is set, call Haiku to score + rank candidates,
+           then return top_k. Falls back to chronological order on any API error.
     """
+    # ── Guard: Outlook must be running ─────────────────────────────────────────
+    # Catch all exceptions from _ensure_outlook_running — not just the two custom
+    # types. The probe subprocess at the end of that helper can raise
+    # subprocess.TimeoutExpired if Outlook is opening but hasn't become responsive
+    # yet, and that must also surface as a structured error rather than a crash.
+    try:
+        _ensure_outlook_running()
+    except Exception as exc:
+        return {"error": "outlook_not_running", "message": str(exc), "candidates": []}
+
+    # ── AppleScript fetch ───────────────────────────────────────────────────────
     q = (query or "").strip().lower()
-    if not q:
-        return {"messages": [], "error": "empty query"}
+    # An empty keyword is valid when natural_query will do the ranking — skip
+    # the AppleScript contains-check so all recent messages are candidates.
+    use_filter = bool(q)
     q_s = _as_str(q)
-    script = f"""
+
+    # AppleScript truncates body_preview at 280 chars to keep the osascript
+    # return value small; full body is available via _outlook_read_email.
+    BATCH = 200
+    HARD_CAP = 600  # 3 batches maximum to bound cost/time
+
+    def _fetch_batch(offset: int) -> list[dict]:
+        """Pull one batch of up to BATCH messages starting at `offset`."""
+        filter_block = f'if bag contains q then' if use_filter else 'if true then'
+        script = f"""
 tell application "Microsoft Outlook"
     set q to "{q_s}"
     set out to ""
     set hits to 0
-    repeat with acct in exchange accounts
+    set skipped to 0
+    -- Union all account types so Gmail/iCloud IMAP accounts are visible.
+    -- _outlook_inbox already does this; search was inconsistently exchange-only,
+    -- which made IMAP/POP inboxes invisible to keyword search (Hunter found this).
+    set allAccts to {{}}
+    try
+        set allAccts to allAccts & (every exchange account)
+    end try
+    try
+        set allAccts to allAccts & (every imap account)
+    end try
+    try
+        set allAccts to allAccts & (every pop account)
+    end try
+    repeat with acct in allAccts
         try
             set inb to inbox of acct
             set msgs to messages of inb
             repeat with m in msgs
-                if hits ≥ {max_results} then exit repeat
-                try
-                    set subj to subject of m as string
-                on error
-                    set subj to ""
-                end try
-                try
-                    set fromAddr to address of (sender of m) as string
-                on error
-                    set fromAddr to ""
-                end try
-                try
-                    set fromName to name of (sender of m) as string
-                on error
-                    set fromName to ""
-                end try
-                set bag to (subj & " " & fromAddr & " " & fromName) as string
-                if bag contains q then
-                    set hits to hits + 1
+                -- offset support: skip the first {offset} messages globally
+                if skipped < {offset} then
+                    set skipped to skipped + 1
+                else if hits < {BATCH} then
                     try
-                        set mid to id of m as string
+                        set subj to subject of m as string
                     on error
-                        set mid to ""
+                        set subj to ""
                     end try
                     try
-                        set ts to time received of m as string
+                        set fromAddr to address of (sender of m) as string
                     on error
-                        set ts to ""
+                        set fromAddr to ""
                     end try
-                    set out to out & mid & "|||" & subj & "|||" & fromName & "|||" & fromAddr & "|||" & ts & "###ROW###"
+                    try
+                        set fromName to name of (sender of m) as string
+                    on error
+                        set fromName to ""
+                    end try
+                    set bag to (subj & " " & fromAddr & " " & fromName) as string
+                    {filter_block}
+                        set hits to hits + 1
+                        try
+                            set mid to id of m as string
+                        on error
+                            set mid to ""
+                        end try
+                        try
+                            -- time received as ISO-like string; Outlook returns localised date string
+                            set ts to time received of m as string
+                        on error
+                            set ts to ""
+                        end try
+                        try
+                            -- `content` is the plain-text body in Classic Outlook AppleScript
+                            set rawBody to content of m as string
+                            if (length of rawBody) > 280 then
+                                set preview to text 1 thru 280 of rawBody
+                            else
+                                set preview to rawBody
+                            end if
+                        on error
+                            set preview to ""
+                        end try
+                        -- Delimiter chosen to be unlikely in email content
+                        set out to out & mid & "|||" & subj & "|||" & fromName & "|||" & fromAddr & "|||" & ts & "|||" & preview & "###ROW###"
+                    end if
                 end if
             end repeat
         end try
@@ -782,22 +984,148 @@ tell application "Microsoft Outlook"
     return out
 end tell
 """
-    result = _osascript(script, timeout=20)
-    if "error" in result:
-        return result
-    messages = []
-    for line in result.get("output", "").split("###ROW###"):
-        line = line.strip().lstrip(",").strip()
-        parts = line.split("|||")
-        if len(parts) >= 5 and parts[0]:
-            messages.append({
-                "id": parts[0],
-                "subject": parts[1].strip(),
-                "sender_name": parts[2].strip(),
-                "sender_email": parts[3].strip(),
-                "received_at": parts[4].strip(),
-            })
-    return {"messages": messages, "count": len(messages), "query": query}
+        # 45 s timeout per batch; raise TimeoutExpired so callers can catch it.
+        result = _osascript(script, timeout=45)
+        if "error" in result:
+            # Propagate structured timeout error; other errors bubble as dict.
+            return result  # type: ignore[return-value]
+        rows: list[dict] = []
+        for line in result.get("output", "").split("###ROW###"):
+            line = line.strip().lstrip(",").strip()
+            parts = line.split("|||")
+            if len(parts) >= 5 and parts[0]:
+                rows.append({
+                    "id": parts[0],
+                    "subject": parts[1].strip(),
+                    "sender_name": parts[2].strip(),
+                    "sender_email": parts[3].strip(),
+                    "received_iso": parts[4].strip(),
+                    "body_preview": parts[5].strip() if len(parts) >= 6 else "",
+                })
+        return rows
+
+    # ── Batch loop with pagination ──────────────────────────────────────────────
+    candidates: list[dict] = []
+    for offset in range(0, HARD_CAP, BATCH):
+        batch = _fetch_batch(offset)
+
+        # AppleScript-level error (timeout or other) — surface immediately.
+        if isinstance(batch, dict) and "error" in batch:
+            # Structured timeout so callers can retry with a narrower query.
+            if batch.get("error") == "AppleScript timed out — app may be busy or not responding.":
+                return {
+                    "error": "applescript_timeout",
+                    "message": "AppleScript timed out after 45s; try a more specific query.",
+                    "candidates": [],
+                }
+            return batch  # other AppleScript errors
+
+        candidates.extend(batch)  # type: ignore[arg-type]
+
+        # Stop paginating once we have candidates OR the batch was empty
+        # (no more messages in inbox) OR we're not using a keyword filter
+        # (all messages are candidates; no point fetching more without ranking).
+        if candidates or not isinstance(batch, list) or len(batch) < BATCH:
+            break
+        if not use_filter:
+            # Without a keyword filter every message is a candidate; one batch
+            # of 200 is enough — Haiku will pick the best ones.
+            break
+
+    # ── LLM-guided ranking ──────────────────────────────────────────────────────
+    if natural_query and candidates:
+        candidates = _rank_with_haiku(candidates, natural_query, top_k)
+
+    return {
+        "candidates": candidates[: top_k if natural_query else len(candidates)],
+        "count": len(candidates[: top_k if natural_query else len(candidates)]),
+        "query": query,
+        "natural_query": natural_query or None,
+    }
+
+
+def _rank_with_haiku(
+    candidates: list[dict],
+    natural_query: str,
+    top_k: int,
+) -> list[dict]:
+    """Ask Claude Haiku to score each candidate and return top_k sorted by score.
+
+    WHY Haiku specifically: it is the cheapest Anthropic model and this is a
+    high-frequency ranking call — we want latency < 2 s and cost < $0.001/call.
+    Haiku is sufficient for subject+sender matching; Sonnet would be overkill.
+
+    Falls back to chronological order (no re-sort) if the API call fails for
+    any reason, so the user still gets *something* useful rather than an error.
+    """
+    import json as _json  # local import to keep module-level imports clean
+
+    # Build the candidate list for the prompt.
+    # Only include body_preview when there are ≤30 candidates — otherwise the
+    # prompt grows large enough to matter for cost and latency.
+    include_body = len(candidates) <= 30
+    lines: list[str] = []
+    for c in candidates:
+        entry = f"id={c['id']} | subject={c['subject']} | from={c['sender_name']} <{c['sender_email']}> | date={c['received_iso']}"
+        if include_body and c.get("body_preview"):
+            entry += f" | preview={c['body_preview'][:200]}"
+        lines.append(entry)
+    candidate_block = "\n".join(lines)
+
+    prompt = (
+        f"You are ranking email candidates for relevance to a user's search intent.\n\n"
+        f"Search intent: {natural_query}\n\n"
+        f"Candidates:\n{candidate_block}\n\n"
+        f"Return ONLY valid JSON — no markdown, no explanation — in this exact shape:\n"
+        f'{{\"ranked\": [{{\"id\": \"<msgid>\", \"score\": 0-100, \"reason\": \"<short>\"}}]}}\n'
+        f"Include the top {top_k} most relevant candidates only, sorted by score descending.\n"
+        f"If none are relevant, return {{\"ranked\": []}}."
+    )
+
+    # Reuse the same client-building pattern as jarvis.py — read from env so
+    # that OAuth tokens and API keys both work transparently.
+    import anthropic as _anthropic
+
+    raw = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or ""
+    if raw.startswith("sk-ant-oat"):
+        haiku_client = _anthropic.Anthropic(
+            auth_token=raw,
+            default_headers={"anthropic-beta": "oauth-2025-04-20"},
+        )
+    else:
+        haiku_client = _anthropic.Anthropic(api_key=raw)
+
+    try:
+        response = haiku_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw_text = response.content[0].text.strip()
+        # Strip markdown fences if the model wraps in them despite instructions.
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        ranking_data = _json.loads(raw_text)
+        ranked_items: list[dict] = ranking_data.get("ranked", [])
+    except Exception:
+        # Any failure (network, key, rate-limit, JSON parse) → fall back.
+        # Inject a reason so the caller knows ranking was skipped.
+        for c in candidates:
+            c["score_reason"] = "(LLM ranking unavailable, showing chronological)"
+        return candidates[:top_k]
+
+    # Merge score + reason from Haiku back into the candidate dicts by id.
+    score_map = {str(r["id"]): r for r in ranked_items}
+    result: list[dict] = []
+    for c in candidates:
+        if str(c["id"]) in score_map:
+            ranked_entry = score_map[str(c["id"])]
+            c["score"] = ranked_entry.get("score", 0)
+            c["score_reason"] = ranked_entry.get("reason", "")
+            result.append(c)
+
+    result.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return result[:top_k]
 
 
 def _outlook_read_email(message_id: str = "", subject_query: str = "") -> dict:
@@ -806,6 +1134,11 @@ def _outlook_read_email(message_id: str = "", subject_query: str = "") -> dict:
     Provide either `message_id` (preferred — exact) or `subject_query` (newest match).
     Returns: {subject, sender_name, sender_email, received_at, body, html, id}
     """
+    # Ensure Outlook Classic is running before reading the email body.
+    try:
+        _ensure_outlook_running()
+    except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        return {"error": str(exc)}
     if not message_id and not subject_query:
         return {"error": "Provide message_id or subject_query"}
     # message_id is gated on isdigit() below — drop quotes; isdigit() will
@@ -833,7 +1166,20 @@ tell application "Microsoft Outlook"
     set sa_t to ""
     set ts_t to ""
     set id_t to ""
-    repeat with acct in exchange accounts
+    -- Union all account types so Gmail/iCloud IMAP accounts are visible.
+    -- _outlook_inbox already does this; read was inconsistently exchange-only,
+    -- which made IMAP/POP messages invisible to the read tool (Hunter found this).
+    set allAccts to {{}}
+    try
+        set allAccts to allAccts & (every exchange account)
+    end try
+    try
+        set allAccts to allAccts & (every imap account)
+    end try
+    try
+        set allAccts to allAccts & (every pop account)
+    end try
+    repeat with acct in allAccts
         try
             {finder}
             try

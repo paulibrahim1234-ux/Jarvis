@@ -167,6 +167,8 @@ def get_conversations(
         handle:          raw handle id (phone / email)
         chat_id:         chat.ROWID (stable identifier for the chat row)
         is_group:        bool
+        participants:    list of formatted handles in a group chat (DMs: empty list)
+        participant_count: int (DMs: 1, groups: N)
         unread_count:    # messages after chat.last_read_message_timestamp
                          where is_from_me = 0
         last_message:    scrubbed preview of newest message
@@ -226,21 +228,48 @@ def get_conversations(
             chat_id = cr["chat_id"]
             is_group = cr["style"] == STYLE_GROUP
 
-            # pull primary handle for this chat (first handle id for DMs)
-            handle_row = conn.execute(
+            # Pull ALL handles for this chat. For DMs that's one row; for groups
+            # the full participant list — needed so the widget can render a
+            # multi-name label ("Alice, Bob & 3 others") when the chat has no
+            # display_name set.
+            participant_rows = conn.execute(
                 """
                 SELECT h.id
                 FROM chat_handle_join chj
                 JOIN handle h ON h.ROWID = chj.handle_id
                 WHERE chj.chat_id = ?
                 ORDER BY h.ROWID
-                LIMIT 1
                 """,
                 (chat_id,),
-            ).fetchone()
-            handle = handle_row["id"] if handle_row else cr["chat_identifier"]
+            ).fetchall()
+            participant_handles: list[str] = [r["id"] for r in participant_rows if r["id"]]
+            handle = participant_handles[0] if participant_handles else cr["chat_identifier"]
+            # Pretty-format participants for label rendering (kept as the
+            # group's roster regardless of who sent the most recent message).
+            formatted_participants = [_format_phone(p) for p in participant_handles]
 
-            contact = _best_contact_name(cr["display_name"], handle)
+            # Group label resolution:
+            #   1. chat.display_name (if set — like "OMS3s 1.0", "Co-inhabitants…")
+            #   2. comma-joined participant list, truncated to first 2 names
+            #      ("Alice, Bob & 3 others") so it's clearly a multi-person thread
+            #   3. fallback to formatted-handle for DMs (existing behavior)
+            if is_group:
+                display_name = (cr["display_name"] or "").strip()
+                if display_name:
+                    contact = display_name
+                elif formatted_participants:
+                    n = len(formatted_participants)
+                    if n <= 2:
+                        contact = " & ".join(formatted_participants)
+                    else:
+                        contact = (
+                            f"{formatted_participants[0]}, {formatted_participants[1]}"
+                            f" & {n - 2} other{'s' if n - 2 != 1 else ''}"
+                        )
+                else:
+                    contact = "Group chat"
+            else:
+                contact = _best_contact_name(cr["display_name"], handle)
 
             # De-dup on a STABLE identifier (handle) — not on the formatted
             # display string. Display strings can collide across people
@@ -327,7 +356,10 @@ def get_conversations(
                 "contact": contact,
                 "handle": handle or "",
                 "chat_id": chat_id,
+                "chat_identifier": cr["chat_identifier"] or "",
                 "is_group": is_group,
+                "participants": formatted_participants,
+                "participant_count": len(formatted_participants) if is_group else 1,
                 "unread_count": int(unread_count),
                 "last_message": _scrub(newest["text"])[:160],
                 "last_message_from_me": bool(newest["is_from_me"]),

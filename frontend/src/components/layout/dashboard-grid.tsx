@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useEditModeStore } from "@/lib/edit-mode-store";
 import { Responsive as ResponsiveBase } from "react-grid-layout";
 
 // The published types don't include all runtime props (draggableHandle, etc.)
@@ -11,6 +12,12 @@ import "react-resizable/css/styles.css";
 
 const LAYOUT_KEY = "jarvis-layout-v4";
 const HIDDEN_KEY = "jarvis-hidden-widgets-v2";
+const DEEP_FOCUS_KEY = "jarvis-deep-focus-v1";
+const DEEP_FOCUS_EVENT = "jarvis-deep-focus-change";
+
+// In Deep Focus mode, only these widgets render. Sizes/positions inherited
+// from the user's saved layout — no re-layouting, just filter the list.
+const DEEP_FOCUS_KEYS = new Set(["chatbot", "briefing", "spotify"]);
 
 const WIDGET_LABELS: Record<string, string> = {
   briefing: "Morning Briefing",
@@ -42,6 +49,11 @@ const DEFAULT_LAYOUT: ReactGridLayout.Layout[] = [
   { i: "nbme",      x: 8, y: 30, w: 4,  h: 9,  minH: 6, minW: 2 },
 ];
 
+// WHY module scope: re-creating this object on every render causes React to
+// see a new reference each cycle, which can trigger unnecessary child updates.
+// Also used as the `cols` prop on <Responsive> to guarantee one source of truth.
+const BREAKPOINT_COLS: Record<string, number> = { lg: 12, md: 8, sm: 4 };
+
 const ALL_KEYS = DEFAULT_LAYOUT.map((l) => l.i);
 
 interface DashboardGridProps {
@@ -51,13 +63,21 @@ interface DashboardGridProps {
 export function DashboardGrid({ widgets }: DashboardGridProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
+  const { editMode } = useEditModeStore();
   const [layouts, setLayouts] = useState<ReactGridLayout.Layouts>({ lg: DEFAULT_LAYOUT });
   const [hiddenWidgets, setHiddenWidgets] = useState<Set<string>>(new Set());
   const [showPanel, setShowPanel] = useState(false);
+  const [deepFocus, setDeepFocus] = useState(false);
   const [saveConfirm, setSaveConfirm] = useState(false);
   const saveConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const BREAKPOINT_COLS: Record<string, number> = { lg: 12, md: 8, sm: 4 };
+  // E4: Clear the save-confirm timer on unmount to prevent setState calls
+  // on an already-unmounted component (React 18 shows a warning for this).
+  useEffect(() => {
+    return () => {
+      if (saveConfirmTimerRef.current) clearTimeout(saveConfirmTimerRef.current);
+    };
+  }, []);
 
   // Load saved state on mount
   useEffect(() => {
@@ -73,7 +93,19 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
             const cols = BREAKPOINT_COLS[bp] ?? 12;
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const hasOverflow = (items as any[]).some((item: any) => (item.x + item.w) > cols);
-            sanitized[bp] = hasOverflow ? DEFAULT_LAYOUT : (items as ReactGridLayout.Layout[]);
+            // WHY clamp instead of falling back to DEFAULT_LAYOUT:
+            // DEFAULT_LAYOUT is authored for lg=12 (streak.w=12, chatbot fills
+            // cols 8-11, briefing.w=8). Using it as the fallback for md=8 or
+            // sm=4 overflows those grids too, creating an infinite re-overflow
+            // loop on viewports <900px. Per-breakpoint clamping preserves the
+            // user's saved positions while bounding every widget inside cols.
+            sanitized[bp] = hasOverflow
+              ? DEFAULT_LAYOUT.map((item) => ({
+                  ...item,
+                  x: Math.min(item.x, Math.max(0, cols - 1)),
+                  w: Math.min(item.w, cols - Math.min(item.x, cols - 1)),
+                }))
+              : (items as ReactGridLayout.Layout[]);
           }
         }
         // Schema migration: any widget present in DEFAULT_LAYOUT but absent
@@ -96,6 +128,21 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     if (savedHidden) {
       try { setHiddenWidgets(new Set(JSON.parse(savedHidden))); } catch { /* keep default */ }
     }
+    try {
+      setDeepFocus(localStorage.getItem(DEEP_FOCUS_KEY) === "1");
+    } catch { /* ignore */ }
+  }, []);
+
+  // Listen for Deep Focus toggles from the topbar so the grid re-renders
+  // immediately. Same-tab updates use a CustomEvent (the storage event only
+  // fires across tabs).
+  useEffect(() => {
+    const onChange = (e: Event) => {
+      const ce = e as CustomEvent<{ enabled: boolean }>;
+      if (ce.detail) setDeepFocus(ce.detail.enabled);
+    };
+    window.addEventListener(DEEP_FOCUS_EVENT, onChange);
+    return () => window.removeEventListener(DEEP_FOCUS_EVENT, onChange);
   }, []);
 
   useLayoutEffect(() => {
@@ -170,7 +217,12 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     saveConfirmTimerRef.current = setTimeout(() => setSaveConfirm(false), 2000);
   }, [layouts]);
 
-  const visibleKeys = ALL_KEYS.filter((k) => !hiddenWidgets.has(k));
+  // In Deep Focus mode, restrict to the 3-widget set regardless of the
+  // user's saved hidden list — the toggle is meant to be a fast, reversible
+  // override that doesn't mutate their preferences.
+  const visibleKeys = deepFocus
+    ? ALL_KEYS.filter((k) => DEEP_FOCUS_KEYS.has(k) && !hiddenWidgets.has(k))
+    : ALL_KEYS.filter((k) => !hiddenWidgets.has(k));
   const hiddenCount = hiddenWidgets.size;
   const totalCount = ALL_KEYS.length;
   const visibleCount = totalCount - hiddenCount;
@@ -189,7 +241,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
         <button
           data-widgets-trigger
           onClick={() => setShowPanel((v) => !v)}
-          className="group/btn flex items-center gap-2 px-3 h-8 transition-colors"
+          className="flex items-center gap-2 px-3 h-8 transition-colors hover:bg-[var(--surface-raised)]"
           style={{
             fontSize: "12px",
             fontWeight: 500,
@@ -220,7 +272,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
         />
         <button
           onClick={resetLayout}
-          className="flex items-center gap-1.5 px-3 h-8 transition-colors hover:text-foreground"
+          className="flex items-center gap-1.5 px-3 h-8 transition-colors hover:text-foreground hover:bg-[var(--surface-raised)]"
           style={{
             fontSize: "12px",
             fontWeight: 500,
@@ -239,7 +291,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
         />
         <button
           onClick={saveLayout}
-          className="flex items-center gap-1.5 px-3 h-8 transition-colors hover:text-foreground"
+          className="flex items-center gap-1.5 px-3 h-8 transition-colors hover:text-foreground hover:bg-[var(--surface-raised)]"
           style={{
             fontSize: "12px",
             fontWeight: 500,
@@ -323,12 +375,24 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
           className="layout"
           layouts={layouts}
           breakpoints={{ lg: 900, md: 600, sm: 0 }}
-          cols={{ lg: 12, md: 8, sm: 4 }}
+          cols={BREAKPOINT_COLS}
           rowHeight={30}
           width={width}
           onLayoutChange={onLayoutChange}
           draggableHandle=".widget-drag-handle"
-          isResizable={true}
+          // draggableCancel prevents react-grid-layout from treating clicks on
+          // interactive descendants as drag initiations when the user happens
+          // to hold the mouse down on a button or input for more than the drag
+          // threshold (~125ms). Without this, slow-clickers see widgets move
+          // instead of buttons activating. The list mirrors common interactive
+          // roles/elements; `.no-drag` is the escape-hatch each widget uses.
+          draggableCancel=".no-drag, button, input, textarea, select, a, [role='button'], [role='tab'], [role='switch'], [role='listitem']"
+          // isDraggable and isResizable mirror editMode so the grid is fully
+          // frozen when the user isn't explicitly in layout-edit mode. This
+          // also disables the resize handle entirely outside edit mode so it
+          // can't be accidentally triggered.
+          isDraggable={editMode}
+          isResizable={editMode}
           resizeHandles={["se"]}
           compactType="vertical"
           margin={[12, 12]}

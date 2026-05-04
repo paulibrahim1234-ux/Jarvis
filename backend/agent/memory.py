@@ -39,21 +39,23 @@ _PHI_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}")
 _PHI_LONGNUM_RE = re.compile(r"\b\d{7,}\b")
 
 # PHI marker keywords that should trigger wholesale rejection.
-# mrn and patient id use a left-word-boundary only (no right \b) because
-# they commonly appear run together with digits (e.g. MRN12345, PatientID7).
-# Tightened: standalone "attending"/"patient"/"rotation"/"diagnosis" fired
-# on common English ("attending a meeting", "songs in heavy rotation",
-# "the diagnosis of a design problem") and silently aborted fact extraction
-# on most conversations. Patterns now require adjacent clinical context.
+#
+# Philosophy: the user is a 3rd-year med student on surgery rotation.
+# Their chat is full of medical vocabulary — "preceptor", "attending",
+# "clinical rotation", "ICU", "patient record from yesterday", "differential
+# for chest pain". These bare terms are NOT PHI: they're shop-talk about
+# learning, schedule, and procedures, with no identifiable patient.
+#
+# Real PHI requires an actual identifier — an MRN, a patient ID with a
+# digit, a DOB, etc. So we ONLY block when those concrete identifier
+# patterns appear, not on bare clinical vocabulary. Long digit runs and
+# phone/email are still scrubbed below as [REDACTED] (substitution, not
+# wholesale rejection).
 _PHI_MARKER_RE = re.compile(
     r"\bmrn\s*[:#]?\s*\d"
-    r"|\battending\s+physician\b"
-    r"|\bpatient\s+(?:id|record|mrn|chart)\b"
-    r"|\bmedical\s+diagnosis\b"
-    r"|\bclinical\s+rotation\b"
-    r"|\bpreceptor\b"
-    r"|\bpt\s+#\d+"
-    r"|\bpt\s+record\b",
+    r"|\bpatient\s+(?:id|record|mrn|chart)\s*[:#]?\s*\d"
+    r"|\bpt\s+#\s*\d+"
+    r"|\bdob\s*[:#]?\s*\d",
     re.IGNORECASE,
 )
 
@@ -201,6 +203,17 @@ def delete_conversation(cid: str) -> bool:
         conn.close()
 
 
+def conversation_exists(conversation_id: str) -> bool:
+    """Return True if the conversation row exists — used to give a clear error
+    when a client sends a stale or deleted conversation_id before we attempt
+    to append a message and hit a FK constraint."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        return row is not None
+
+
 def append_message(
     conversation_id: str,
     role: str,
@@ -243,17 +256,64 @@ def append_message(
 
 
 def get_recent_messages(conversation_id: str, limit: int = 40) -> list[dict]:
-    """Return last N messages for a conversation, oldest-first, shaped for the API."""
+    """Return last N messages for a conversation, oldest-first, shaped for the API.
+
+    Tool breadcrumbs (assistant rows prefixed with "[tool] ") are excluded in
+    SQL so the LIMIT applies only to real messages — without this, breadcrumbs
+    would steal context budget and Claude would lose earlier turns."""
     conn = _connect()
     try:
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE conversation_id = ? "
+            "SELECT role, content FROM messages "
+            "WHERE conversation_id = ? "
+            "  AND NOT (role = 'assistant' AND content LIKE '[tool] %') "
             "ORDER BY id DESC LIMIT ?",
             (conversation_id, limit),
         ).fetchall()
         msgs = [{"role": r["role"], "content": r["content"]} for r in rows]
         msgs.reverse()
         return msgs
+    finally:
+        conn.close()
+
+
+# ─────────────────────────── tool breadcrumbs ────────────────────────── #
+
+def append_tool_summary(conversation_id: str, summary: str) -> None:
+    """Persist a one-line breadcrumb of tools called in a turn.
+    Stored as an assistant row prefixed with "[tool] " so it stays
+    out of the API replay path (filtered by get_recent_messages) but
+    is visible to build_system_prompt for cross-turn memory."""
+    if not summary:
+        return
+    text = summary if summary.startswith("[tool] ") else f"[tool] {summary}"
+    now = _now_iso()
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, tool_calls, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, "assistant", text, None, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_recent_tool_breadcrumbs(conversation_id: str, limit: int = 10) -> list[str]:
+    """Return the most-recent tool breadcrumbs for the conversation, oldest-first.
+    Each item is the full content string (with the "[tool] " prefix stripped)."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT content FROM messages WHERE conversation_id = ? "
+            "AND role = 'assistant' AND content LIKE '[tool] %' "
+            "ORDER BY id DESC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+        items = [(r["content"] or "")[len("[tool] "):] for r in rows]
+        items.reverse()
+        return items
     finally:
         conn.close()
 
@@ -408,7 +468,6 @@ async def dashboard_snapshot_async() -> str:
 
     # calendar
     _ROTATION_CALENDARS = {"Rotation", "Subscribed Calendar", "Work"}
-    _UPPERCASE_TOKEN_RE = re.compile(r"\b[A-Z]{2,3}\b")
     events = cal.get("events") or []
     if events:
         # Find first non-rotation event
@@ -421,7 +480,6 @@ async def dashboard_snapshot_async() -> str:
         if e0:
             raw_title = (e0.get("title") or "").strip()
             title = raw_title[:80]
-            title = _UPPERCASE_TOKEN_RE.sub("[REDACTED]", title)
             start = (e0.get("start") or "").strip()
             lines.append(f"Next event: {title} @ {start}.")
         else:
@@ -479,7 +537,12 @@ def dashboard_snapshot() -> str:
 
 # ───────────────────────── system prompt ─────────────────────────── #
 
-def build_system_prompt(base_prompt: str, dashboard: str, facts: list[dict]) -> str:
+def build_system_prompt(
+    base_prompt: str,
+    dashboard: str,
+    facts: list[dict],
+    breadcrumbs: list[str] | None = None,
+) -> str:
     parts = [base_prompt, "", "<dashboard>", dashboard, "</dashboard>"]
     if facts:
         parts.append("")
@@ -491,4 +554,16 @@ def build_system_prompt(base_prompt: str, dashboard: str, facts: list[dict]) -> 
         for f in facts:
             parts.append(f"- [{f['topic']}] {f['fact']}")
         parts.append("</known_facts>")
+    if breadcrumbs:
+        parts.append("")
+        parts.append("<recent_tool_calls>")
+        parts.append(
+            "These are tools you called on PREVIOUS turns of this conversation. "
+            "If the user refers to something you just looked up (e.g. 'open it', "
+            "'what about the next one'), you likely already have the answer in "
+            "the recent message history — don't redundantly re-call the same tool."
+        )
+        for b in breadcrumbs:
+            parts.append(f"- {b}")
+        parts.append("</recent_tool_calls>")
     return "\n".join(parts)

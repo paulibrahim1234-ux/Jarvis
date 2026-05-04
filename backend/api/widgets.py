@@ -10,6 +10,11 @@ from pydantic import BaseModel
 from api._security import _require_local_origin
 from tools.anki import _invoke as anki_invoke, _invoke_multi as anki_invoke_multi
 from tools.imessage import get_conversations
+# Imported at module level so _cached() can detect the sentinel without a
+# per-call import — avoids the hot-path overhead on every cache write and
+# lets the short-TTL guard in _cached fire correctly (an opaque object()
+# won't match None/{}/[], so without this it cached at full 60s TTL).
+from tools.spotify import RATE_LIMITED_SENTINEL as _RATE_LIMITED_SENTINEL
 from tools.desktop_apps import (
     run_desktop_tool,
     _outlook_inbox,
@@ -83,8 +88,11 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
     else:
         value = compute()
     # Short TTL on negative results so a one-time failure doesn't lock in.
+    # RATE_LIMITED_SENTINEL is an opaque object() — it won't match None/{}/ []
+    # — so it must be checked explicitly; otherwise a 429 gets cached for the
+    # full TTL (up to 60s) instead of the intended 10s back-off window.
     effective_ttl = ttl
-    if value is None or value == {} or value == []:
+    if value is None or value == {} or value == [] or value is _RATE_LIMITED_SENTINEL:
         effective_ttl = min(ttl, 10.0)
     # LRU-style eviction under a lock — `min()` then `del` is not atomic
     # without one, and a concurrent eviction can KeyError-crash the
@@ -489,6 +497,68 @@ def uworld_refresh(request: Request):
         }
 
 
+# ── UWorld deep-link navigation ──────────────────────────────────────────────
+
+@router.post("/widgets/uworld/open-question")
+def uworld_open_question(payload: dict, request: Request):
+    """Navigate the user's existing UWorld tab in Comet to the question URL.
+
+    Why a backend endpoint instead of `window.open`? `window.open` opens a NEW
+    tab — UWorld's SPA on a fresh tab loses session warmth and the user often
+    sees the loading spinner / has to re-auth. By navigating the EXISTING tab
+    (where authInfo is already in sessionStorage), the question loads
+    instantly.
+
+    Falls back to `open <url>` (system default browser) when no UWorld tab is
+    currently open. Either way the user lands on the right page.
+
+    POST /widgets/uworld/open-question
+    {
+      "url": "https://apps.uworld.com/courseapp/.../results/14842106/422970934/2"
+    }
+    """
+    # Reject cross-origin requests: combined with _uw_set_tab_url accepting any
+    # URL, a missing CSRF guard would let a page on another origin navigate the
+    # user's live UWorld tab to an arbitrary URL via a cross-site POST.
+    _require_local_origin(request)
+    import subprocess as _sp
+    url = (payload or {}).get("url", "").strip()
+    if not url or "uworld.com" not in url:
+        return {"ok": False, "error": "missing or invalid uworld url"}
+
+    try:
+        from tools.browser import _uw_find_tab, _uw_set_tab_url
+        tab = _uw_find_tab("apps.uworld.com")
+        if tab is not None:
+            wi, ti = tab
+            _uw_set_tab_url(wi, ti, url)
+            # Bring Comet to the foreground so the navigation is visible.
+            try:
+                from tools.browser import BROWSER_APP
+                _sp.run(
+                    ["osascript", "-e", f'tell application "{BROWSER_APP}" to activate'],
+                    capture_output=True, timeout=3,
+                )
+                # Make this tab the active one in its window so the user sees
+                # the navigation. AppleScript:
+                #   tell window N to set active tab index to T
+                _sp.run(
+                    [
+                        "osascript", "-e",
+                        f'tell application "{BROWSER_APP}" to set active tab index of window {wi} to {ti}',
+                    ],
+                    capture_output=True, timeout=3,
+                )
+            except Exception:
+                pass
+            return {"ok": True, "navigated_existing_tab": True, "tab": [wi, ti]}
+        # No UWorld tab open — fall back to default browser open.
+        _sp.run(["open", url], timeout=10, check=False)
+        return {"ok": True, "navigated_existing_tab": False}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 _ANKI_QID_INDEX_PATH = _Path(__file__).resolve().parent.parent / "storage" / "anki_qid_index.json"
 
 
@@ -634,21 +704,27 @@ def anki_build_index_start(request: Request):
     _require_local_origin(request)
     import threading
 
-    # Acquire lock atomically around the running check + set so concurrent
-    # POST requests cannot both pass the check and spawn two builders.
+    # Acquire lock atomically around the running check + full state init so a
+    # concurrent status-poll can never see running=True with stale progress/
+    # total/started_at from the previous run (the window between the old
+    # "running=True" set and the _run() thread's update() call).
     with _ANKI_BUILD_LOCK:
         if _ANKI_INDEX_BUILD_STATE["running"]:
             return {"status": "already_running", **_ANKI_INDEX_BUILD_STATE}
-        _ANKI_INDEX_BUILD_STATE["running"] = True
-    # Lock released here — _run() will manage the state from this point.
+        _ANKI_INDEX_BUILD_STATE.update({
+            "running": True,
+            "progress": 0,
+            "total": 0,
+            "started_at": __import__("datetime").datetime.utcnow().isoformat(),
+            "error": None,
+        })
+    # Lock released here — state is fully consistent before the thread starts.
 
     def _run():
         import time as _time
         import re as _re
-        # running=True was already set atomically before Thread start; update
-        # the remaining fields without touching running.
-        _ANKI_INDEX_BUILD_STATE.update({"progress": 0, "total": 0,
-                                         "started_at": __import__("datetime").datetime.utcnow().isoformat(), "error": None})
+        # State was fully initialised inside the lock above; _run() only
+        # updates progress/total as it goes and running=False at the end.
         # Resume from existing partial index if present.
         index: dict = _load_anki_qid_index()
         if "__built_at__" in index:
@@ -659,11 +735,25 @@ def anki_build_index_start(request: Request):
         qid_in_tag = _re.compile(r"Step::(\d+)")
 
         def _persist():
+            import tempfile as _tempfile, os as _os
             snapshot = dict(index)
             snapshot["__built_at__"] = __import__("datetime").datetime.utcnow().isoformat()
             _ANKI_QID_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with _ANKI_QID_INDEX_PATH.open("w") as f:
-                _json.dump(snapshot, f)
+            # Write to a temp file then atomically replace the target. A direct
+            # open("w") + json.dump leaves a window where a crash produces a
+            # zero-byte or partial file, which _load_anki_qid_index silently
+            # reads as {} and loses all progress. os.replace is atomic on POSIX.
+            fd, tmp = _tempfile.mkstemp(dir=_ANKI_QID_INDEX_PATH.parent, suffix=".tmp")
+            try:
+                with _os.fdopen(fd, "w") as f:
+                    _json.dump(snapshot, f)
+                _os.replace(tmp, _ANKI_QID_INDEX_PATH)
+            except Exception:
+                try:
+                    _os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
 
         def _retry(action: str, **params):
             """Retry per AnkiConnect call: Anki transiently returns 'collection is
@@ -811,9 +901,60 @@ def imessage_widget(include_groups: bool = True, limit: int = 25):
             # consumer (widget, agent tools, future mail/call widgets) sees names,
             # not phone numbers. Falls back to the existing `contact` field if the
             # handle isn't in the address book (spam, short codes).
+            #
+            # CRITICAL: skip group chats. The first handle in a group is just one
+            # participant; resolving it would stomp the group's display_name
+            # ("OMS3s 1.0") with that participant's contact name ("Andrew Fawzy"),
+            # making every group look like a 1:1. The imessage tool already
+            # builds a sensible group label (display_name → participant list),
+            # so groups are left alone here.
             try:
                 from tools.contacts import resolve as _resolve_contact
                 for c in convos:
+                    if c.get("is_group"):
+                        # For groups, enrich participants list AND per-message
+                        # sender labels with contact-resolved names so the
+                        # widget can show real names instead of phone numbers
+                        # in both the row label and inside group threads.
+                        parts = c.get("participants") or []
+                        if parts:
+                            resolved_parts: list[str] = []
+                            for p in parts:
+                                name = _resolve_contact(p) or p
+                                resolved_parts.append(name)
+                            c["participants"] = resolved_parts
+                            # If the chat has no display_name set, the
+                            # tool-side label was built from raw handles —
+                            # rebuild it now from the resolved names so the
+                            # widget shows "Alice, Bob & 3 others" properly.
+                            label = (c.get("contact") or "").strip()
+                            digits_only = (
+                                label.replace(" ", "").replace("(", "").replace(")", "")
+                                .replace("-", "").replace("+", "").replace("&", "")
+                                .replace(",", "").replace("other", "")
+                            )
+                            looks_like_phone_label = digits_only.isdigit() and len(digits_only) >= 7
+                            if looks_like_phone_label and resolved_parts:
+                                n = len(resolved_parts)
+                                if n <= 2:
+                                    c["contact"] = " & ".join(resolved_parts)
+                                else:
+                                    c["contact"] = (
+                                        f"{resolved_parts[0]}, {resolved_parts[1]}"
+                                        f" & {n - 2} other{'s' if n - 2 != 1 else ''}"
+                                    )
+                        # Resolve per-message sender labels too. The tool
+                        # populates sender as a formatted phone (e.g.
+                        # "(551) 358-4206"); upgrade to a contact name when we
+                        # can find one. Falls through to the existing phone
+                        # label for unknown handles.
+                        for m in c.get("messages") or []:
+                            s = (m.get("sender") or "").strip()
+                            if s:
+                                resolved = _resolve_contact(s)
+                                if resolved:
+                                    m["sender"] = resolved
+                        continue
                     handle = c.get("handle") or c.get("contact", "")
                     name = _resolve_contact(handle)
                     if name:
@@ -1163,7 +1304,7 @@ def _spotify_queue_cached():
 
 
 @router.get("/widgets/spotify")
-def spotify_widget():
+def spotify_widget(request: Request):
     # 1) Now playing from AppleScript (free, no auth).
     now = {}
     try:
@@ -1206,16 +1347,28 @@ def spotify_widget():
         except Exception:
             pass
 
+    # Cached helpers may return RATE_LIMITED_SENTINEL when Spotify has 429'd
+    # us; FastAPI's JSON serializer can't encode a bare `object()`. Collapse
+    # the sentinel to [] here — this endpoint doesn't surface a banner (the
+    # /widgets/spotify/home endpoint owns that UX), so [] is the right
+    # fallthrough for the now-playing widget.
+    # _RATE_LIMITED_SENTINEL is imported at module level (avoids hot-path cost).
+    def _safe(v):
+        if v is _RATE_LIMITED_SENTINEL:
+            return []
+        return v
     return {
         "available": bool(track_block) or web_ok,
         "source": "desktop" if now.get("track") else ("web_api" if web_ok else None),
         "track": track_block,
         "album_art_url": album_art,
         "web_api_connected": web_ok,
-        "auth_url": None if web_ok else "http://127.0.0.1:8000/auth/spotify",
-        "queue": _spotify_queue_cached(),
-        "playlists": _spotify_playlists_cached(),
-        "recently_played": _spotify_recents_cached(),
+        # Derive base URL from the live request so the URL works across dev/
+        # prod environments instead of hardcoding 127.0.0.1:8000.
+        "auth_url": None if web_ok else str(request.base_url).rstrip("/") + "/auth/spotify",
+        "queue": _safe(_spotify_queue_cached()),
+        "playlists": _safe(_spotify_playlists_cached()),
+        "recently_played": _safe(_spotify_recents_cached()),
     }
 
 
@@ -1224,15 +1377,36 @@ def spotify_home():
     def _compute():
         if not _spotify_web_ok():
             return {"available": False, "error": "Spotify Web API not connected"}
-        from tools.spotify import get_top_tracks, get_top_artists
-        recent_playlists = _spotify_recent_playlists_cached() or []
+        from tools.spotify import (
+            get_top_tracks, get_top_artists, RATE_LIMITED_SENTINEL,
+            rate_limit_status,
+        )
+        # Probe each list, collapsing the breaker sentinel into [] but
+        # tracking it so we can surface a single clear UI message.
+        def _norm(v):
+            return [] if v is RATE_LIMITED_SENTINEL else (v or [])
+        top_tracks = _norm(get_top_tracks("short_term", 8))
+        top_artists = _norm(get_top_artists("short_term", 8))
+        recent_playlists = _norm(_spotify_recent_playlists_cached())
+        playlists = _norm(_spotify_playlists_cached())
+        rls = rate_limit_status()
         return {
             "available": True,
-            "top_tracks": get_top_tracks("short_term", 8),
-            "top_artists": get_top_artists("short_term", 8),
+            "top_tracks": top_tracks,
+            "top_artists": top_artists,
             # recently_played is now playlist-only (user feedback: don't show songs)
             "recently_played": recent_playlists,
-            "playlists": _spotify_playlists_cached() or [],
+            "playlists": playlists,
+            # Rate-limit hints — let the UI render a banner instead of leaving
+            # the user staring at four empty sections wondering what broke.
+            "rate_limited": rls["rate_limited"],
+            "rate_limit_retry_in_seconds": rls["retry_in_seconds"],
+            "rate_limit_message": (
+                f"Spotify is rate-limiting Jarvis right now (about "
+                f"{max(1, rls['retry_in_seconds']//60)} min until retry). "
+                f"This usually clears on its own; no action needed."
+                if rls["rate_limited"] else ""
+            ),
         }
     return _cached("spotify_home", 60, _compute)
 
@@ -1262,7 +1436,8 @@ def spotify_search(body: SpotifySearchBody, request: Request):
         return {
             "results": None,
             "error": "Spotify Web API not connected. Visit /auth/spotify to connect.",
-            "auth_url": "http://127.0.0.1:8000/auth/spotify",
+            # Derive base URL from request so the URL works across environments.
+            "auth_url": str(request.base_url).rstrip("/") + "/auth/spotify",
         }
     try:
         from tools.spotify import search_tracks
@@ -1523,7 +1698,10 @@ def briefing_widget():
 
     def fetch_folders():
         try:
-            data = _cached("email_folders", 300, _compute_email_folders)
+            # Pass the semaphore so concurrent briefing requests don't stack
+            # parallel Outlook AppleScript folder enumerations — same pattern
+            # used by email_folders_endpoint and the warmup map at line ~1185.
+            data = _cached("email_folders", 300, _compute_email_folders, _SEM_EMAIL_FOLDERS)
             if not isinstance(data, dict) or not data.get("available"):
                 return None
             rows: list[dict] = []
@@ -1542,7 +1720,9 @@ def briefing_widget():
     def fetch_messages():
         try:
             # Piggyback on P1's 30s imessage cache when available.
-            cached_im = _CACHE.get("imessage::0::25")
+            # Key format is "imessage::{int(include_groups)}::{limit}"; the widget
+            # always passes include_groups=True so the int is 1, not 0.
+            cached_im = _CACHE.get("imessage::1::25")
             if cached_im and cached_im[0] > time.time():
                 convos = (cached_im[1] or {}).get("conversations") or []
             else:
@@ -1635,6 +1815,144 @@ end tell
             errors.append(f"nbme: {e}")
             return None
 
+    def fetch_important_unread():
+        """Pick the top N unread emails by `_score_email`. Briefing is supposed
+        to surface only emails that ACTUALLY matter — newsletters, promotions,
+        and digest mailers are penalized; VIP-domain mail and action-word
+        subjects bubble up. Source: cached email widget payload (avoids a
+        second AppleScript round-trip).
+
+        After the heuristic sort, the top-20 candidates are passed to Claude
+        Haiku for an actionability rerank. When two heuristic scores are within
+        10 points of each other, the LLM score breaks the tie. If the LLM call
+        fails the function silently falls back to heuristic-only ordering.
+        """
+        try:
+            cached = _CACHE.get("email::::")
+            if not cached:
+                return []
+            _, payload = cached
+            emails = (payload or {}).get("emails") or []
+            unread = [
+                e for e in emails
+                if not e.get("read", e.get("is_read", True))
+            ]
+
+            # Pre-compute scores once so we don't call _score_email twice per item.
+            scored_unread: list[tuple[int, list[str], dict]] = []
+            for e in unread:
+                sc, rs = _score_email(e)
+                scored_unread.append((sc, rs, e))
+
+            # Sort heuristically: higher score first, then newer date as tiebreak.
+            scored_unread.sort(key=lambda t: (-t[0], t[2].get("date") or ""))
+
+            # Take the top-20 for the LLM rerank pass.
+            candidates = scored_unread[:20]
+
+            # --- LLM rerank (best-effort; silently skipped on any error) -------
+            llm_scores: dict[str, int] = {}
+            try:
+                raw_key = (
+                    _os.getenv("ANTHROPIC_API_KEY")
+                    or _os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+                    or ""
+                )
+                if raw_key:
+                    if raw_key.startswith("sk-ant-oat"):
+                        _haiku_client = _anthropic.Anthropic(
+                            auth_token=raw_key,
+                            default_headers={"anthropic-beta": "oauth-2025-04-20"},
+                        )
+                    else:
+                        _haiku_client = _anthropic.Anthropic(api_key=raw_key)
+
+                    # Build a compact list so the prompt stays small.
+                    items_for_llm = []
+                    for _sc, _rs, _e in candidates:
+                        items_for_llm.append({
+                            "id": _e.get("id") or "",
+                            "from": (_e.get("from") or "")[:60],
+                            "subject": (_e.get("subject") or "")[:80],
+                        })
+
+                    import json as _json_rerank
+                    prompt = (
+                        "User is a med student at Cooper / Rowan in pre-clinical year. "
+                        "Score each email 0-100 by genuine actionability — urgent, "
+                        "course-related, clinical, time-sensitive. "
+                        'Return JSON: {"ranks": [{"id": "<id>", "actionability": 0-100}]}\n\n'
+                        f"Emails:\n{_json_rerank.dumps(items_for_llm)}"
+                    )
+                    resp = _haiku_client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=512,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    raw_text = (resp.content[0].text if resp.content else "")
+                    # Strip markdown fences in case the model wraps its JSON.
+                    raw_text = _re.sub(r"```[a-z]*", "", raw_text).strip()
+                    parsed = _json_rerank.loads(raw_text)
+                    for rank_item in parsed.get("ranks", []):
+                        _id = str(rank_item.get("id") or "")
+                        _act = int(rank_item.get("actionability", 0))
+                        llm_scores[_id] = _act
+            except Exception:
+                # LLM failure is non-fatal — heuristic ordering stands.
+                pass
+
+            # Re-sort with LLM as tiebreaker: when two heuristic scores differ
+            # by ≤10 the LLM actionability score determines the relative order.
+            def _sort_key(item: tuple[int, list[str], dict]):
+                heuristic, _, e = item
+                eid = str(e.get("id") or "")
+                llm = llm_scores.get(eid, 50)
+                # Scale llm 0-100 → 0-9 so it only breaks ties within ±10 band.
+                return (-heuristic, -(llm // 10))
+
+            if llm_scores:
+                candidates.sort(key=_sort_key)
+
+            top = candidates[:5]
+            out = []
+            for sc, rs, e in top:
+                # Strip the Outlook display-name wrapping so the line stays
+                # readable in the briefing card.
+                from_field = (e.get("from") or "").strip()
+                subj = (e.get("subject") or "").strip()
+                folder = (e.get("folder") or "").strip() or None
+                out.append({
+                    "id": e.get("id"),
+                    "subject": subj[:80],
+                    "from": from_field[:60],
+                    "folder": folder,
+                    "score": sc,
+                    "score_reason": "; ".join(rs),
+                    "date": e.get("date"),
+                })
+            return out
+        except Exception as e:
+            errors.append(f"important_unread: {e}")
+            return []
+
+    def fetch_todos():
+        try:
+            items = _load_todos()
+            pending = [t for t in items if not t.get("done")]
+            # Sort: items with a due date first (soonest first), then undated,
+            # then most-recently-created.
+            def _key(t):
+                due = t.get("due") or ""
+                created = t.get("created_at") or ""
+                # We want items with `due` to come before those without;
+                # within "has due", sort by date ascending.
+                return (0 if due else 1, due, created)
+            pending.sort(key=_key)
+            return pending[:6]
+        except Exception as e:
+            errors.append(f"todos: {e}")
+            return []
+
     fetchers = {
         "anki": fetch_anki,
         "events": fetch_events,
@@ -1643,6 +1961,8 @@ end tell
         "messages": fetch_messages,
         "now_playing": fetch_now_playing,
         "nbme": fetch_nbme,
+        "important_unread": fetch_important_unread,
+        "todos": fetch_todos,
     }
     results: dict = {}
     with ThreadPoolExecutor(max_workers=len(fetchers)) as pool:
@@ -1669,6 +1989,13 @@ end tell
     return {
         "greeting": greeting,
         "now": now.isoformat(timespec="seconds"),
+        # New focused fields — used by the rewritten briefing widget. These
+        # are the only sections the user wants to see in the dashboard
+        # summary. Other widgets handle iMessage / Spotify / NBME details.
+        "important_unread": results.get("important_unread") or [],
+        "todos": results.get("todos") or [],
+        # Legacy fields — kept for back-compat with anything else still
+        # consuming /widgets/briefing (agent tools, future surfaces).
         "anki": results.get("anki"),
         "events_today": events_today,
         "next_event": next_event,
@@ -1808,3 +2135,199 @@ end tell
     # be read or in a folder the script couldn't enumerate. Return ok=True
     # so the frontend still updates optimistically.
     return {"ok": True, "note": output or "not_found"}
+
+
+# ── Honey-do (todos) — minimal local-storage backend ─────────────────────────
+#
+# Filed under storage/honeydo.json so the user can edit it by hand. The
+# briefing widget reads pending todos and renders them as one of three
+# top-level sections.
+
+import re as _re
+import uuid as _uuid
+import anthropic as _anthropic
+import os as _os
+
+HONEYDO_STORE = CACHE_DIR / "honeydo.json"
+
+# Canonical scoring rules — ported from frontend/src/lib/inbox-rules.ts so the
+# briefing's "important unread emails" section matches what the inbox widget
+# would call important. Update both files together if rules change.
+_VIP_DOMAINS = ("cooperhealth.org", "rowan.edu", "kennedyhealth.org")
+_ACTION_WORDS_RE = _re.compile(
+    r"\b(urgent|action required|please review|sign|approve|deadline|due|invoice|appointment|interview|offer|reminder)\b",
+    _re.IGNORECASE,
+)
+_NEWSLETTER_PATTERNS = [
+    _re.compile(r"-?noreply@", _re.IGNORECASE),
+    _re.compile(r"newsletter", _re.IGNORECASE),
+    _re.compile(r"no-?reply", _re.IGNORECASE),
+    _re.compile(r"donotreply", _re.IGNORECASE),
+    _re.compile(r"\bannouncer\b", _re.IGNORECASE),
+    _re.compile(r"\bdigest\b", _re.IGNORECASE),
+    _re.compile(r"\bmarketing@", _re.IGNORECASE),
+    _re.compile(r"\binfo@", _re.IGNORECASE),
+]
+_DEMOTED_FOLDERS = {
+    "Promotions", "Updates", "Forums", "Newsletters",
+    "Junk", "Junk Email", "Junk E-mail", "Clutter",
+}
+_IMPORTANT_FOLDERS = {"Inbox", "Rowan class of 2027"}
+
+# Commerce senders (food delivery, ride-share, peer payments) never belong in
+# a medical-student morning briefing. These domains are senders whose email is
+# purely transactional and carries zero actionability for the user's studies or
+# clinical workflow — hard-penalise so they never float above the fold.
+_COMMERCE_BLOCKLIST = {
+    "grubhub.com", "doordash.com", "ubereats.com", "seamless.com",
+    "postmates.com", "uber.com", "lyft.com", "venmo.com",
+    "paypal.com", "cash.app",
+}
+
+# Amazon sends genuinely important emails (seller alerts, account security) but
+# the overwhelming majority are order-status notifications. We want to suppress
+# only the order-related ones without nuking e.g. "Your AWS bill is ready".
+_AMAZON_ORDER_RE = _re.compile(
+    r"\b(your order|delivery|shipped|arriving|order #|out for delivery)\b",
+    _re.IGNORECASE,
+)
+
+
+def _is_newsletter(email: dict) -> bool:
+    addr = (email.get("from_email") or email.get("from") or "")
+    return any(p.search(addr) for p in _NEWSLETTER_PATTERNS)
+
+
+def _score_email(email: dict) -> tuple[int, list[str]]:
+    """Return (score, reasons) for the given email dict.
+
+    reasons is a list of human-readable tags (e.g. "VIP +50") that explain
+    why the score landed where it did — used by the briefing widget tooltip.
+    """
+    s = 0
+    reasons: list[str] = []
+    addr = (email.get("from_email") or email.get("from") or "").lower()
+    m = _re.search(r"@([^>\s]+)", addr)
+    domain = (m.group(1) if m else "").lower()
+
+    if any(domain.endswith(d) for d in _VIP_DOMAINS):
+        s += 50
+        reasons.append("VIP +50")
+
+    matches = len(_ACTION_WORDS_RE.findall(email.get("subject") or ""))
+    if matches:
+        bonus = min(matches * 5, 15)
+        s += bonus
+        reasons.append(f"action-word x{matches} +{bonus}")
+
+    folder = email.get("folder")
+    if folder and folder in _DEMOTED_FOLDERS:
+        s -= 40
+        reasons.append("demoted-folder -40")
+    if folder and folder in _IMPORTANT_FOLDERS:
+        s += 20
+        reasons.append("important-folder +20")
+
+    if _is_newsletter(email):
+        s -= 35
+        reasons.append("newsletter -35")
+
+    # Commerce senders: hard-penalise so food-delivery / ride-share receipts
+    # never surface in the morning briefing above genuinely actionable mail.
+    if domain and any(domain.endswith(d) for d in _COMMERCE_BLOCKLIST):
+        s -= 50
+        reasons.append("commerce -50")
+    elif domain.endswith("amazon.com") and _AMAZON_ORDER_RE.search(
+        email.get("subject") or ""
+    ):
+        # Only penalise Amazon when the subject is clearly order-status noise;
+        # account/security emails from amazon.com should still surface normally.
+        s -= 50
+        reasons.append("commerce -50")
+
+    return s, reasons
+
+
+class TodoIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=500)
+    due: Optional[str] = Field(None, max_length=10)  # YYYY-MM-DD
+
+
+class TodoUpdate(BaseModel):
+    text: Optional[str] = Field(None, min_length=1, max_length=500)
+    done: Optional[bool] = None
+    due: Optional[str] = Field(None, max_length=10)
+
+
+def _load_todos() -> list[dict]:
+    data = read_json(HONEYDO_STORE, default=[])
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def _save_todos(items: list[dict]) -> None:
+    write_json(HONEYDO_STORE, items)
+
+
+@router.get("/widgets/todos")
+def todos_list():
+    """Return all honey-do items, oldest-first by created_at.
+
+    Items: {id, text, done, due (YYYY-MM-DD or None), created_at (ISO)}
+    """
+    items = _load_todos()
+    pending = [t for t in items if not t.get("done")]
+    return {
+        "todos": items,
+        "pending": pending,
+        "pending_count": len(pending),
+    }
+
+
+@router.post("/widgets/todos")
+def todos_create(payload: TodoIn, request: Request):
+    _require_local_origin(request)
+    items = _load_todos()
+    new = {
+        "id": _uuid.uuid4().hex[:12],
+        "text": payload.text.strip(),
+        "done": False,
+        "due": (payload.due or None),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    items.append(new)
+    _save_todos(items)
+    return {"ok": True, "todo": new}
+
+
+@router.patch("/widgets/todos/{todo_id}")
+def todos_update(todo_id: str, payload: TodoUpdate, request: Request):
+    _require_local_origin(request)
+    items = _load_todos()
+    for t in items:
+        if t.get("id") == todo_id:
+            if payload.text is not None:
+                t["text"] = payload.text.strip()
+            if payload.done is not None:
+                t["done"] = bool(payload.done)
+            if payload.due is not None:
+                t["due"] = payload.due or None
+            _save_todos(items)
+            return {"ok": True, "todo": t}
+    # Consistent with nbme_delete — missing resource is a 404, not a silent 200.
+    # Frontend `if (!r.ok)` relies on a non-2xx status to show error state.
+    raise HTTPException(status_code=404, detail="todo not found")
+
+
+@router.delete("/widgets/todos/{todo_id}")
+def todos_delete(todo_id: str, request: Request):
+    _require_local_origin(request)
+    items = _load_todos()
+    new_items = [t for t in items if t.get("id") != todo_id]
+    if len(new_items) == len(items):
+        # Consistent with nbme_delete — missing resource is a 404, not a silent 200.
+        # Frontend `if (!r.ok)` relies on a non-2xx status to show error state.
+        raise HTTPException(status_code=404, detail="todo not found")
+    _save_todos(new_items)
+    return {"ok": True}

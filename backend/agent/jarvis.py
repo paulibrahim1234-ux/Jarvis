@@ -67,7 +67,12 @@ trusted right-hand to a busy person; act like one.
   think" / "maybe" when a tool just told you the answer.
 - Conversational, not corporate. Contractions are fine. Emojis only when
   the user uses them first.
-- One paragraph by default. Tables/lists only when truly listy data.
+- Match length to the question. Chitchat and quick lookups: 1-3 sentences.
+  Status/state questions: a tight paragraph. Analytical or teaching
+  questions (differentials, mechanisms, "explain X", "compare A vs B",
+  "walk me through"): go as long as the topic warrants — use headings
+  and bullets when the structure helps. Don't pad, but don't cramp a
+  real answer into one paragraph just to be brief.
 - Never say "I'm just an AI" — you're Jarvis, the user's assistant.
 </persona>
 
@@ -129,8 +134,15 @@ When you call a tool:
 </rules>
 
 <style>
-- Default reply length: 1-3 sentences for chitchat, 1 short paragraph for
-  factual answers, longer only when laying out a plan or summarizing data.
+- Reply length scales with what's being asked:
+    * Chitchat / yes-no / quick lookups: 1-3 sentences.
+    * Factual state ("what's on my calendar?", "any unread email?"): a
+      tight paragraph.
+    * Plans, summaries of data, analytical / teaching questions
+      (medical differentials, "explain X", mechanism walk-throughs):
+      go long enough to actually answer. Use headings, numbered lists,
+      and bullets when they help readers scan — don't compress a real
+      teaching answer into one paragraph just to be terse.
 - Numbers and times in the user's local format (12-hour with AM/PM, dates
   as "Apr 29" not "2026-04-29").
 - When citing a piece of state, name the source: "Per your School calendar:
@@ -174,6 +186,12 @@ async def chat_async(
         conv = memory.create_conversation()
         conversation_id = conv["id"]
 
+    # A4: reject stale/deleted conversation IDs before touching the DB so the
+    # user gets a clear actionable message instead of a generic 500 from the
+    # FK constraint that append_message would raise.
+    if conversation_id and not memory.conversation_exists(conversation_id):
+        return ("Conversation not found — it may have been deleted. Start a new chat.", "")
+
     # Persist the latest user message from the incoming payload.
     # Frontend sends full history; DB already has older turns, so only persist the final user turn.
     if messages:
@@ -193,13 +211,16 @@ async def chat_async(
     # Use DB history when present (source of truth); fall back to request payload.
     all_messages = db_history if db_history else list(messages)
 
-    # ── Dashboard + facts ──
+    # ── Dashboard + facts + breadcrumbs ──
     try:
         dashboard = await memory.dashboard_snapshot_async()
     except Exception:
         dashboard = "(dashboard snapshot failed)"
     top_facts = memory.get_top_facts(limit=10)
-    system_prompt = memory.build_system_prompt(BASE_SYSTEM_PROMPT, dashboard, top_facts)
+    breadcrumbs = memory.get_recent_tool_breadcrumbs(conversation_id, limit=10)
+    system_prompt = memory.build_system_prompt(
+        BASE_SYSTEM_PROMPT, dashboard, top_facts, breadcrumbs=breadcrumbs
+    )
 
     # Default: Opus 4.5 — smarter multi-step reasoning and richer
     # answers than Sonnet. Opus has tighter rate limits, so the
@@ -211,6 +232,15 @@ async def chat_async(
     import asyncio
 
     final_text = ""
+    # OS3: track stop_reason / last tool error so the fallback message is
+    # specific instead of "please try again".
+    last_stop_reason: str = ""
+    last_tool_error: str | None = None
+    # OS4: track which model actually answered (Haiku fallback footnote).
+    actual_model: str = model
+    rate_limited: bool = False
+    # OS5: track tool names called this turn for cross-turn breadcrumbs.
+    tool_calls_this_turn: list[str] = []
 
     async def _create_with_recovery():
         """Wrap async_client.messages.create with the two flaky-cases we
@@ -218,7 +248,11 @@ async def chat_async(
         once) and rate-limit 429 (return None to signal graceful fallback).
 
         Returns the API response on success, None on rate-limit so the
-        outer loop can surface a friendly message to the user."""
+        outer loop can surface a friendly message to the user.
+
+        Side-effects: updates `actual_model` to the model that actually
+        produced a reply (used by OS4 to footnote Haiku fallbacks)."""
+        nonlocal actual_model, rate_limited
         kwargs = dict(
             model=model,
             max_tokens=8192,
@@ -227,12 +261,16 @@ async def chat_async(
             messages=all_messages,
         )
         try:
+            actual_model = model
             return await async_client.messages.create(**kwargs)
         except anthropic.AuthenticationError as e:
             from agent import claude_oauth, jarvis as _self
-            if claude_oauth.refresh_on_401(e):
+            # A5: refresh_on_401 calls urllib.request.urlopen (blocking I/O);
+            # run it in a thread so we don't stall the FastAPI event loop.
+            if await asyncio.to_thread(claude_oauth.refresh_on_401, e):
                 # Use module-level reference so reload_anthropic_clients()
                 # update is visible (closure would hold the pre-refresh binding).
+                actual_model = model
                 return await _self.async_client.messages.create(**kwargs)
             raise
         except anthropic.RateLimitError:
@@ -243,21 +281,28 @@ async def chat_async(
             fallback_model = os.getenv("JARVIS_FALLBACK_MODEL", "claude-haiku-4-5-20251001")
             if fallback_model != model:
                 try:
+                    actual_model = fallback_model
                     return await async_client.messages.create(
                         **{**kwargs, "model": fallback_model}
                     )
+                except anthropic.AuthenticationError:
+                    raise  # A3: auth errors must surface, not be masked as rate-limit
                 except Exception:
                     pass
+            rate_limited = True
             return None  # signal: "rate limited, no recovery"
 
     for _ in range(25):  # max 25 tool-use rounds
         response = await _create_with_recovery()
         if response is None:
+            # A2: use the actual model variable, not a hardcoded model name.
             final_text = (
-                "Hit the Anthropic rate limit on this account — give it a "
-                "minute and try again. (Tried Sonnet then Haiku; both throttled.)"
+                f"Hit the Anthropic rate limit on this account — give it a "
+                f"minute and try again. (Tried {model} then Haiku; both throttled.)"
             )
             break
+
+        last_stop_reason = response.stop_reason or ""
 
         if response.stop_reason == "end_turn":
             for block in response.content:
@@ -270,12 +315,17 @@ async def chat_async(
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
+                    tool_calls_this_turn.append(block.name)
                     try:
                         # Tool dispatch is sync (subprocess/AppleScript) — run
                         # in a thread so we don't block the event loop here.
                         result = await asyncio.to_thread(dispatch, block.name, block.input)
                     except Exception as e:
                         result = {"error": str(e)}
+                        last_tool_error = f"{block.name}: {e}"
+
+                    if isinstance(result, dict) and result.get("error"):
+                        last_tool_error = f"{block.name}: {result['error']}"
 
                     if isinstance(result, dict) and result.get("type") == "image":
                         content = [result]
@@ -295,11 +345,60 @@ async def chat_async(
         else:
             break
 
+    # OS3: branch the fallback message by what actually went wrong instead
+    # of the bare "please try again".
     if not final_text:
-        final_text = "I couldn't complete that — please try again."
+        if last_stop_reason == "max_tokens":
+            final_text = (
+                "My response got cut off mid-thought (max_tokens reached). "
+                "Try asking for a shorter or more specific answer."
+            )
+        elif last_stop_reason == "pause_turn":
+            final_text = (
+                "I paused thinking partway through — please ask again with "
+                "a bit more detail so I can resume."
+            )
+        elif last_tool_error:
+            final_text = (
+                f"I tried but a tool failed: {last_tool_error}. "
+                f"Check the relevant app is open and try again."
+            )
+        else:
+            final_text = (
+                f"I couldn't complete that (stop_reason={last_stop_reason or 'unknown'}). "
+                "Try rephrasing or asking for one piece at a time."
+            )
+
+    # OS4: if the requested model differed from the model that actually
+    # produced this reply (and a real reply was produced — not the
+    # rate-limit fallback string), footnote the user so they know we
+    # answered with the cheaper backup.
+    if (
+        final_text
+        and not rate_limited
+        and actual_model
+        and actual_model != model
+    ):
+        final_text = f"{final_text}\n\n_(Opus was rate-limited — answered with Haiku.)_"
 
     # Persist assistant reply.
     memory.append_message(conversation_id, "assistant", final_text)
+
+    # OS5: persist a one-line breadcrumb of which tools we called this
+    # turn. Dedupe consecutive identical names so chains like
+    # outlook_search → outlook_search → outlook_read collapse to
+    # "outlook_search, outlook_read". This row is filtered out of the
+    # API replay history (see memory.get_recent_messages) but surfaces
+    # in the next turn's system prompt so the model knows what it just
+    # looked up — addresses the "open it" / "what about the next one"
+    # case where the agent re-searches for state it already has.
+    if tool_calls_this_turn:
+        seen: list[str] = []
+        for name in tool_calls_this_turn:
+            if not seen or seen[-1] != name:
+                seen.append(name)
+        if seen:
+            memory.append_tool_summary(conversation_id, "called: " + ", ".join(seen))
 
     # Refresh last_used_at on surfaced facts.
     memory.touch_facts([])  # no-op placeholder; facts are touched when created

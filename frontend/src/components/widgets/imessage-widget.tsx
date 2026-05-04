@@ -9,7 +9,9 @@ import {
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { MessageSquare } from "lucide-react";
 import { fetchIMessages } from "@/lib/api";
+import Skeleton from "@/components/ui/skeleton";
 import { openInApp } from "@/lib/open-apps";
 import {
   jarvisConfig,
@@ -18,6 +20,16 @@ import {
   passesAllowlist,
   resolveDisplayName,
 } from "@/lib/jarvis-config";
+import { EmptyState } from "./empty-state";
+import { ErrorState } from "./error-state";
+import {
+  type Density,
+  getInitialDensity,
+  subscribeDensityChange,
+} from "@/lib/density-store";
+
+// iMessage brand blue — not a status color, semantic to the iMessage bubble UI.
+const IMESSAGE_BLUE = "#0b93f6";
 
 type ThreadMessage = {
   text: string;
@@ -32,7 +44,10 @@ type Conversation = {
   contact: string;
   handle: string;
   chat_id: number;
+  chat_identifier?: string;
   is_group: boolean;
+  participants?: string[];
+  participant_count?: number;
   unread_count: number;
   last_message: string;
   last_message_from_me: boolean;
@@ -81,6 +96,8 @@ export function IMessageWidget() {
   const [expanded, setExpanded] = useState<number | null>(null);
   const [live, setLive] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [density, setDensityState] = useState<Density>("comfortable");
+  const loadRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const el = contentRef.current;
@@ -90,6 +107,11 @@ export function IMessageWidget() {
     });
     ro.observe(el);
     return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    setDensityState(getInitialDensity());
+    return subscribeDensityChange((d) => setDensityState(d));
   }, []);
 
   // Memoize once per mount — config is compiled in.
@@ -153,6 +175,7 @@ export function IMessageWidget() {
           }
         });
     };
+    loadRef.current = load;
     load();
     // Faster poll (15s) so an iMessage reply the user sent on their phone
     // or in Messages.app reflects within ~20s instead of ~90s. Backend
@@ -193,13 +216,20 @@ export function IMessageWidget() {
     : null;
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
+    <Card
+      className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors"
+      style={{ padding: "var(--widget-density-pad)" }}
+    >
       <CardHeader className="p-5 pb-3 flex-row items-center justify-between space-y-0">
         <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground flex items-center gap-2">
           Messages
           {live ? (
             <>
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" title="Live data" />
+              <span
+                className="h-1.5 w-1.5 rounded-full inline-block"
+                style={{ backgroundColor: "var(--status-live)" }}
+                title="Live data"
+              />
               <span className="sr-only">live</span>
             </>
           ) : statusMsg ? (
@@ -214,7 +244,10 @@ export function IMessageWidget() {
           )}
         </CardTitle>
         {totalUnread > 0 && !expandedConvo && (
-          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-200">
+          <span
+            className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+            style={{ backgroundColor: `${IMESSAGE_BLUE}33`, color: IMESSAGE_BLUE }}
+          >
             {totalUnread} unread
           </span>
         )}
@@ -250,7 +283,10 @@ export function IMessageWidget() {
       </CardHeader>
 
       <CardContent ref={contentRef} className="flex-1 min-h-0 p-0">
-        <ScrollArea className="h-full px-5 pb-5">
+        {/* no-drag: the scroll area and all its interactive children must not
+            trigger a widget drag — scrolling and row-clicks belong to the
+            widget, not to react-grid-layout. */}
+        <ScrollArea className="no-drag h-full px-5 pb-5">
           {expandedConvo ? (
             <ThreadView convo={expandedConvo} isWide={isWide} />
           ) : (
@@ -262,6 +298,8 @@ export function IMessageWidget() {
               statusMsg={statusMsg}
               hasAny={convos.length > 0}
               loading={loading}
+              density={density}
+              onRetry={() => loadRef.current()}
             />
           )}
         </ScrollArea>
@@ -278,6 +316,8 @@ function ConversationList({
   statusMsg,
   hasAny,
   loading,
+  density,
+  onRetry,
 }: {
   unread: Conversation[];
   read: Conversation[];
@@ -286,39 +326,44 @@ function ConversationList({
   statusMsg: string | null;
   hasAny: boolean;
   loading: boolean;
+  density: Density;
+  onRetry: () => void;
 }) {
   if (loading && !hasAny) {
+    // Skeleton silhouette: avatar circle + two lines mimicking contact + preview
     return (
-      <div className="space-y-2 pt-2 animate-pulse">
+      <div className="space-y-3 pt-2">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="flex items-center gap-3 py-2 px-2">
-            <div className={`rounded-full bg-foreground/[0.07] flex-shrink-0 ${isWide ? "h-10 w-10" : "h-8 w-8"}`} />
+          <div key={i} className="flex items-center gap-3 py-1 px-2">
+            <Skeleton className={`rounded-full flex-shrink-0 ${isWide ? "h-10 w-10" : "h-8 w-8"}`} />
             <div className="flex-1 space-y-1.5">
-              <div className="h-2.5 w-1/2 rounded bg-foreground/[0.06]" />
-              <div className="h-2 w-3/4 rounded bg-foreground/[0.04]" />
+              <Skeleton className="h-3 w-1/2" />
+              <Skeleton className="h-2.5 w-3/4" />
             </div>
           </div>
         ))}
       </div>
     );
   }
-  if (!hasAny) {
-    return (
-      <div className="py-8 text-center text-xs text-muted-foreground">
-        {statusMsg ?? "No recent messages"}
-      </div>
-    );
+  // F8: when we have no data AND the backend is unreachable, show a proper
+  // error state with retry instead of invisible grayed text.
+  if (!hasAny && statusMsg === "Backend offline") {
+    return <ErrorState message="Couldn't reach iMessage" onRetry={onRetry} />;
   }
+  if (!hasAny) {
+    return <EmptyState icon={MessageSquare} title={statusMsg ?? "No recent messages"} />;
+  }
+  // F4: fade in once data arrives — only on the loaded path, never on skeleton.
   return (
-    <div className="space-y-1">
+    <div className="animate-in fade-in duration-200 space-y-1">
       {unread.map((c) => (
-        <ConversationRow key={c.chat_id} convo={c} onOpen={onOpen} isWide={isWide} />
+        <ConversationRow key={c.chat_id} convo={c} onOpen={onOpen} isWide={isWide} density={density} />
       ))}
       {unread.length > 0 && read.length > 0 && (
         <div className="my-2 border-t border-foreground/5" />
       )}
       {read.map((c) => (
-        <ConversationRow key={c.chat_id} convo={c} onOpen={onOpen} isWide={isWide} />
+        <ConversationRow key={c.chat_id} convo={c} onOpen={onOpen} isWide={isWide} density={density} />
       ))}
     </div>
   );
@@ -328,10 +373,12 @@ function ConversationRow({
   convo,
   onOpen,
   isWide,
+  density,
 }: {
   convo: Conversation;
   onOpen: (chatId: number) => void;
   isWide: boolean;
+  density: Density;
 }) {
   const preview = convo.last_message_from_me
     ? `You: ${convo.last_message}`
@@ -361,12 +408,6 @@ function ConversationRow({
     });
   };
 
-  const handleExpandInline = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    onOpen(convo.chat_id);
-  };
-
   // Primary action: expand the thread INLINE in the widget. Was previously
   // launching Messages.app for any click on the row, which forced the user
   // to leave the dashboard for what's usually just a quick read. The
@@ -387,13 +428,27 @@ function ConversationRow({
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") handlePrimaryClick(e as unknown as React.MouseEvent);
       }}
-      className="w-full flex items-center gap-3 py-2.5 px-2 rounded-lg text-left hover:bg-foreground/5 transition-colors cursor-pointer border-b border-foreground/[0.04] last:border-0"
+      className={`w-full flex items-center gap-3 rounded-lg text-left hover:bg-foreground/5 transition-colors cursor-pointer border-b border-foreground/[0.04] last:border-0 ${density === "compact" ? "py-1.5 px-1.5" : "py-2.5 px-2"}`}
     >
-      <Avatar className={isWide ? "h-10 w-10 flex-shrink-0" : "h-8 w-8 flex-shrink-0"}>
-        <AvatarFallback className={`${avatarClass(convo.contact)} text-sm font-semibold`}>
-          {initial(convo.contact)}
-        </AvatarFallback>
-      </Avatar>
+      <div className="relative flex-shrink-0">
+        <Avatar className={isWide ? "h-10 w-10" : "h-8 w-8"}>
+          <AvatarFallback className={`${avatarClass(convo.contact)} text-sm font-semibold`}>
+            {initial(convo.contact)}
+          </AvatarFallback>
+        </Avatar>
+        {/* Group-chat marker: small overlay badge so a group is
+            visually distinct from a 1:1 even before reading the label. */}
+        {convo.is_group && (
+          <span
+            className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-foreground/90 text-background text-[8px] font-bold ring-2 ring-card"
+            title={`Group chat — ${convo.participant_count ?? convo.participants?.length ?? "?"} people`}
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" className="h-2.5 w-2.5">
+              <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
+            </svg>
+          </span>
+        )}
+      </div>
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
@@ -403,11 +458,17 @@ function ConversationRow({
             }`}
           >
             {convo.contact}
+            {convo.is_group && (
+              <span className="ml-1.5 text-[9px] font-normal text-muted-foreground/60 uppercase tracking-wider">
+                group
+              </span>
+            )}
           </span>
           <span
-            className={`flex-shrink-0 ${
-              convo.unread_count > 0 ? "text-blue-300" : "text-muted-foreground/60"
-            } ${isWide ? "text-xs" : "text-[10px]"}`}
+            className={`flex-shrink-0 ${isWide ? "text-xs" : "text-[10px]"} ${
+              convo.unread_count > 0 ? "" : "text-muted-foreground/60"
+            }`}
+            style={convo.unread_count > 0 ? { color: IMESSAGE_BLUE } : undefined}
           >
             {convo.last_time}
           </span>
@@ -422,7 +483,10 @@ function ConversationRow({
           </span>
           <div className="flex items-center gap-2 flex-shrink-0">
             {convo.unread_count > 0 && (
-              <span className="h-2 w-2 rounded-full bg-blue-400" />
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ backgroundColor: IMESSAGE_BLUE }}
+              />
             )}
             <button
               type="button"
@@ -433,6 +497,13 @@ function ConversationRow({
                 e.preventDefault();
                 e.stopPropagation();
                 handleOpenInMessages(e);
+              }}
+              onKeyDown={(e) => {
+                // D3: native button Space/Enter fires a click AND the keydown
+                // bubbles to the outer div[role="button"] which would also
+                // trigger inline-expand. Stop propagation here so only the
+                // Messages.app open fires.
+                if (e.key === " " || e.key === "Enter") e.stopPropagation();
               }}
               className="text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors text-[10px] px-1.5 py-0.5 rounded hover:bg-foreground/5"
               title="Open in Messages.app"
@@ -514,17 +585,31 @@ function ThreadView({ convo, isWide }: { convo: Conversation; isWide: boolean })
   return (
     <div className="pt-2 space-y-3">
       <div className="flex items-center gap-3 pb-3 border-b border-foreground/5">
-        <Avatar className={isWide ? "h-10 w-10" : "h-8 w-8"}>
-          <AvatarFallback className={`${avatarClass(convo.contact)} text-sm font-semibold`}>
-            {initial(convo.contact)}
-          </AvatarFallback>
-        </Avatar>
-        <div className="min-w-0">
+        <div className="relative flex-shrink-0">
+          <Avatar className={isWide ? "h-10 w-10" : "h-8 w-8"}>
+            <AvatarFallback className={`${avatarClass(convo.contact)} text-sm font-semibold`}>
+              {initial(convo.contact)}
+            </AvatarFallback>
+          </Avatar>
+          {convo.is_group && (
+            <span
+              className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-foreground/90 text-background text-[8px] font-bold ring-2 ring-card"
+              title="Group chat"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" className="h-2.5 w-2.5">
+                <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>
+              </svg>
+            </span>
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
           <div className={`truncate font-semibold ${isWide ? "text-sm" : "text-xs"} text-foreground`}>
             {convo.contact}
           </div>
           <div className={`truncate text-muted-foreground/60 ${isWide ? "text-[11px]" : "text-[10px]"}`}>
-            {convo.handle}
+            {convo.is_group && convo.participants && convo.participants.length > 0
+              ? `${convo.participant_count ?? convo.participants.length} people · ${convo.participants.slice(0, 3).join(", ")}${convo.participants.length > 3 ? "…" : ""}`
+              : convo.handle}
           </div>
         </div>
       </div>

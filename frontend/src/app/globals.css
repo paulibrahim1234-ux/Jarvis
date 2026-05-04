@@ -48,6 +48,69 @@
   --radius-4xl: calc(var(--radius) * 2.2);     /* 26px */
 }
 
+/* =========================================================
+ * Density CSS variables
+ * Toggled by the density-store via body.density-compact class.
+ * Widgets consume these via style={{ padding: 'var(--widget-density-pad)' }}
+ * so a single class toggle on <body> reflows all widgets at once.
+ * =======================================================*/
+:root {
+  --widget-density-pad: 1rem;
+  --widget-density-font: 1rem;
+  --widget-density-gap: 0.75rem;
+}
+
+/* =========================================================
+ * STRUCTURAL design tokens — theme-agnostic
+ *
+ * WHY these live in :root and NOT in the per-theme blocks:
+ * Motion, typography scale, spacing grid, and radii are
+ * structural — they don't vary by light/dark palette.
+ * Keeping them here means light-theme users get valid values
+ * (previously these were only declared inside .dark, causing
+ * border-radius collapse, instant transitions, and broken
+ * skeleton shimmer for light-mode visitors).
+ * Semantic COLOR tokens stay inside their per-theme blocks.
+ * =======================================================*/
+:root {
+  /* Typography scale (px) */
+  --text-2xs: 10px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+
+  /* Spacing scale (4px base grid) */
+  --space-1: 4px;
+  --space-2: 8px;    /* tight   */
+  --space-3: 12px;
+  --space-4: 16px;   /* normal  */
+  --space-5: 20px;
+  --space-6: 24px;   /* generous */
+  --space-8: 32px;
+
+  /* Radii */
+  --radius-card: 12px;
+  --radius-chip: 6px;
+  --radius-pill: 999px;
+
+  /* Motion — Notion-level 150-200ms feel */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1.2);
+  --dur-fast: 120ms;
+  --dur-med: 220ms;
+
+  /* Tab / hover durations consumed by specific animation rules */
+  --duration-tab: 320ms;
+  --duration-hover: 120ms;
+}
+body.density-compact {
+  --widget-density-pad: 0.5rem;
+  --widget-density-font: 0.875rem;
+  --widget-density-gap: 0.5rem;
+}
+
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -250,29 +313,7 @@
   --status-error-soft: oklch(0.68 0.19 25 / 15%);
   --status-loading: oklch(0.58 0 0);         /* neutral grey */
 
-  /* Typography scale (px) */
-  --text-2xs: 10px;
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-lg: 18px;
-  --text-xl: 24px;
-
-  /* Spacing scale (4px base grid) */
-  --space-1: 4px;
-  --space-2: 8px;    /* tight   */
-  --space-3: 12px;
-  --space-4: 16px;   /* normal  */
-  --space-5: 20px;
-  --space-6: 24px;   /* generous */
-  --space-8: 32px;
-
-  /* Radii */
-  --radius-card: 12px;
-  --radius-chip: 6px;
-  --radius-pill: 999px;
-
-  /* Elevation */
+  /* Elevation — dark-specific shadow values (light overrides in [data-theme="light"]) */
   --shadow-card:
     0 1px 2px rgba(0, 0, 0, 0.28),
     0 1px 0 rgba(255, 255, 255, 0.02) inset;
@@ -284,21 +325,13 @@
     0 0 0 1px oklch(0.65 0.18 250 / 22%),
     0 0 40px oklch(0.65 0.18 250 / 10%);
 
-  /* Motion */
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1.2);
-  --dur-fast: 120ms;
-  --dur-med: 220ms;
-
-  /* Liquid Glass layer tokens */
+  /* Liquid Glass layer tokens — dark variant */
   --glass-bg:        rgba(28, 28, 30, 0.55);
   --glass-blur:      40px;
   --glass-saturate:  180%;
   --glass-border:    rgba(255, 255, 255, 0.08);
   --glass-highlight: rgba(255, 255, 255, 0.05);
   --glass-shadow:    0 20px 40px -12px rgba(0, 0, 0, 0.6);
-  --duration-tab:    320ms;
-  --duration-hover:  120ms;
 }
 
 @layer base {
@@ -314,11 +347,45 @@
   html {
     @apply font-sans;
   }
-  /* Consistent focus ring using the brand accent */
+
+  /* ── Focus rings (F1) ──────────────────────────────────────────────
+   * WHY separate rules per element type: pill/icon buttons need
+   * border-radius:inherit so the ring hugs the button shape; inputs
+   * need a tighter 1px offset so the ring sits flush with the field.
+   * A single :focus-visible rule with a fixed border-radius produces
+   * a square ring on round buttons, which looks broken at Notion polish.
+   * ────────────────────────────────────────────────────────────────── */
   :focus-visible {
     outline: 2px solid var(--brand);
     outline-offset: 2px;
-    border-radius: var(--radius-chip);
+  }
+  button:focus-visible,
+  [role="button"]:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+    border-radius: inherit;
+  }
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 1px;
+  }
+
+  /* ── Global animation tokens (F2) ─────────────────────────────────
+   * WHY here and not in component files: every Tailwind `transition-*`
+   * class uses default 150ms ease-in-out. By setting duration and
+   * timing-function at this layer for interactive elements, all
+   * `transition-colors` calls automatically pick up the design-token
+   * values without touching component JSX. Explicit `duration-*`
+   * Tailwind classes override this safely because inline specificity wins.
+   * ────────────────────────────────────────────────────────────────── */
+  button,
+  a,
+  [role="button"],
+  [role="tab"] {
+    transition-duration: var(--dur-fast);
+    transition-timing-function: var(--ease-standard);
   }
 }
 

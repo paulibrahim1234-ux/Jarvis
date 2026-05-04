@@ -10,17 +10,22 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { useEffect, useState, useCallback } from "react";
+import { BookOpen } from "lucide-react";
 import {
   fetchUWorldData,
   refreshUWorld,
   fetchAnkiSuggestions,
   unsuspendAnkiCards,
+  openUWorldQuestion,
   type UWorldSession,
   type UWorldWeakTopic,
   type UWorldIncorrect,
   type AnkiSuggestion,
 } from "@/lib/api";
 import { openInApp } from "@/lib/open-apps";
+import Skeleton from "@/components/ui/skeleton";
+import { EmptyState } from "./empty-state";
+import { ErrorState } from "./error-state";
 
 // Override via NEXT_PUBLIC_UWORLD_COURSE_ID if your USMLE course ID differs.
 const COURSE_ID = process.env.NEXT_PUBLIC_UWORLD_COURSE_ID || "14842106";
@@ -191,15 +196,21 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {testResultsUrl && (
-            <a
-              href={testResultsUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-[10px] text-blue-400/80 hover:text-blue-400 transition-colors"
-              title="Opens test results overview in UWorld"
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                // Navigate the existing UWorld tab in Comet rather than
+                // spawning a new tab (which loses session warmth and
+                // sometimes triggers the loading spinner).
+                void openUWorldQuestion(testResultsUrl);
+              }}
+              className="text-[10px] text-blue-400/80 hover:text-blue-400 transition-colors cursor-pointer"
+              title="Opens test results overview in your UWorld tab"
             >
               Open in UWorld ↗
-            </a>
+            </button>
           )}
           <button
             onClick={onClose}
@@ -244,10 +255,10 @@ function SessionExpandPanel({ session, incorrects, onClose }: SessionExpandPanel
                         key={q.uworld_qid}
                         role={qUrl ? "button" : undefined}
                         tabIndex={qUrl ? 0 : undefined}
-                        onClick={qUrl ? () => window.open(qUrl, "_blank", "noopener") : undefined}
-                        onKeyDown={qUrl ? (e) => { if (e.key === "Enter") window.open(qUrl, "_blank", "noopener"); } : undefined}
+                        onClick={qUrl ? () => void openUWorldQuestion(qUrl) : undefined}
+                        onKeyDown={qUrl ? (e) => { if (e.key === "Enter") void openUWorldQuestion(qUrl); } : undefined}
                         className={className}
-                        title={qUrl ? "Open this question in UWorld" : undefined}
+                        title={qUrl ? "Open this question in your UWorld tab" : undefined}
                       >
                         <span className="text-foreground/80">{q.uworld_topic_name || q.uworld_topic}</span>
                         <span className="text-muted-foreground/40 font-mono text-[10px] shrink-0">
@@ -370,7 +381,7 @@ function SessionRow({ session, incorrects, isExpanded, onToggle }: SessionRowPro
         tabIndex={0}
         onClick={onToggle}
         onKeyDown={(e) => e.key === "Enter" && onToggle()}
-        className={`flex items-center justify-between rounded-lg px-3 py-2.5 cursor-pointer transition-colors ${
+        className={`flex items-center justify-between rounded-lg px-3 py-2.5 [body.density-compact_&]:py-1.5 cursor-pointer transition-colors ${
           isExpanded ? "bg-foreground/8 hover:bg-foreground/10" : "hover:bg-foreground/5"
         }`}
         aria-expanded={isExpanded}
@@ -417,29 +428,32 @@ function SessionList({
 }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // D4: stable reference so ESC effect in SessionExpandPanel doesn't
+  // re-register on every render.
+  const toggle = useCallback((id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id));
+  }, []);
+
   if (sessions.length === 0) {
     return (
-      <p className="px-3 py-4 text-xs text-muted-foreground/60 text-center">
-        No sessions logged yet
-      </p>
+      <EmptyState icon={BookOpen} title="No recent sessions" className="py-4" />
     );
   }
 
-  const toggle = (id: string) => {
-    setExpandedId((prev) => (prev === id ? null : id));
-  };
-
   return (
     <div className="space-y-1">
-      {sessions.map((s) => (
-        <SessionRow
-          key={s.id}
-          session={s}
-          incorrects={incorrects}
-          isExpanded={expandedId === s.id}
-          onToggle={() => toggle(s.id)}
-        />
-      ))}
+      {sessions.map((s) => {
+        const onToggle = () => toggle(s.id);
+        return (
+          <SessionRow
+            key={s.id}
+            session={s}
+            incorrects={incorrects}
+            isExpanded={expandedId === s.id}
+            onToggle={onToggle}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -482,6 +496,7 @@ export function UWorldWidget() {
   const [incorrects, setIncorrects] = useState<UWorldIncorrect[]>([]);
   const [launching, setLaunching] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
   const [dataSource, setDataSource] = useState<string | null>(null);
@@ -500,6 +515,9 @@ export function UWorldWidget() {
   };
 
   const loadData = useCallback(() => {
+    // TODO(status-dot): wire dataAge from fetchUWorldData — record fetch
+    // timestamp on success, pass status/lastUpdated to WidgetWrapper.
+    setFetchError(false);
     return fetchUWorldData()
       .then((data) => {
         setSessions(data.sessions ?? []);
@@ -510,6 +528,7 @@ export function UWorldWidget() {
       })
       .catch((e) => {
         console.error("Failed to fetch UWorld data:", e);
+        setFetchError(true);
       });
   }, []);
 
@@ -555,7 +574,10 @@ export function UWorldWidget() {
   const trueLearnSessions = sessions.filter((s) => s.platform === "truelearn");
 
   return (
-    <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
+    <Card
+      className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors"
+      style={{ padding: "var(--widget-density-pad)" }}
+    >
       <CardHeader className="p-5 pb-3 flex flex-row items-center justify-between">
         <div className="flex items-center gap-2">
           <CardTitle className="text-[13px] font-semibold tracking-[-0.02em] text-muted-foreground">
@@ -613,11 +635,21 @@ export function UWorldWidget() {
 
       <CardContent className="flex-1 min-h-0 p-5 pt-0 flex flex-col">
         {loading ? (
-          <div className="flex h-full items-center justify-center text-xs text-muted-foreground/60">
-            Loading...
+          // Skeleton silhouette: header row + score bar + session list rows
+          <div className="flex flex-col gap-3 pt-1">
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-6 w-full" />
+            <Skeleton className="h-16 w-full" />
           </div>
+        ) : fetchError ? (
+          // F8 — surface fetch failures instead of silently showing nothing
+          <ErrorState
+            message="Couldn't load UWorld"
+            onRetry={() => { void loadData(); }}
+          />
         ) : !hasData ? (
-          <div className="flex flex-col items-center justify-center gap-4 py-8 text-center">
+          // F4 fade-in applies here too since we just left loading
+          <div className="animate-in fade-in duration-200 flex flex-col items-center justify-center gap-4 py-8 text-center">
             <div>
               <p className="text-sm text-muted-foreground">No QBank data yet</p>
               <p className="text-xs text-muted-foreground/70 mt-1">
@@ -646,8 +678,10 @@ export function UWorldWidget() {
             </div>
           </div>
         ) : (
-          <Tabs defaultValue="uworld" className="flex-1 min-h-0 flex flex-col">
-            <TabsList className="mb-3 bg-foreground/5 border border-foreground/5 shrink-0">
+          // F4 — fade in when skeleton gives way to real content
+          <Tabs defaultValue="uworld" className="animate-in fade-in duration-200 flex-1 min-h-0 flex flex-col">
+            {/* F10 — density-compact tightens the tab row gap */}
+            <TabsList className="mb-3 [body.density-compact_&]:mb-1.5 bg-foreground/5 border border-foreground/5 shrink-0">
               <TabsTrigger value="uworld" className="text-xs data-[state=active]:bg-foreground/10">
                 UWorld {uworldSessions.length > 0 && <span className="ml-1 text-muted-foreground/50">({uworldSessions.length})</span>}
               </TabsTrigger>
@@ -659,15 +693,19 @@ export function UWorldWidget() {
                 </TabsTrigger>
               )}
             </TabsList>
+            {/* no-drag on each ScrollArea: the session rows are
+                role='button' elements that already match draggableCancel,
+                but the scrollable viewport itself is a plain div that could
+                still initiate a drag on a slow press. */}
             <TabsContent value="uworld" className="flex-1 min-h-0 mt-0">
-              <ScrollArea className="h-full">
+              <ScrollArea className="no-drag h-full">
                 <SessionList sessions={uworldSessions} incorrects={incorrects} />
                 <WeakTopicsSection topics={weakTopics} />
               </ScrollArea>
             </TabsContent>
             {trueLearnSessions.length > 0 && (
               <TabsContent value="truelearn" className="flex-1 min-h-0 mt-0">
-                <ScrollArea className="h-full">
+                <ScrollArea className="no-drag h-full">
                   <SessionList sessions={trueLearnSessions} incorrects={incorrects} />
                 </ScrollArea>
               </TabsContent>

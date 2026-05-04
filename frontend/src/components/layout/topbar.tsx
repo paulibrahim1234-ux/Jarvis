@@ -1,8 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Pencil, Check, Rows3 } from "lucide-react";
 import { BACKEND, fetchAuthStatus, type AuthStatus } from "@/lib/api";
 import { type Theme, getInitialTheme, applyTheme, persistTheme } from "@/lib/theme";
+import { useEditModeStore } from "@/lib/edit-mode-store";
+import {
+  type Density,
+  getInitialDensity,
+  applyDensity,
+  setDensity,
+  subscribeDensityChange,
+} from "@/lib/density-store";
+
+const DEEP_FOCUS_KEY = "jarvis-deep-focus-v1";
+const DEEP_FOCUS_EVENT = "jarvis-deep-focus-change";
 
 type ServiceStatus = "up" | "down" | "unknown";
 
@@ -11,6 +23,58 @@ export function Topbar() {
   const [backend, setBackend] = useState<ServiceStatus>("unknown");
   const [theme, setTheme] = useState<Theme>("dark");
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [deepFocus, setDeepFocus] = useState(false);
+  const [density, setDensityState] = useState<Density>("comfortable");
+  const { editMode, setEditMode } = useEditModeStore();
+
+  // Initialize deep-focus state from localStorage on mount, and listen for
+  // changes from other components (the storage event covers other tabs;
+  // a same-tab CustomEvent covers in-page propagation since `storage` only
+  // fires across tabs).
+  useEffect(() => {
+    try {
+      setDeepFocus(localStorage.getItem(DEEP_FOCUS_KEY) === "1");
+    } catch {
+      /* ignore */
+    }
+    const onChange = (e: Event) => {
+      const ce = e as CustomEvent<{ enabled: boolean }>;
+      if (ce.detail) setDeepFocus(ce.detail.enabled);
+    };
+    window.addEventListener(DEEP_FOCUS_EVENT, onChange);
+    return () => window.removeEventListener(DEEP_FOCUS_EVENT, onChange);
+  }, []);
+
+  // Initialize density from localStorage on mount, then subscribe to changes
+  // dispatched by setDensity() so any other component can stay in sync.
+  // applyDensity is called here so the body class is in place even if the
+  // user never clicks the button (value comes from persisted localStorage).
+  useEffect(() => {
+    const initial = getInitialDensity();
+    setDensityState(initial);
+    applyDensity(initial);
+    return subscribeDensityChange((d) => setDensityState(d));
+  }, []);
+
+  function toggleDensity() {
+    const next: Density = density === "compact" ? "comfortable" : "compact";
+    setDensityState(next);
+    setDensity(next); // applies body class + persists + dispatches
+  }
+
+  function toggleDeepFocus() {
+    const next = !deepFocus;
+    setDeepFocus(next);
+    try {
+      if (next) localStorage.setItem(DEEP_FOCUS_KEY, "1");
+      else localStorage.removeItem(DEEP_FOCUS_KEY);
+    } catch {
+      /* ignore */
+    }
+    window.dispatchEvent(
+      new CustomEvent(DEEP_FOCUS_EVENT, { detail: { enabled: next } }),
+    );
+  }
 
   // Credential health — refreshes every 2 min on the client. The backend
   // caches the live Anthropic probe for 5 min, so this hits real Anthropic
@@ -219,6 +283,92 @@ export function Topbar() {
             </svg>
           )}
         </button>
+
+        {/* Deep Focus toggle — collapses the dashboard down to chat,
+            briefing, and Spotify only. Persists in localStorage; both
+            Topbar and DashboardGrid read the same key + listen for the
+            CustomEvent below. */}
+        <button
+          data-deep-focus-trigger
+          onClick={toggleDeepFocus}
+          aria-pressed={deepFocus}
+          aria-label={deepFocus ? "Exit deep focus" : "Enter deep focus"}
+          title={deepFocus ? "Exit Deep Focus" : "Enter Deep Focus"}
+          className="flex items-center justify-center rounded-full border transition-colors"
+          style={{
+            width: 28,
+            height: 28,
+            borderColor: deepFocus ? "var(--brand)" : "var(--border-subtle)",
+            backgroundColor: deepFocus ? "color-mix(in oklch, var(--brand) 20%, transparent)" : "var(--surface-2)",
+            color: deepFocus ? "var(--brand)" : "var(--ink-tertiary)",
+          }}
+        >
+          {/* Concentric-circle "target" glyph for focus */}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <circle cx="12" cy="12" r="5" />
+            <circle cx="12" cy="12" r="1" fill="currentColor" />
+          </svg>
+        </button>
+
+        {/* Density toggle — switches between comfortable (default) and compact
+            spacing. `setDensity` in density-store adds/removes the
+            `density-compact` class on <body> and persists to localStorage
+            under `jarvis.density` so the preference survives page reloads. */}
+        <button
+          onClick={toggleDensity}
+          aria-pressed={density === "compact"}
+          aria-label={density === "compact" ? "Switch to comfortable density" : "Switch to compact density"}
+          title={density === "compact" ? "Comfortable density" : "Compact density"}
+          className="flex items-center justify-center rounded-full border transition-colors"
+          style={{
+            width: 28,
+            height: 28,
+            borderColor: density === "compact" ? "var(--brand)" : "var(--border-subtle)",
+            backgroundColor: density === "compact"
+              ? "color-mix(in oklch, var(--brand) 20%, transparent)"
+              : "var(--surface-2)",
+            color: density === "compact" ? "var(--brand)" : "var(--ink-tertiary)",
+          }}
+        >
+          <Rows3 width={14} height={14} aria-hidden />
+        </button>
+
+        {/* Edit layout toggle — exposes the drag grip on each widget and
+            unlocks resizing. The icon swaps between a pencil (off) and a
+            check (on) so the current mode is unambiguous at a glance.
+            State lives in the edit-mode-store module and is persisted to
+            localStorage so the preference survives page reloads. */}
+        <button
+          onClick={() => setEditMode(!editMode)}
+          aria-pressed={editMode}
+          aria-label={editMode ? "Done editing layout" : "Edit layout"}
+          title={editMode ? "Done editing layout" : "Edit layout"}
+          className="flex items-center gap-1.5 rounded-full border px-2.5 transition-colors"
+          style={{
+            height: 28,
+            borderColor: editMode ? "var(--brand)" : "var(--border-subtle)",
+            backgroundColor: editMode
+              ? "color-mix(in oklch, var(--brand) 20%, transparent)"
+              : "var(--surface-2)",
+            color: editMode ? "var(--brand)" : "var(--ink-tertiary)",
+            fontSize: "11px",
+            fontWeight: 500,
+          }}
+        >
+          {editMode ? (
+            <Check width={12} height={12} aria-hidden />
+          ) : (
+            <Pencil width={12} height={12} aria-hidden />
+          )}
+          {/* F12: whitespace-nowrap stops "Edit layout" / "Done editing" from
+               wrapping on narrow viewports. hidden sm:inline collapses the
+               label below the sm breakpoint so only the icon shows, keeping
+               the topbar tidy on small screens without losing the button. */}
+          <span className="hidden sm:inline whitespace-nowrap">
+            {editMode ? "Done editing" : "Edit layout"}
+          </span>
+        </button>
       </div>
 
       {/* Date + time */}
@@ -242,8 +392,12 @@ export function Topbar() {
             {dateStr}
           </span>
         </div>
+        {/* F11: rounded-full matches the icon buttons' radius (28px pill) —
+              using rounded-md (6px) here created two different radii at the
+              same visual weight in the same header row, which read as a
+              design inconsistency. Pill is the topbar convention. */}
         <div
-          className="flex items-baseline gap-1 rounded-md px-2.5 py-1"
+          className="flex items-baseline gap-1 rounded-full px-2.5 py-1"
           style={{
             backgroundColor: "var(--surface-2)",
             border: "1px solid var(--border-subtle)",

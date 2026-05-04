@@ -197,18 +197,26 @@ def _write_json_fallback(blob: dict) -> None:
 
 def _write_dotenv(access_token: str) -> None:
     """Update CLAUDE_CODE_OAUTH_TOKEN= line in backend/.env.
-    Idempotent: appends if missing, overwrites if present."""
+    Idempotent: appends if missing, overwrites if present.
+
+    Defense-in-depth: scrub any newline / CR from the token before writing.
+    A literal newline would split the value across env lines and corrupt
+    the next variable below it. Anthropic OAuth tokens are URL-safe base64
+    so they should never legitimately contain these, but we strip rather
+    than trust.
+    """
     if not DOTENV_PATH.exists():
         return
     try:
         lines = DOTENV_PATH.read_text().splitlines()
     except Exception:
         return
+    safe_token = access_token.replace("\n", "").replace("\r", "")
     new_lines = []
     seen = False
     for line in lines:
         if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
-            new_lines.append(f"CLAUDE_CODE_OAUTH_TOKEN={access_token}")
+            new_lines.append(f"CLAUDE_CODE_OAUTH_TOKEN={safe_token}")
             seen = True
         elif line.startswith("ANTHROPIC_API_KEY="):
             # Make sure the API key var is empty so it doesn't shadow the OAuth token.
@@ -216,7 +224,7 @@ def _write_dotenv(access_token: str) -> None:
         else:
             new_lines.append(line)
     if not seen:
-        new_lines.append(f"CLAUDE_CODE_OAUTH_TOKEN={access_token}")
+        new_lines.append(f"CLAUDE_CODE_OAUTH_TOKEN={safe_token}")
     DOTENV_PATH.write_text("\n".join(new_lines) + "\n")
     try:
         os.chmod(DOTENV_PATH, 0o600)

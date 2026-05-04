@@ -221,17 +221,42 @@ def _screenshot() -> dict:
 
 
 def run_applescript(script: str) -> dict:
-    """Run an AppleScript via osascript, rejecting dangerous patterns."""
+    """Run an AppleScript via osascript, rejecting dangerous patterns.
+
+    Tightening notes (Finding 4 / 2026-04-30 polish pass):
+      - "delete file" and "eject " were trivial substring matches that
+        missed "delete every item of folder X", "delete folder Y",
+        "eject volume Z", etc. Broadened to "delete " / "eject" so
+        every form of those verbs is caught.
+      - Added "empty trash", "erase ", "shutdown", "restart" to cover
+        common destructive-system verbs.
+      - Added "system events" to block UI scripting that bypasses the
+        other guards (anything addressed `tell application "System
+        Events"` can synthesise keystrokes/clicks/menu-picks even if
+        the literal "keystroke" / "click menu item" strings aren't in
+        the source — e.g. by reading them from a property).
+        This is SAFE for Jarvis because none of the codebase's own
+        scripts (browser.py, desktop_apps.py, widgets.py) use
+        "tell application \"System Events\"". They all address concrete
+        apps (Microsoft Outlook, Comet, Spotify, Mail, Calendar,
+        Messages) directly via app dictionaries — verified by grep
+        2026-04-30.
+    """
     _APPLESCRIPT_BLOCKED = (
         "do shell script",
-        "delete file",
-        "eject ",
+        "delete ",          # blocks delete file/folder/every item/etc.
+        "eject",            # blocks eject volume/disk/disc
+        "empty trash",
+        "erase ",
+        "shutdown",
+        "restart",
         "keystroke",
         "key code",
         "set the clipboard",
         "perform action",
         "set value of attribute",
         "click menu item",
+        "system events",    # blocks UI scripting that bypasses other guards
     )
     script_lower = script.lower()
     for pattern in _APPLESCRIPT_BLOCKED:
@@ -336,7 +361,22 @@ def _safe_shell(command: str, cwd: str | None = None) -> dict:
 
 
 def _write_env(key: str, value: str):
-    """Write or update KEY="value" in .env file (thread-safe)."""
+    """Write or update KEY="value" in .env file (thread-safe).
+
+    Escapes characters that would break out of the surrounding double-quoted
+    .env literal. Without this, a credential containing a literal `"` (which
+    happens for some OAuth client secrets) would close the quoted segment
+    early and corrupt the next line of the file. Order matters: backslash
+    must be escaped first so the subsequent `\\"` substitution doesn't get
+    re-escaped on top of itself.
+    """
+    safe = (
+        value
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "")
+    )
     with _ENV_WRITE_LOCK:
         _ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
         lines = []
@@ -344,10 +384,10 @@ def _write_env(key: str, value: str):
         if _ENV_FILE.exists():
             for line in _ENV_FILE.read_text().splitlines():
                 if re.match(rf"^{re.escape(key)}\s*=", line):
-                    lines.append(f'{key}="{value}"')
+                    lines.append(f'{key}="{safe}"')
                     found = True
                 else:
                     lines.append(line)
         if not found:
-            lines.append(f'{key}="{value}"')
+            lines.append(f'{key}="{safe}"')
         _ENV_FILE.write_text("\n".join(lines) + "\n")

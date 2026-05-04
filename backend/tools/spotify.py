@@ -76,13 +76,107 @@ def _sp():
     can return promptly with whatever info is available (cached or empty).
     """
     import spotipy
+    auth = _auth()
+    # Hold the refresh lock while validating the cached token so that at most
+    # one thread performs the network round-trip to Spotify's token endpoint.
+    # Spotify rotates refresh tokens on use — if several threads call
+    # refresh_access_token() concurrently (which SpotifyOAuth does internally
+    # when it finds an expired token), only the first save is valid; the rest
+    # cache a stale refresh token that yields 401s on the next widget cycle.
+    with _TOKEN_REFRESH_LOCK:
+        auth.validate_token(auth.cache_handler.get_cached_token())
     return spotipy.Spotify(
-        auth_manager=_auth(),
+        auth_manager=auth,
         retries=0,             # don't auto-retry — we'd rather see the failure quick
         status_retries=0,
         backoff_factor=0,
         requests_timeout=8,    # per-call HTTP timeout in seconds
     )
+
+
+# ── Rate-limit circuit breaker ────────────────────────────────────────────────
+# Spotify can rate-limit an app's CLIENT credentials for hours at a time
+# (observed Retry-After 19,000+ seconds = 5+ hours). Without a breaker,
+# every widget tick fires another doomed request, which:
+#   1. Makes the rate-limit window potentially renew (each blocked request
+#      still counts in some quota implementations).
+#   2. Leaves the user with empty arrays and zero hint why.
+#   3. Floods stderr with spotipy "Max Retries reached" noise.
+#
+# Pattern: any function that hits a 429 calls _record_rate_limit(retry_after_s).
+# All public getters check _check_rate_limited() first and short-circuit
+# with a sentinel marker dict (not a bare []), so the widget endpoint can
+# distinguish "rate-limited" from "empty result" and surface a clear UI
+# message ("Spotify rate-limited — retrying at HH:MM").
+
+import threading as _threading
+import time as _time
+
+_RATE_LIMIT_LOCK = _threading.Lock()
+
+# Serializes the token expiry-check + potential refresh across threads.
+# Without this, concurrent widget calls (ThreadPoolExecutor, up to 4 workers)
+# all hit validate_token simultaneously on expiry. Spotify rotates refresh
+# tokens — first write wins, the others get invalidated refresh tokens and
+# produce 401s on the very next cycle.
+_TOKEN_REFRESH_LOCK = _threading.Lock()
+_RATE_LIMIT_UNTIL: float = 0.0          # epoch seconds; 0 = not limited
+_RATE_LIMIT_LAST_REASON: str = ""       # human-readable last reason, for logs/UI
+
+# Sentinel returned in place of [] when we're skipping a call due to the breaker.
+# Endpoints check `is RATE_LIMITED_SENTINEL` to switch behavior.
+RATE_LIMITED_SENTINEL = object()
+
+
+def _check_rate_limited() -> float:
+    """Return seconds remaining in the rate-limit window (0.0 if clear)."""
+    with _RATE_LIMIT_LOCK:
+        if _RATE_LIMIT_UNTIL <= 0:
+            return 0.0
+        remaining = _RATE_LIMIT_UNTIL - _time.time()
+        return max(0.0, remaining)
+
+
+def _record_rate_limit(retry_after_s: float, reason: str = "") -> None:
+    """Trip the breaker until now+retry_after_s.
+
+    Cap at 1 hour to avoid pathologically long stalls if Spotify returns
+    a multi-hour Retry-After (5+ hours has been observed). After the cap,
+    we'll let one probe through and re-trip if still limited.
+    """
+    global _RATE_LIMIT_UNTIL, _RATE_LIMIT_LAST_REASON
+    capped = max(60.0, min(retry_after_s, 3600.0))
+    with _RATE_LIMIT_LOCK:
+        _RATE_LIMIT_UNTIL = _time.time() + capped
+        _RATE_LIMIT_LAST_REASON = reason or f"rate-limited for {int(capped)}s"
+
+
+def _maybe_trip_breaker(exc: Exception) -> bool:
+    """If `exc` looks like a 429, trip the breaker and return True.
+
+    Reads Retry-After from the SpotifyException message ("Retry will occur
+    after: 19149 s") since spotipy doesn't expose headers reliably after
+    its retries=0 path swallows them.
+    """
+    msg = str(exc)
+    if "429" not in msg and "rate/request limit" not in msg.lower() and "Max Retries" not in msg:
+        return False
+    # Try to parse the seconds out of the message.
+    import re as _re
+    m = _re.search(r"after:\s*(\d+)", msg)
+    retry_after = float(m.group(1)) if m else 600.0
+    _record_rate_limit(retry_after, reason=msg[:200])
+    return True
+
+
+def rate_limit_status() -> dict:
+    """Public probe — used by the widget endpoint to surface state to the UI."""
+    remaining = _check_rate_limited()
+    return {
+        "rate_limited": remaining > 0,
+        "retry_in_seconds": int(remaining),
+        "last_reason": _RATE_LIMIT_LAST_REASON if remaining > 0 else "",
+    }
 
 
 def get_auth_url() -> str:
@@ -110,6 +204,8 @@ def is_authenticated() -> bool:
 
 
 def get_now_playing() -> dict | None:
+    if _check_rate_limited() > 0:
+        return None  # widget already shows breaker banner; no point in a second one here
     try:
         sp = _sp()
         current = sp.current_playback()
@@ -129,12 +225,15 @@ def get_now_playing() -> dict | None:
             "is_playing": current.get("is_playing", False),
             "uri": item.get("uri"),
         }
-    except Exception:
+    except Exception as e:
+        _maybe_trip_breaker(e)
         return None
 
 
 def get_queue() -> list[dict] | None:
     """Upcoming tracks (requires user-read-playback-state)."""
+    if _check_rate_limited() > 0:
+        return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
     try:
         sp = _sp()
         q = sp.queue()
@@ -151,11 +250,15 @@ def get_queue() -> list[dict] | None:
             }
             for t in (q.get("queue") or [])[:20]
         ]
-    except Exception:
+    except Exception as e:
+        if _maybe_trip_breaker(e):
+            return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
         return None
 
 
 def get_playlists(limit: int = 20) -> list[dict] | None:
+    if _check_rate_limited() > 0:
+        return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
     try:
         sp = _sp()
         res = sp.current_user_playlists(limit=limit)
@@ -171,11 +274,15 @@ def get_playlists(limit: int = 20) -> list[dict] | None:
             }
             for p in items
         ]
-    except Exception:
+    except Exception as e:
+        if _maybe_trip_breaker(e):
+            return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
         return None
 
 
 def get_recently_played(limit: int = 10) -> list[dict] | None:
+    if _check_rate_limited() > 0:
+        return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
     try:
         sp = _sp()
         res = sp.current_user_recently_played(limit=limit)
@@ -197,12 +304,20 @@ def get_recently_played(limit: int = 10) -> list[dict] | None:
                 "played_at": item.get("played_at"),
             })
         return out
-    except Exception:
+    except Exception as e:
+        if _maybe_trip_breaker(e):
+            return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
         return None
 
 
 def get_top_tracks(time_range: str = "short_term", limit: int = 8) -> list[dict]:
-    """Get user's top tracks for the given time range (short_term/medium_term/long_term)."""
+    """Get user's top tracks for the given time range (short_term/medium_term/long_term).
+
+    Returns RATE_LIMITED_SENTINEL when the breaker is tripped so the widget
+    can render a "rate-limited until HH:MM" notice instead of a blank list.
+    """
+    if _check_rate_limited() > 0:
+        return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
     try:
         sp = _sp()
         result = sp.current_user_top_tracks(limit=limit, time_range=time_range)
@@ -215,12 +330,16 @@ def get_top_tracks(time_range: str = "short_term", limit: int = 8) -> list[dict]
             }
             for t in (result.get("items") or [])
         ]
-    except Exception:
+    except Exception as e:
+        if _maybe_trip_breaker(e):
+            return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
         return []
 
 
 def get_top_artists(time_range: str = "short_term", limit: int = 8) -> list[dict]:
     """Get user's top artists for the given time range."""
+    if _check_rate_limited() > 0:
+        return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
     try:
         sp = _sp()
         result = sp.current_user_top_artists(limit=limit, time_range=time_range)
@@ -232,7 +351,9 @@ def get_top_artists(time_range: str = "short_term", limit: int = 8) -> list[dict
             }
             for a in (result.get("items") or [])
         ]
-    except Exception:
+    except Exception as e:
+        if _maybe_trip_breaker(e):
+            return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
         return []
 
 
@@ -308,6 +429,8 @@ def get_recently_played_playlists(limit: int = 8) -> list[dict] | None:
     is comfortable with.
     """
     import concurrent.futures
+    if _check_rate_limited() > 0:
+        return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
     try:
         sp = _sp()
         res = sp.current_user_recently_played(limit=50)
@@ -364,7 +487,9 @@ def get_recently_played_playlists(limit: int = 8) -> list[dict] | None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(_fetch, ordered_uris))
         return results
-    except Exception:
+    except Exception as e:
+        if _maybe_trip_breaker(e):
+            return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
         return None
 
 
@@ -388,6 +513,16 @@ def _spotify_error_to_dict(e: Exception) -> dict:
 
 
 def run_spotify_tool(name: str, inp: dict):
+    # Check the circuit breaker before touching _sp() at all. Public getters
+    # all do this; skipping it here would fire extra calls during a 429 backoff
+    # window, which can reset the Retry-After clock on some Spotify quota
+    # implementations and leave the user locked out longer.
+    remaining = _check_rate_limited()
+    if remaining > 0:
+        import datetime as _dt
+        retry_at = _dt.datetime.fromtimestamp(_time.time() + remaining).strftime("%-I:%M %p")
+        return {"error": "rate_limited", "message": f"Spotify rate-limited — retry after {retry_at}"}
+
     sp = _sp()
     if name == "spotify_now_playing":
         return get_now_playing() or {"status": "nothing playing"}

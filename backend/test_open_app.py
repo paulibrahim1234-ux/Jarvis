@@ -15,6 +15,9 @@ from tools.desktop_apps import (
     open_uworld,
     open_anki,
     open_app,
+    _ensure_outlook_running,
+    OutlookNotRunningError,
+    NewOutlookModeError,
 )
 
 
@@ -244,6 +247,100 @@ def test_open_app_invalid_app():
     print("✓ test_open_app_invalid_app")
 
 
+# ── W2: _ensure_outlook_running tests ─────────────────────────────────────────
+
+def _make_run_result(stdout="", stderr="", returncode=0):
+    """Build a minimal subprocess.CompletedProcess-like mock."""
+    r = MagicMock()
+    r.stdout = stdout
+    r.stderr = stderr
+    r.returncode = returncode
+    return r
+
+
+def test_ensure_outlook_running_already_up():
+    """If Outlook is already running, no launch command is issued."""
+    # First call → System Events check returns "true" (already running).
+    # Second call → New Outlook probe returns a plain integer (Classic mode).
+    with patch("tools.desktop_apps.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            _make_run_result(stdout="true"),   # _is_running() check
+            _make_run_result(stdout="1"),       # New Outlook probe — integer means Classic
+        ]
+        _ensure_outlook_running()  # should not raise
+        # open -a should NOT have been called (only the two probes ran)
+        calls = [c[0][0] for c in mock_run.call_args_list]
+        assert not any("open" in (c if isinstance(c, list) else []) for c in calls if isinstance(c, list))
+    print("✓ test_ensure_outlook_running_already_up")
+
+
+def test_ensure_outlook_running_not_running_then_launches():
+    """When Outlook is not running, open -a is called and polling succeeds."""
+    call_counter = {"n": 0}
+
+    def side_effect(cmd, **kwargs):
+        call_counter["n"] += 1
+        n = call_counter["n"]
+        if n == 1:
+            # First System Events check — not running yet
+            return _make_run_result(stdout="false")
+        if n == 2:
+            # open -a "Microsoft Outlook" launch
+            return _make_run_result(stdout="")
+        if n == 3:
+            # First poll — still not up
+            return _make_run_result(stdout="false")
+        if n == 4:
+            # Second poll — now up
+            return _make_run_result(stdout="true")
+        # New Outlook probe — returns integer (Classic mode)
+        return _make_run_result(stdout="1")
+
+    with patch("tools.desktop_apps.subprocess.run", side_effect=side_effect), \
+         patch("tools.desktop_apps.time.sleep"):  # skip real sleep in tests
+        _ensure_outlook_running()  # should not raise
+
+    assert call_counter["n"] >= 4, "Expected at least 4 subprocess calls"
+    print("✓ test_ensure_outlook_running_not_running_then_launches")
+
+
+def test_ensure_outlook_running_launch_timeout():
+    """If Outlook never appears after launch, OutlookNotRunningError is raised."""
+    with patch("tools.desktop_apps.subprocess.run") as mock_run, \
+         patch("tools.desktop_apps.time.sleep"), \
+         patch("tools.desktop_apps.time.time") as mock_time:
+        # Simulate _is_running returning false every time and time expiring quickly.
+        mock_run.return_value = _make_run_result(stdout="false")
+        # time.time() returns 0, then 0 (launch), then 100 (well past the 15s deadline)
+        mock_time.side_effect = [0, 0, 100, 100]
+        try:
+            _ensure_outlook_running()
+            assert False, "Should have raised OutlookNotRunningError"
+        except OutlookNotRunningError as e:
+            assert "15 seconds" in str(e)
+    print("✓ test_ensure_outlook_running_launch_timeout")
+
+
+def test_ensure_outlook_new_outlook_detected():
+    """If New Outlook probe returns 'can't get exchange accounts', NewOutlookModeError is raised."""
+    with patch("tools.desktop_apps.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            _make_run_result(stdout="true"),  # _is_running — Outlook up
+            _make_run_result(               # New Outlook probe — Classic API broken
+                stdout="",
+                stderr="Microsoft Outlook got an error: Can't get exchange accounts.",
+                returncode=1,
+            ),
+        ]
+        try:
+            _ensure_outlook_running()
+            assert False, "Should have raised NewOutlookModeError"
+        except NewOutlookModeError as e:
+            assert "New Outlook" in str(e)
+            assert "Help menu" in str(e)
+    print("✓ test_ensure_outlook_new_outlook_detected")
+
+
 if __name__ == "__main__":
     # Run all tests
     test_functions = [
@@ -267,6 +364,11 @@ if __name__ == "__main__":
         test_open_app_uworld,
         test_open_app_anki,
         test_open_app_invalid_app,
+        # W2 new tests
+        test_ensure_outlook_running_already_up,
+        test_ensure_outlook_running_not_running_then_launches,
+        test_ensure_outlook_running_launch_timeout,
+        test_ensure_outlook_new_outlook_detected,
     ]
 
     failed = 0

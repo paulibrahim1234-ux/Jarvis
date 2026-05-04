@@ -38,8 +38,13 @@ class CreateConvRequest(BaseModel):
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     req: ChatRequest,
+    request: Request,
     model: Optional[str] = Query(None, description="Override model: 'haiku' or 'sonnet'"),
 ):
+    # CSRF guard: chat dispatches arbitrary tool calls (iMessage, calendar,
+    # AppleScript). A drive-by POST from another tab must not be able to
+    # trigger those — gate on Origin/Referer being localhost.
+    _require_local_origin(request)
     try:
         model_override = MODEL_MAP.get(model) if model else None
         reply, cid = await chat_async(
@@ -48,17 +53,14 @@ async def chat_endpoint(
             model_override=model_override,
         )
         return ChatResponse(reply=reply, conversation_id=cid)
-    except Exception:
-        # Log full traceback server-side; return a generic message client-side
-        # so we don't leak internal exception strings (DB schema names,
-        # filesystem paths, FK constraint details, etc.) to the UI.
+    except Exception as e:
+        # G3: raise HTTP 500 so the frontend's `if (!r.ok)` branch fires and
+        # routes through the real error handler.  A 200 with an apology string
+        # looks like a normal reply and hides the error from the client.
+        # Log full traceback server-side to avoid leaking internals to the UI.
         import logging, traceback
         logging.getLogger("jarvis.chat").error("chat_endpoint error: %s", traceback.format_exc())
-        cid = req.conversation_id or ""
-        return ChatResponse(
-            reply="Sorry, something went wrong on the server. Please try again.",
-            conversation_id=cid,
-        )
+        raise HTTPException(status_code=500, detail="Internal server error: " + str(e)[:200])
 
 
 @router.get("/chat/conversations")
@@ -67,7 +69,9 @@ def list_conversations_endpoint():
 
 
 @router.post("/chat/conversations")
-def create_conversation_endpoint(req: CreateConvRequest):
+def create_conversation_endpoint(req: CreateConvRequest, request: Request):
+    # CSRF guard: same rationale as POST /chat — block drive-by writes.
+    _require_local_origin(request)
     conv = memory.create_conversation(title=req.title)
     return conv
 

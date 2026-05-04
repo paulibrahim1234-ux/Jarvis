@@ -583,6 +583,15 @@ def _uw_set_tab_url(win_idx: int, tab_idx: int, url: str):
     """Navigate a specific Comet tab to url (non-blocking)."""
     import tempfile, os as _os
 
+    # Guard against AppleScript injection: this URL flows from a backend POST
+    # (trust boundary is here), so a crafted URL containing " or a newline would
+    # break out of the AppleScript string literal and run arbitrary code.
+    # Sibling _chrome_navigate validates; keep both consistent.
+    if not url.startswith(("http://", "https://")):
+        return
+    if any(c in url for c in ('"', '\r', '\n')):
+        return
+
     as_script = (
         f'tell application "{BROWSER_APP}"\n'
         f'  set URL of tab {tab_idx} of window {win_idx} to "{url}"\n'
@@ -800,12 +809,16 @@ def _uworld_scrape_history() -> dict:
         at_escaped = at.replace("\\", "\\\\").replace('"', '\\"')
         subkey_escaped = api_sub_key.replace("\\", "\\\\").replace('"', '\\"')
         config_escaped = config_params.replace("\\", "\\\\").replace('"', '\\"')
+        # endpoint is also injected into the JS string — escape backslashes and
+        # quotes like the other fields, and strip newlines that would break the
+        # single-line x.open() call and produce a JS SyntaxError at runtime.
+        endpoint_escaped = endpoint.replace("\\", "\\\\").replace('"', '\\"').replace('\n', '').replace('\r', '')
 
         js = (
             f'(function(){{'
             f'  try{{'
             f'    var x=new XMLHttpRequest();'
-            f'    x.open("GET","{endpoint}",false);'
+            f'    x.open("GET","{endpoint_escaped}",false);'
             f'    x.setRequestHeader("Authorization","Bearer {at_escaped}");'
             f'    x.setRequestHeader("api-uwsub-key","{subkey_escaped}");'
             f'    x.setRequestHeader("config-parameters","{config_escaped}");'
@@ -1029,8 +1042,25 @@ def _uworld_scrape_history() -> dict:
 
     log.info(f"[uworld] existing_test_ids size: {len(existing_test_ids)} (from {len(existing_incorrects)} incorrects + {len(scraped_test_ids_cached)} zero-wrong sessions)")
 
-    # Sort sessions by date descending (most recent first), cap at limit
-    sessions_to_scrape = sorted(api_sessions, key=lambda s: s.get("date", ""), reverse=True)[:_results_limit]
+    # Sort sessions by ACTUAL date descending (most recent first), cap at limit.
+    # ⚠️ Bug history: this used to be a string sort on `s.get("date","")`,
+    # but the date format is "Apr 29, 2026" / "Oct 9, 2025" — lexicographically
+    # "Oct..." > "Mar..." > "Apr..." (because 'O' > 'M' > 'A'), so the most
+    # recent April 2026 sessions ended up at the bottom of the sort. With a
+    # low _results_limit (e.g. .env had 25), the top of the sort was all
+    # already-scraped 2025 sessions, so 0 new details would be fetched and
+    # recent tests' wrongs never made it into the database. Parse to a real
+    # datetime first, then sort.
+    def _parse_session_date(s: dict) -> _dt.datetime:
+        raw = (s.get("date") or "").strip()
+        for fmt in ("%b %d, %Y", "%b %-d, %Y"):
+            try:
+                return _dt.datetime.strptime(raw, fmt)
+            except Exception:
+                pass
+        # Sentinel: unparseable dates go to the end (oldest position).
+        return _dt.datetime.min
+    sessions_to_scrape = sorted(api_sessions, key=_parse_session_date, reverse=True)[:_results_limit]
 
     for i, sess in enumerate(sessions_to_scrape):
         test_id = sess.get("test_id", "")

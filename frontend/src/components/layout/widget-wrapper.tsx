@@ -1,60 +1,107 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { GripVertical } from "lucide-react";
+import { useEditModeStore } from "@/lib/edit-mode-store";
+
+/** Status of the widget's last data fetch. */
+export type WidgetStatus = "fresh" | "stale" | "error";
+
+/**
+ * Convert an epoch-ms timestamp to a human-readable relative string.
+ * Used for the status-dot tooltip so the user sees "Updated 2m ago"
+ * rather than a raw timestamp.
+ */
+function relativeTime(epochMs: number): string {
+  const diffMs = Date.now() - epochMs;
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return "Updated just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `Updated ${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `Updated ${diffHr}h ago`;
+  return `Updated ${Math.floor(diffHr / 24)}d ago`;
+}
 
 /**
  * Wraps every widget on the dashboard.
  *
- * Drag behaviour: a full-width 20px strip at the top edge is the ONLY
- * draggable area (carries `.widget-drag-handle`). It is always present in
- * the DOM so react-grid-layout always has a target, but it's transparent by
- * default and shows a subtle tinted bar + grip dots on hover so users can
- * discover it without it being visually dominant.
+ * Drag behaviour: react-grid-layout is configured with
+ * `draggableHandle=".widget-drag-handle"` so ONLY elements carrying that
+ * class initiate a drag. Previously a full-width 20px z-10 strip at the top
+ * carried the class, which silently swallowed clicks on any button or tab
+ * that happened to render within those top 20 pixels.
  *
- * Widget content (CardHeader buttons, tabs, etc.) starts below this strip,
- * so all interactive elements remain fully clickable.
+ * Now the class lives exclusively on the GripVertical icon wrapper that is
+ * conditionally rendered in the CardHeader area — only while editMode is
+ * active. When editMode is off the DOM element is fully unmounted (not just
+ * hidden) so react-grid-layout finds no `.widget-drag-handle` target and
+ * treats all pointer events as normal content interactions.
  */
-export function WidgetWrapper({ children }: { children: ReactNode }) {
-  return (
-    <div className="widget-outer relative h-full w-full group">
-      {/*
-        Full-width drag strip — 20px tall, always in DOM.
-        Transparent at rest; subtle bg tint + grip dots appear on hover.
-        z-10 keeps it above widget card content so it captures pointer events
-        within those top 20px exclusively for dragging.
-      */}
-      <div
-        className="widget-drag-handle absolute top-0 left-0 right-0 z-10 flex items-center justify-center"
-        style={{ height: 20, cursor: "grab" }}
-        aria-label="Drag to move widget"
-        role="button"
-        tabIndex={-1}
-      >
-        {/* Hover-revealed tint + grip dots */}
-        <div
-          className="absolute inset-0 rounded-t-xl opacity-0 group-hover:opacity-100 transition-opacity duration-150"
-          style={{ backgroundColor: "rgba(255,255,255,0.04)" }}
-          aria-hidden
-        />
-        <div
-          className="relative flex items-center gap-[3px] opacity-0 group-hover:opacity-60 transition-opacity duration-150"
-          aria-hidden
-        >
-          {/* Three grip dots */}
-          {[0, 1, 2, 3, 4, 5].map((i) => (
-            <span
-              key={i}
-              className="block rounded-full"
-              style={{
-                width: 3,
-                height: 3,
-                backgroundColor: "var(--ink-tertiary, rgba(255,255,255,0.4))",
-              }}
-            />
-          ))}
-        </div>
-      </div>
+interface WidgetWrapperProps {
+  children: ReactNode;
+  /** Optional freshness indicator shown as a 6px colored dot in the top-left
+   *  of the wrapper. Allows at-a-glance health checking without opening the
+   *  widget. */
+  status?: WidgetStatus;
+  /** Epoch ms of last successful data load — used to compute the tooltip. */
+  lastUpdated?: number;
+}
 
-      {/* Content — overflow contained; react-resizable-handle (bottom-right)
-          is a sibling in the grid item and remains clickable. */}
+export function WidgetWrapper({ children, status, lastUpdated }: WidgetWrapperProps) {
+  // editMode is read from the lightweight module-level store; it never
+  // causes a parent re-render — only this wrapper and the topbar re-render
+  // when the toggle fires.
+  const { editMode } = useEditModeStore();
+
+  // Map status to a Tailwind background color class
+  const dotColor =
+    status === "fresh" ? "bg-green-500"
+    : status === "stale" ? "bg-yellow-500"
+    : status === "error" ? "bg-red-500"
+    : null;
+
+  const dotTitle = lastUpdated ? relativeTime(lastUpdated) : status ?? "";
+
+  return (
+    <div className="widget-outer relative h-full w-full group/widget">
+      {/*
+        Grip handle — conditionally mounted ONLY in edit mode.
+        Positioned absolute in the top-right of the card so it overlaps the
+        CardHeader without displacing existing header content (title, badges).
+        z-20 sits above the card surface but below modals/popovers (z-50).
+
+        WHY absolute top-right rather than inline in the CardHeader?
+        WidgetWrapper doesn't know each widget's internal header structure —
+        each widget owns its own CardHeader markup. Absolute positioning lets
+        us inject the affordance without modifying every widget's JSX.
+      */}
+      {editMode && (
+        <div
+          className="widget-drag-handle absolute top-2 right-2 z-20 flex items-center justify-center rounded p-0.5
+            text-foreground/30 hover:text-foreground/70 hover:bg-foreground/10 transition-colors
+            [cursor:grab] active:[cursor:grabbing]"
+          aria-label="Drag to reposition widget"
+          title="Drag to move"
+        >
+          <GripVertical className="h-4 w-4" aria-hidden />
+        </div>
+      )}
+
+      {/* Status dot — top-left corner, only when a status is provided.
+          Kept outside widget content so it composites above everything
+          without affecting the widget's own header layout. z-10 keeps it
+          below the edit-mode grip (z-20) so grips still win on overlap. */}
+      {dotColor && (
+        <span
+          className={`pointer-events-none absolute top-2 left-2 z-10 rounded-full ${dotColor}`}
+          style={{ width: 6, height: 6 }}
+          title={dotTitle}
+          aria-label={dotTitle}
+        />
+      )}
+
+      {/* Widget content — full height, overflow contained. */}
       <div className="widget-content h-full w-full overflow-hidden">
         {children}
       </div>
