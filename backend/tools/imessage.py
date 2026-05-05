@@ -304,19 +304,36 @@ def get_conversations(
                 continue
 
             # Step 3: unread count (messages after last_read, not from me)
+            # last_read_ts NULL (stored as 0 via "or 0") maps to Apple epoch
+            # (Jan 1 2001), so "m.date > 0" would match all messages ever and
+            # massively overcount unread.  When last_read is falsy, skip the
+            # timestamp filter and rely solely on the is_read flag instead.
             last_read = cr["last_read_ts"] or 0
-            unread_count = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM message m
-                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-                WHERE cmj.chat_id = ?
-                  AND m.is_from_me = 0
-                  AND m.date > ?
-                  AND m.is_read = 0
-                """,
-                (chat_id, last_read),
-            ).fetchone()[0]
+            if last_read:
+                unread_count = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM message m
+                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                    WHERE cmj.chat_id = ?
+                      AND m.is_from_me = 0
+                      AND m.date > ?
+                      AND m.is_read = 0
+                    """,
+                    (chat_id, last_read),
+                ).fetchone()[0]
+            else:
+                unread_count = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM message m
+                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                    WHERE cmj.chat_id = ?
+                      AND m.is_from_me = 0
+                      AND m.is_read = 0
+                    """,
+                    (chat_id,),
+                ).fetchone()[0]
 
             newest = msg_rows[0]
             newest_dt = _mac_ns_to_dt(newest["date"])

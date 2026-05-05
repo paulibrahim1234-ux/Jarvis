@@ -207,11 +207,16 @@ def conversation_exists(conversation_id: str) -> bool:
     """Return True if the conversation row exists — used to give a clear error
     when a client sends a stale or deleted conversation_id before we attempt
     to append a message and hit a FK constraint."""
-    with _connect() as conn:
+    # sqlite3's context manager only commits/rolls-back — it does NOT close the
+    # connection.  Use try/finally so every call path closes the file handle.
+    conn = _connect()
+    try:
         row = conn.execute(
             "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
         ).fetchone()
         return row is not None
+    finally:
+        conn.close()
 
 
 def append_message(
@@ -451,7 +456,12 @@ async def _fetch_one(client: httpx.AsyncClient, path: str) -> dict:
 
 async def dashboard_snapshot_async() -> str:
     """Concurrent fetch of widget state → 5-line summary."""
-    now_label = datetime.now().strftime("%a %b %d, %-I:%M%p")
+    # %-I and %-d are GNU libc extensions that fail on some macOS Python builds,
+    # rendering as literal "%-I"/"%-d".  Strip leading zeros manually instead.
+    _now = datetime.now()
+    _hour = _now.strftime("%I").lstrip("0") or "0"
+    _day  = str(_now.day)
+    now_label = _now.strftime(f"%a %b {_day}, {_hour}:%M%p")
     try:
         async with httpx.AsyncClient() as client:
             import asyncio
@@ -542,28 +552,65 @@ def build_system_prompt(
     dashboard: str,
     facts: list[dict],
     breadcrumbs: list[str] | None = None,
-) -> str:
-    parts = [base_prompt, "", "<dashboard>", dashboard, "</dashboard>"]
+) -> list[dict]:
+    """Build a list of Anthropic content blocks for the system= parameter.
+
+    Returns a LIST (not a string) so prompt caching can be applied:
+    - Block 1 (base_prompt): cached — stable across turns
+    - Block 2 (known_facts): cached — stable for this user session
+    - Block 3 (breadcrumbs): cached — stable within a turn
+    - Block 4 (dashboard): NOT cached — changes every turn
+
+    The caller passes this list directly as system= in messages.create().
+    """
+    # Block 1: stable base prompt — cache for 1 hour (requires extended-cache-ttl beta header)
+    blocks: list[dict] = [
+        {
+            "type": "text",
+            "text": base_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+    # Block 2: known facts — cached (stable across turns for same user)
     if facts:
-        parts.append("")
-        parts.append("<known_facts>")
-        parts.append(
+        facts_lines = [
+            "<known_facts>",
             "These are durable facts about the user from past conversations. "
-            "Use them to personalize responses. Do NOT mention them unprompted."
-        )
+            "Use them to personalize responses. Do NOT mention them unprompted.",
+        ]
         for f in facts:
-            parts.append(f"- [{f['topic']}] {f['fact']}")
-        parts.append("</known_facts>")
+            facts_lines.append(f"- [{f['topic']}] {f['fact']}")
+        facts_lines.append("</known_facts>")
+        blocks.append({
+            "type": "text",
+            "text": "\n".join(facts_lines),
+            "cache_control": {"type": "ephemeral"},
+        })
+
+    # Block 3: recent tool breadcrumbs — cached (stable within a turn)
     if breadcrumbs:
-        parts.append("")
-        parts.append("<recent_tool_calls>")
-        parts.append(
+        bc_lines = [
+            "<recent_tool_calls>",
             "These are tools you called on PREVIOUS turns of this conversation. "
             "If the user refers to something you just looked up (e.g. 'open it', "
             "'what about the next one'), you likely already have the answer in "
-            "the recent message history — don't redundantly re-call the same tool."
-        )
+            "the recent message history — don't redundantly re-call the same tool.",
+        ]
         for b in breadcrumbs:
-            parts.append(f"- {b}")
-        parts.append("</recent_tool_calls>")
-    return "\n".join(parts)
+            bc_lines.append(f"- {b}")
+        bc_lines.append("</recent_tool_calls>")
+        blocks.append({
+            "type": "text",
+            "text": "\n".join(bc_lines),
+            "cache_control": {"type": "ephemeral"},
+        })
+
+    # Block 4: dashboard snapshot — NOT cached (changes every turn)
+    blocks.append({
+        "type": "text",
+        "text": f"<dashboard>\n{dashboard}\n</dashboard>",
+        # No cache_control — this block changes every turn
+    })
+
+    return blocks

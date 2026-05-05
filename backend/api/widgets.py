@@ -779,7 +779,8 @@ def anki_build_index_start(request: Request):
             )
             # Skip cards already in the partial index.
             card_ids = [i for i in card_ids_all if i not in already_indexed_card_ids]
-            _ANKI_INDEX_BUILD_STATE["total"] = len(card_ids)
+            with _ANKI_BUILD_LOCK:
+                _ANKI_INDEX_BUILD_STATE["total"] = len(card_ids)
 
             # 2. Map cards → notes (one batch call, returns parallel list).
             note_ids_parallel = _retry("cardsToNotes", cards=card_ids)
@@ -789,7 +790,8 @@ def anki_build_index_start(request: Request):
                 if nid not in note_to_first_card:
                     note_to_first_card[nid] = cid
             unique_note_ids = list(note_to_first_card.keys())
-            _ANKI_INDEX_BUILD_STATE["total"] = len(unique_note_ids)
+            with _ANKI_BUILD_LOCK:
+                _ANKI_INDEX_BUILD_STATE["total"] = len(unique_note_ids)
 
             CHUNK = 100
             for i in range(0, len(unique_note_ids), CHUNK):
@@ -821,20 +823,25 @@ def anki_build_index_start(request: Request):
                         "front": front[:120],
                         "tag": primary_tag,
                     })
-                _ANKI_INDEX_BUILD_STATE["progress"] = min(i + CHUNK, len(unique_note_ids))
+                # Guard the progress write so the status endpoint reads a
+                # consistent (progress, total) pair rather than a torn update.
+                with _ANKI_BUILD_LOCK:
+                    _ANKI_INDEX_BUILD_STATE["progress"] = min(i + CHUNK, len(unique_note_ids))
                 # Persist every 10 chunks so a crash doesn't lose work.
                 if (i // CHUNK) % 10 == 9:
                     _persist()
                 _time.sleep(0.1)  # be gentle to Anki
             _persist()
         except Exception as e:
-            _ANKI_INDEX_BUILD_STATE["error"] = str(e)
+            with _ANKI_BUILD_LOCK:
+                _ANKI_INDEX_BUILD_STATE["error"] = str(e)
             try:
                 _persist()  # keep what we have so far
             except Exception:
                 pass
         finally:
-            _ANKI_INDEX_BUILD_STATE["running"] = False
+            with _ANKI_BUILD_LOCK:
+                _ANKI_INDEX_BUILD_STATE["running"] = False
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started"}
@@ -842,11 +849,14 @@ def anki_build_index_start(request: Request):
 
 @router.get("/widgets/anki/build-index/status")
 def anki_build_index_status():
-    pct = 0
-    if _ANKI_INDEX_BUILD_STATE["total"]:
-        pct = round(100 * _ANKI_INDEX_BUILD_STATE["progress"] / _ANKI_INDEX_BUILD_STATE["total"])
+    # Snapshot under lock so the status read is consistent with the background
+    # thread writes — without the lock, reading progress/total as two separate
+    # dict accesses can race and produce a stale or impossible percentage.
+    with _ANKI_BUILD_LOCK:
+        snap = dict(_ANKI_INDEX_BUILD_STATE)
+    pct = round(100 * snap["progress"] / snap["total"]) if snap["total"] else 0
     index = _load_anki_qid_index()
-    return {**_ANKI_INDEX_BUILD_STATE, "percent": pct, "index_size": len(index)}
+    return {**snap, "percent": pct, "index_size": len(index)}
 
 
 class AnkiUnsuspendBody(BaseModel):
@@ -1269,7 +1279,9 @@ def _spotify_playlists_cached():
     def _compute():
         from tools.spotify import get_playlists
         return get_playlists(limit=20)
-    return _cached("spotify_playlists", 60, _compute)
+    # 300s (5 min) — playlists change rarely; keeping them at 60s contributed
+    # unnecessary per-minute requests to the already rate-limited Spotify quota.
+    return _cached("spotify_playlists", 300, _compute)
 
 
 def _spotify_recents_cached():
@@ -1335,17 +1347,21 @@ def spotify_widget(request: Request):
         }
     elif web_ok:
         # Spotify desktop app not running → try Web API now-playing.
-        try:
-            from tools.spotify import get_now_playing
-            wp = get_now_playing()
-            if wp:
-                track_block = {
-                    **wp,
-                    "name": wp.get("title"),
-                }
-                album_art = wp.get("album_art")
-        except Exception:
-            pass
+        # Cached at 5s so rapid-fire polls (HMR refresh, multi-tab) don't fan
+        # out a fresh get_now_playing() call on every tick.
+        def _compute_now_web():
+            try:
+                from tools.spotify import get_now_playing
+                wp = get_now_playing()
+                if wp:
+                    return {**wp, "name": wp.get("title")}
+            except Exception:
+                pass
+            return None
+        cached_now = _cached("spotify_now_web", 5, _compute_now_web)
+        if cached_now:
+            track_block = cached_now
+            album_art = cached_now.get("album_art")
 
     # Cached helpers may return RATE_LIMITED_SENTINEL when Spotify has 429'd
     # us; FastAPI's JSON serializer can't encode a bare `object()`. Collapse
@@ -1562,7 +1578,9 @@ def _format_briefing_time(iso: str) -> str:
             dt = datetime.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S")
         except Exception:
             return ""
-    return dt.strftime("%-I:%M %p")
+    # %-I is a GNU libc extension that renders as a literal on some macOS builds.
+    hour = dt.strftime("%I").lstrip("0") or "0"
+    return f"{hour}:{dt.strftime('%M %p')}"
 
 
 # Folders that are noise in a morning briefing — Inbox is rolled into

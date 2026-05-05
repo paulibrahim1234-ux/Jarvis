@@ -12,12 +12,6 @@ import "react-resizable/css/styles.css";
 
 const LAYOUT_KEY = "jarvis-layout-v4";
 const HIDDEN_KEY = "jarvis-hidden-widgets-v2";
-const DEEP_FOCUS_KEY = "jarvis-deep-focus-v1";
-const DEEP_FOCUS_EVENT = "jarvis-deep-focus-change";
-
-// In Deep Focus mode, only these widgets render. Sizes/positions inherited
-// from the user's saved layout — no re-layouting, just filter the list.
-const DEEP_FOCUS_KEYS = new Set(["chatbot", "briefing", "spotify"]);
 
 const WIDGET_LABELS: Record<string, string> = {
   briefing: "Morning Briefing",
@@ -67,7 +61,6 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
   const [layouts, setLayouts] = useState<ReactGridLayout.Layouts>({ lg: DEFAULT_LAYOUT });
   const [hiddenWidgets, setHiddenWidgets] = useState<Set<string>>(new Set());
   const [showPanel, setShowPanel] = useState(false);
-  const [deepFocus, setDeepFocus] = useState(false);
   const [saveConfirm, setSaveConfirm] = useState(false);
   const saveConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -128,22 +121,18 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     if (savedHidden) {
       try { setHiddenWidgets(new Set(JSON.parse(savedHidden))); } catch { /* keep default */ }
     }
-    try {
-      setDeepFocus(localStorage.getItem(DEEP_FOCUS_KEY) === "1");
-    } catch { /* ignore */ }
   }, []);
 
-  // Listen for Deep Focus toggles from the topbar so the grid re-renders
-  // immediately. Same-tab updates use a CustomEvent (the storage event only
-  // fires across tabs).
+  // Toggle body.edit-mode-active so globals.css can show resize handles via
+  // a body-scoped selector (avoids z-index battles with widget-content).
   useEffect(() => {
-    const onChange = (e: Event) => {
-      const ce = e as CustomEvent<{ enabled: boolean }>;
-      if (ce.detail) setDeepFocus(ce.detail.enabled);
-    };
-    window.addEventListener(DEEP_FOCUS_EVENT, onChange);
-    return () => window.removeEventListener(DEEP_FOCUS_EVENT, onChange);
-  }, []);
+    if (editMode) {
+      document.body.classList.add("edit-mode-active");
+    } else {
+      document.body.classList.remove("edit-mode-active");
+    }
+    return () => document.body.classList.remove("edit-mode-active");
+  }, [editMode]);
 
   useLayoutEffect(() => {
     const node = containerRef.current;
@@ -217,26 +206,53 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     saveConfirmTimerRef.current = setTimeout(() => setSaveConfirm(false), 2000);
   }, [layouts]);
 
-  // Decorate every layout item with `static: !editMode` so RGL hard-disables
-  // drag/resize at the GridItem layer when the user isn't in edit mode.
-  // See the comment block on the <Responsive layouts={decoratedLayouts} /> below.
+  // Explicit "load saved" — re-reads localStorage and replaces current layout
+  // state. Useful after Deep Focus exit or any scenario where the in-memory
+  // state drifts from what's persisted.
+  const loadSavedLayout = useCallback(() => {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    if (!raw) return;
+    try {
+      const parsed: ReactGridLayout.Layouts = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") setLayouts(parsed);
+    } catch { /* keep current */ }
+  }, []);
+
+  // Listen for Deep Focus modal close (Reviewer-B emits jarvis-deep-focus-change
+  // with enabled:false) and re-read persisted layout so in-memory state stays
+  // consistent with localStorage even if nothing triggered a mount.
+  // NOTE: this effect is intentionally placed after loadSavedLayout is declared.
+  useEffect(() => {
+    const onFocusChange = (e: Event) => {
+      const ce = e as CustomEvent<{ enabled: boolean }>;
+      if (ce.detail && !ce.detail.enabled) {
+        loadSavedLayout();
+      }
+    };
+    window.addEventListener("jarvis-deep-focus-change", onFocusChange);
+    return () => window.removeEventListener("jarvis-deep-focus-change", onFocusChange);
+  }, [loadSavedLayout]);
+
+  // Decorate every layout item:
+  //   view mode  → static: true  (hard-disables drag/resize at GridItem layer)
+  //   edit mode  → omit static   (don't set static: false — RGL v2.2.3 retains
+  //                               stale disabled:true when static is explicitly false;
+  //                               omitting it lets RGL derive from isDraggable/isResizable)
+  // The decoration is derived (not stored) so toggling never mutates saved positions.
   const decoratedLayouts = useMemo(() => {
     const result: ReactGridLayout.Layouts = {};
     for (const [bp, items] of Object.entries(layouts)) {
-      result[bp] = (items as ReactGridLayout.Layout[]).map((it) => ({
-        ...it,
-        static: !editMode,
-      }));
+      result[bp] = (items as ReactGridLayout.Layout[]).map((it) => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { static: _drop, ...rest } = it as ReactGridLayout.Layout & { static?: boolean };
+        void _drop;
+        return editMode ? rest : { ...rest, static: true };
+      });
     }
     return result;
   }, [layouts, editMode]);
 
-  // In Deep Focus mode, restrict to the 3-widget set regardless of the
-  // user's saved hidden list — the toggle is meant to be a fast, reversible
-  // override that doesn't mutate their preferences.
-  const visibleKeys = deepFocus
-    ? ALL_KEYS.filter((k) => DEEP_FOCUS_KEYS.has(k) && !hiddenWidgets.has(k))
-    : ALL_KEYS.filter((k) => !hiddenWidgets.has(k));
+  const visibleKeys = ALL_KEYS.filter((k) => !hiddenWidgets.has(k));
   const hiddenCount = hiddenWidgets.size;
   const totalCount = ALL_KEYS.length;
   const visibleCount = totalCount - hiddenCount;
@@ -324,6 +340,25 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
           )}
           {saveConfirm ? "Saved" : "Save"}
         </button>
+        <div
+          aria-hidden
+          style={{ width: 1, height: 16, backgroundColor: "var(--border-default)" }}
+        />
+        <button
+          onClick={loadSavedLayout}
+          className="flex items-center gap-1.5 px-3 h-8 transition-colors hover:text-foreground hover:bg-[var(--surface-raised)]"
+          style={{
+            fontSize: "12px",
+            fontWeight: 500,
+            color: "var(--ink-tertiary)",
+          }}
+          title="Reload layout from last save"
+        >
+          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h5M4 9a8 8 0 1 1 0 6" />
+          </svg>
+          Load
+        </button>
       </div>
 
       {/* Widget visibility panel */}
@@ -401,6 +436,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
       */}
       {width > 0 && (
         <Responsive
+          key={editMode ? "editing" : "locked"}
           className="layout"
           layouts={decoratedLayouts}
           breakpoints={{ lg: 900, md: 600, sm: 0 }}

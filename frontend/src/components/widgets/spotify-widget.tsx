@@ -193,10 +193,14 @@ export function SpotifyWidget() {
     if (!webOk && tab !== "now") setTab("now");
   }, [webOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load home data when on home tab and web api is connected
+  // Load home data when on home tab and web api is connected.
+  // Guard with `alive` so a response that arrives after a tab-switch
+  // (or unmount) cannot overwrite a newer response with stale data.
   useEffect(() => {
     if (tab === "home" && webOk) {
-      fetchSpotifyHome().then(setHomeData).catch(() => {});
+      let alive = true;
+      fetchSpotifyHome().then((d) => { if (alive) setHomeData(d); }).catch(() => {});
+      return () => { alive = false; };
     }
   }, [tab, webOk]);
 

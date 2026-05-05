@@ -187,6 +187,16 @@ export function AnkiStatsWidget() {
   // surfaced for unsuspend without restarting the backend.
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [pipelineMsg, setPipelineMsg] = useState<string | null>(null);
+  // Timer refs so we can clear them on unmount and avoid a state update on an
+  // already-unmounted component (which logs a React warning and is a leak).
+  const pipelineMsgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (pipelineMsgTimerRef.current !== null) clearTimeout(pipelineMsgTimerRef.current);
+      if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
   const handleRefreshPipeline = useCallback(async () => {
     if (pipelineRunning) return;
     setPipelineRunning(true);
@@ -229,7 +239,8 @@ export function AnkiStatsWidget() {
       setPipelineMsg(e instanceof Error ? e.message : "Refresh failed");
     } finally {
       setPipelineRunning(false);
-      setTimeout(() => setPipelineMsg(null), 4000);
+      if (pipelineMsgTimerRef.current !== null) clearTimeout(pipelineMsgTimerRef.current);
+      pipelineMsgTimerRef.current = setTimeout(() => setPipelineMsg(null), 4000);
     }
   }, [pipelineRunning, loadSuggestions]);
 
@@ -254,7 +265,8 @@ export function AnkiStatsWidget() {
       setToast(e instanceof Error ? e.message : "Unsuspend failed");
     } finally {
       setSubmitting(false);
-      setTimeout(() => setToast(null), 4000);
+      if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = setTimeout(() => setToast(null), 4000);
     }
   };
 

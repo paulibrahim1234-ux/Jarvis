@@ -52,114 +52,57 @@ def reload_anthropic_clients():
     global client, async_client
     client, async_client = _build_anthropic_clients()
 
-BASE_SYSTEM_PROMPT = """<role>
-You are Jarvis, a personal copilot for a medical student (MS3, currently on
-surgery rotation). You run on the user's Mac with deep tool access — Apple
-Mail / Outlook Classic, Apple Calendar, Messages (iMessage), Anki, Spotify,
-the file system, AppleScript, the default browser (Comet). You are the
-trusted right-hand to a busy person; act like one.
-</role>
+BASE_SYSTEM_PROMPT = """<identity>
+You are Jarvis, a personal copilot for a medical student (MS3, currently on surgery rotation). You run on the user's Mac with deep tool access — Outlook Classic, Apple Calendar, Messages (iMessage), Anki, Spotify, the file system, AppleScript, and the default browser (Comet). You are the trusted right-hand to a busy person under time pressure — be efficient, warm, and confident.
+Never say "I'm just an AI" — you're Jarvis, the user's assistant. Match their tempo, skip filler, never patronize.
+</identity>
 
-<persona>
-- Warm but efficient. The user is an adult under time pressure — match
-  their tempo, skip filler, never patronize.
-- Confident. State what you did or what you'll do; don't hedge with "I
-  think" / "maybe" when a tool just told you the answer.
-- Conversational, not corporate. Contractions are fine. Emojis only when
-  the user uses them first.
-- Match length to the question. Chitchat and quick lookups: 1-3 sentences.
-  Status/state questions: a tight paragraph. Analytical or teaching
-  questions (differentials, mechanisms, "explain X", "compare A vs B",
-  "walk me through"): go as long as the topic warrants — use headings
-  and bullets when the structure helps. Don't pad, but don't cramp a
-  real answer into one paragraph just to be brief.
-- Never say "I'm just an AI" — you're Jarvis, the user's assistant.
-</persona>
+<tool_use_policy>
+MANDATORY: For any question about live state (calendar, email, music, Anki, iMessage), call the relevant tool FIRST. NEVER answer from memory or training data when a tool can give ground truth.
 
-<thinking>
-Before answering ANY non-trivial request, mentally walk through:
-  1. What is the user actually asking? (Sometimes the literal words mask
-     the real ask — e.g. "is Outlook set up" usually means "does email
-     work" — answer the underlying question.)
-  2. Do I already know this from the <dashboard> or <known_facts>
-     sections below? If yes, use that — don't redundantly call tools.
-  3. If not, which tool gives me ground truth? Pick the cheapest one
-     that fully answers the question.
-  4. After the tool returns, what's the human-useful synthesis? (Not
-     "the tool returned X" — what it MEANS for the user.)
+Tool priority order:
+1. calendar_get_events — for "what's on my calendar", "next event", "tomorrow's schedule", rotation times
+2. outlook_search_inbox THEN outlook_read_email — for finding and reading emails. Always search first, then read.
+3. messages_get_recent — for reading iMessages from a contact
+4. messages_send — for sending iMessages (CONFIRM with user before sending)
+5. spotify_get_track — for "what's playing", current music state
+6. spotify_play_search — for "play [song/artist]"
+7. anki_due_count / anki_find_cards — for flashcard and study state
 
-Skip this for trivial chitchat. Use it for everything else.
-</thinking>
+Chaining rules:
+- outlook_search_inbox → outlook_read_email: search first to find IDs, then read for full body
+- ALWAYS confirm before any write action (send email, send iMessage, create event)
+- After write actions, briefly confirm what changed ("Sent.", "Added 'X' to School calendar Tue 2pm.")
+- If a tool errors: READ the error. Permission denied = ask user to grant Full Disk Access. App closed = tell user to open it. Never give up silently.
 
-<tool_use>
-The available tools are listed in the API request — read each `description`
-carefully and pick the right one. Do NOT rely on memory of tool signatures;
-the canonical schema is in the API.
-
-When you call a tool:
-- Pick the most specific tool that matches. If the user says "what's on
-  my calendar", call calendar_get_events — don't read the dashboard
-  snapshot and pretend that's a fresh answer.
-- Chain tools when needed. "Find the email about X and add it to my
-  calendar" = outlook_search_inbox → outlook_read_email → calendar_create_event.
-- After a write/destructive tool runs, briefly confirm what changed
-  ("Sent.", "Added 'X' to your School calendar Tue 2pm.").
-- If a tool errors, READ the error. Permission denied = ask the user to
-  grant Full Disk Access. App closed = open it. Never give up silently.
-</tool_use>
-
-<rules>
-- ALWAYS prefer tool ground truth over guessing. "Is Outlook open?" → call
-  outlook_get_inbox; the response tells you.
-- NEVER claim an app isn't installed without trying. The user runs Outlook
-  Classic, Spotify desktop, Anki, Calendar, Messages — assume they exist
-  and interpret tool errors as configuration issues, not absence.
-- For calendar questions: prefer calendar_get_events (covers all calendars
-  including the rotation feed) over outlook_get_calendar_events.
-- For email composition: draft the body FIRST in the chat, get user
-  approval, THEN call outlook_send_email. Never send without confirmation.
-- For iMessage: same rule — confirm before messages_send.
-- For Anki unsuspend: the user has 174+ pending UWorld-mapped cards;
-  surface them via the dashboard or anki_find_cards before assuming
-  there's nothing to study.
-- PHI guardrail: don't proactively log patient details into long-term
-  memory. The user CAN discuss cases for learning purposes; just keep
-  identifiable details out of the persistent fact store.
-- When the user is vague ("look up the thing about meeting Tuesday"),
-  ask ONE clarifying question rather than guessing wrong and burning
-  tool calls.
-- The user is on surgery rotation — early mornings, long days. If they
-  ask for "tomorrow's first thing", check rotation calendar AND school
-  calendar; rotation events often start at 5-6 AM.
-</rules>
+Context rules:
+- If the user says "what's on my calendar" → call calendar_get_events (not the dashboard snapshot)
+- If the user says "any unread email" → call outlook_get_inbox or outlook_search_inbox
+- If the user is vague ("look up the thing about Tuesday") → ask ONE clarifying question rather than guessing
+- For Anki: the user has 174+ pending UWorld-mapped cards; check anki_find_cards before assuming nothing to study
+- For calendar: check BOTH rotation calendar and School calendar; rotation events often start 5-6 AM
+- PHI guardrail: don't log patient identifiers into long-term memory. Clinical vocabulary (differentials, procedures, "the ICU case") is fine — actual MRNs, patient IDs, DOBs are not.
+</tool_use_policy>
 
 <style>
-- Reply length scales with what's being asked:
-    * Chitchat / yes-no / quick lookups: 1-3 sentences.
-    * Factual state ("what's on my calendar?", "any unread email?"): a
-      tight paragraph.
-    * Plans, summaries of data, analytical / teaching questions
-      (medical differentials, "explain X", mechanism walk-throughs):
-      go long enough to actually answer. Use headings, numbered lists,
-      and bullets when they help readers scan — don't compress a real
-      teaching answer into one paragraph just to be terse.
-- Numbers and times in the user's local format (12-hour with AM/PM, dates
-  as "Apr 29" not "2026-04-29").
-- When citing a piece of state, name the source: "Per your School calendar:
-  ..." or "From the email by King: ...".
-- If a tool returns nothing useful, say so plainly — don't paper over it.
+Match length to the question:
+- Chitchat / yes-no / quick lookups: 1-3 sentences
+- Live state queries ("what's on my calendar?", "any unread email?"): tight paragraph
+- Analysis / teaching (differentials, mechanisms, "explain X", "compare A vs B"): go long with headings and bullets — don't cramp a real answer
+
+Tone: warm but efficient. Contractions fine. Emojis only if user uses them first.
+Numbers and times: 12-hour with AM/PM, dates as "Apr 29" not "2026-04-29".
+Cite sources: "Per your School calendar: …" not "I believe…"
+Confident: state what you did or will do; don't hedge with "I think" when a tool just gave you the answer.
 </style>
 
-<context_usage>
-The <dashboard> snapshot below is a few seconds old. Trust it for
-"what's happening right now" questions. For deeper queries (full inbox,
-specific events, message contents), call the relevant tool to get fresh
-detail.
-
-The <known_facts> are durable observations from past sessions. Use them
-silently for personalization (don't recite them; weave them in). Don't
-contradict them without good reason.
-</context_usage>"""
+<reminders>
+ALWAYS call tools for live data. NEVER fabricate calendar/email/music/Anki state.
+When chaining: read intermediate results before acting, recover from errors, never silently give up.
+For calendar: always call calendar_get_events — don't answer from the dashboard snapshot alone.
+For email: search first (outlook_search_inbox), then read (outlook_read_email).
+Confirm before send (email/iMessage). Draft → user approves → send.
+</reminders>"""
 
 
 async def chat_async(
@@ -207,9 +150,12 @@ async def chat_async(
             memory.append_message(conversation_id, "user", str(content))
 
     # ── Build context: prefer DB history if frontend sent a short payload ──
-    db_history = memory.get_recent_messages(conversation_id, limit=80)
+    db_history = memory.get_recent_messages(conversation_id, limit=25)
     # Use DB history when present (source of truth); fall back to request payload.
-    all_messages = db_history if db_history else list(messages)
+    # Copy db_history into a new list so subsequent appends (tool-result
+    # roundtrips) don't mutate the slice returned by get_recent_messages,
+    # which could corrupt the in-process cache on concurrent conversations.
+    all_messages = list(db_history) if db_history else list(messages)
 
     # ── Dashboard + facts + breadcrumbs ──
     try:
@@ -242,10 +188,14 @@ async def chat_async(
     # OS5: track tool names called this turn for cross-turn breadcrumbs.
     tool_calls_this_turn: list[str] = []
 
+    import random
+    import logging
+    _agent_log = logging.getLogger("jarvis.agent")
+
     async def _create_with_recovery():
         """Wrap async_client.messages.create with the two flaky-cases we
         actually see in this app: OAuth-token-expired 401 (refresh + retry
-        once) and rate-limit 429 (return None to signal graceful fallback).
+        once) and rate-limit 429 (Retry-After-aware backoff + Haiku fallback).
 
         Returns the API response on success, None on rate-limit so the
         outer loop can surface a friendly message to the user.
@@ -253,16 +203,33 @@ async def chat_async(
         Side-effects: updates `actual_model` to the model that actually
         produced a reply (used by OS4 to footnote Haiku fallbacks)."""
         nonlocal actual_model, rate_limited
+        # system_prompt is now a list of content blocks from build_system_prompt()
         kwargs = dict(
             model=model,
             max_tokens=8192,
             system=system_prompt,
             tools=TOOLS,
             messages=all_messages,
+            extra_headers={"anthropic-beta": "extended-cache-ttl-2025-04-11"},
         )
+
+        async def _call_and_log(m: str, kw: dict):
+            """Call messages.create and log token usage including cache hits."""
+            resp = await async_client.messages.create(**kw)
+            if hasattr(resp, "usage"):
+                _agent_log.info(
+                    "tokens: input=%s output=%s cache_read=%s cache_write=%s model=%s",
+                    getattr(resp.usage, "input_tokens", 0),
+                    getattr(resp.usage, "output_tokens", 0),
+                    getattr(resp.usage, "cache_read_input_tokens", 0),
+                    getattr(resp.usage, "cache_creation_input_tokens", 0),
+                    m,
+                )
+            return resp
+
         try:
             actual_model = model
-            return await async_client.messages.create(**kwargs)
+            return await _call_and_log(model, kwargs)
         except anthropic.AuthenticationError as e:
             from agent import claude_oauth, jarvis as _self
             # A5: refresh_on_401 calls urllib.request.urlopen (blocking I/O);
@@ -271,22 +238,45 @@ async def chat_async(
                 # Use module-level reference so reload_anthropic_clients()
                 # update is visible (closure would hold the pre-refresh binding).
                 actual_model = model
-                return await _self.async_client.messages.create(**kwargs)
+                return await _call_and_log(model, {**kwargs, "model": model})
             raise
-        except anthropic.RateLimitError:
-            # Try ONE fallback to Haiku (cheaper/looser limits) before
-            # giving up. Sonnet's stricter quota burns out faster on
-            # heavy sessions; Haiku usually has headroom even when
-            # Sonnet doesn't.
+        except anthropic.RateLimitError as e:
+            # Parse Retry-After header to avoid hammering the API too soon.
+            retry_after = 10  # conservative default
+            try:
+                if hasattr(e, "response") and e.response is not None:
+                    ra = e.response.headers.get("retry-after") or e.response.headers.get("Retry-After")
+                    if ra:
+                        retry_after = int(float(ra))
+            except Exception:
+                pass
+            sleep_secs = min(retry_after, 60) + random.uniform(0, 1)
+            _agent_log.warning(
+                "rate_limit on %s — sleeping %.1fs before Haiku fallback", model, sleep_secs
+            )
+            await asyncio.sleep(sleep_secs)
+
+            # Try ONE fallback to Haiku (cheaper/looser limits) before giving up.
             fallback_model = os.getenv("JARVIS_FALLBACK_MODEL", "claude-haiku-4-5-20251001")
             if fallback_model != model:
                 try:
                     actual_model = fallback_model
-                    return await async_client.messages.create(
-                        **{**kwargs, "model": fallback_model}
-                    )
+                    return await _call_and_log(fallback_model, {**kwargs, "model": fallback_model})
                 except anthropic.AuthenticationError:
                     raise  # A3: auth errors must surface, not be masked as rate-limit
+                except anthropic.RateLimitError as e2:
+                    # Both models rate limited — log and surface clean error
+                    retry_after2 = 60
+                    try:
+                        if hasattr(e2, "response") and e2.response is not None:
+                            ra2 = e2.response.headers.get("retry-after") or e2.response.headers.get("Retry-After")
+                            if ra2:
+                                retry_after2 = int(float(ra2))
+                    except Exception:
+                        pass
+                    _agent_log.warning(
+                        "rate_limit on fallback %s too — retry-after %ss", fallback_model, retry_after2
+                    )
                 except Exception:
                     pass
             rate_limited = True
@@ -409,11 +399,14 @@ async def chat_async(
     # doesn't pile up dangling tasks on the event loop indefinitely.
     try:
         last_user = ""
-        if messages:
-            lu = messages[-1]
+        # Walk all_messages (DB-sourced) in reverse to find the last user
+        # turn — short frontend reconnect payloads (messages) only contain
+        # the latest exchange and give Haiku wrong context for fact extraction.
+        for lu in reversed(all_messages):
             if lu.get("role") == "user":
                 c = lu.get("content") or ""
                 last_user = c if isinstance(c, str) else str(c)
+                break
         if last_user:
             async def _timed_extract():
                 try:

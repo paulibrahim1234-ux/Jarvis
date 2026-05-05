@@ -281,8 +281,12 @@ def _post_refresh(refresh_token: str) -> dict:
 def needs_refresh(oauth: Optional[dict] = None) -> bool:
     """True when access token is missing, expired, or expiring soon."""
     o = oauth or _current_oauth()
-    if not o or not o.get("accessToken") or not o.get("refreshToken"):
-        return False  # nothing to do — caller should re-auth manually
+    if not o or not o.get("refreshToken"):
+        return False  # no refresh token — caller must re-auth manually
+    # Access token absent but refresh token present: a refresh *will* succeed,
+    # so returning False here would silently skip it and break all API calls.
+    if not o.get("accessToken"):
+        return True
     expires_at_ms = int(o.get("expiresAt") or 0)
     if expires_at_ms == 0:
         return True

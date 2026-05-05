@@ -66,32 +66,51 @@ def _auth():
 
 
 def _sp():
-    """Build a spotipy client configured to fail fast on rate-limits / network issues.
+    """Return the module-level Spotify client singleton, creating it on first call.
 
-    Defaults are: retries=3, status_retries=3, status_forcelist=429+5xx, with
-    backoff. When Spotify rate-limits the app for hours (Retry-After 33000s),
-    spotipy's default retry logic causes our /widgets/spotify endpoint to
-    hang for the full retry cycle — often >30s — and FastAPI workers pile
-    up. Set retries=0 + a tight per-request timeout so the widget endpoint
-    can return promptly with whatever info is available (cached or empty).
+    Using a singleton avoids constructing a new requests.Session on every widget
+    tick (the old fresh-per-call pattern), which was the primary source of the
+    4-burst pattern that tripped Spotify's rate limiter. The singleton is kept
+    until a 401 forces a rebuild via _reset_sp_instance().
+
+    The _SP_INSTANCE_LOCK serializes construction only on the cold path — once
+    the instance exists, reads are lock-free (GIL protects the pointer read).
     """
-    import spotipy
-    auth = _auth()
-    # Hold the refresh lock while validating the cached token so that at most
-    # one thread performs the network round-trip to Spotify's token endpoint.
-    # Spotify rotates refresh tokens on use — if several threads call
-    # refresh_access_token() concurrently (which SpotifyOAuth does internally
-    # when it finds an expired token), only the first save is valid; the rest
-    # cache a stale refresh token that yields 401s on the next widget cycle.
-    with _TOKEN_REFRESH_LOCK:
-        auth.validate_token(auth.cache_handler.get_cached_token())
-    return spotipy.Spotify(
-        auth_manager=auth,
-        retries=0,             # don't auto-retry — we'd rather see the failure quick
-        status_retries=0,
-        backoff_factor=0,
-        requests_timeout=8,    # per-call HTTP timeout in seconds
-    )
+    global _SP_INSTANCE
+    with _SP_INSTANCE_LOCK:
+        if _SP_INSTANCE is None:
+            import spotipy
+            auth = _auth()
+            # Hold the refresh lock while validating the cached token so that at most
+            # one thread performs the network round-trip to Spotify's token endpoint.
+            # Spotify rotates refresh tokens on use — if several threads call
+            # refresh_access_token() concurrently (which SpotifyOAuth does internally
+            # when it finds an expired token), only the first save is valid; the rest
+            # cache a stale refresh token that yields 401s on the next widget cycle.
+            with _TOKEN_REFRESH_LOCK:
+                auth.validate_token(auth.cache_handler.get_cached_token())
+            _SP_INSTANCE = spotipy.Spotify(
+                auth_manager=auth,
+                retries=0,             # don't auto-retry — we'd rather see the failure quick
+                status_retries=0,
+                backoff_factor=0,
+                requests_timeout=8,    # per-call HTTP timeout in seconds
+            )
+        return _SP_INSTANCE
+
+
+def _reset_sp_instance() -> None:
+    """Force rebuild of the Spotify client singleton on the next _sp() call.
+
+    Called from any 401 catch path — a 401 means the auth_manager's token
+    has become invalid in a way that requires re-creating the client (e.g.
+    refresh token rotation issued a new token that the old session doesn't
+    know about). Resetting here causes _sp() to redo validate_token +
+    construct a fresh Spotify object with the new token on the next call.
+    """
+    global _SP_INSTANCE
+    with _SP_INSTANCE_LOCK:
+        _SP_INSTANCE = None
 
 
 # ── Rate-limit circuit breaker ────────────────────────────────────────────────
@@ -120,6 +139,17 @@ _RATE_LIMIT_LOCK = _threading.Lock()
 # tokens — first write wins, the others get invalidated refresh tokens and
 # produce 401s on the very next cycle.
 _TOKEN_REFRESH_LOCK = _threading.Lock()
+
+# ── Singleton Spotify client ──────────────────────────────────────────────────
+# Constructing a fresh spotipy.Spotify on every _sp() call means every widget
+# tick recreates the underlying requests.Session, which (a) does not reuse
+# HTTP keep-alive connections and (b) re-runs validate_token under
+# _TOKEN_REFRESH_LOCK on every single call — serializing all concurrent widget
+# requests through a single gate. A module-level singleton reuses the session
+# and only rebuilds on 401 (via _reset_sp_instance()).
+_SP_INSTANCE: "spotipy.Spotify | None" = None
+_SP_INSTANCE_LOCK = _threading.Lock()
+
 _RATE_LIMIT_UNTIL: float = 0.0          # epoch seconds; 0 = not limited
 _RATE_LIMIT_LAST_REASON: str = ""       # human-readable last reason, for logs/UI
 
@@ -161,10 +191,22 @@ def _maybe_trip_breaker(exc: Exception) -> bool:
     msg = str(exc)
     if "429" not in msg and "rate/request limit" not in msg.lower() and "Max Retries" not in msg:
         return False
-    # Try to parse the seconds out of the message.
     import re as _re
-    m = _re.search(r"after:\s*(\d+)", msg)
-    retry_after = float(m.group(1)) if m else 600.0
+    # Prefer Retry-After from the exception headers (spotipy exposes these on
+    # SpotifyException as e.headers when retries=0 bypasses the retry machinery).
+    # Fall back to parsing the seconds from the exception message string.
+    retry_after = 600.0
+    try:
+        headers = getattr(exc, "headers", None) or {}
+        ra = headers.get("Retry-After") or headers.get("retry-after")
+        if ra:
+            retry_after = float(ra)
+    except Exception:
+        pass
+    if retry_after == 600.0:
+        m = _re.search(r"after:\s*(\d+)", msg)
+        if m:
+            retry_after = float(m.group(1))
     _record_rate_limit(retry_after, reason=msg[:200])
     return True
 
@@ -428,7 +470,6 @@ def get_recently_played_playlists(limit: int = 8) -> list[dict] | None:
     cap concurrency so we don't fan out beyond what the FastAPI threadpool
     is comfortable with.
     """
-    import concurrent.futures
     if _check_rate_limited() > 0:
         return RATE_LIMITED_SENTINEL  # type: ignore[return-value]
     try:
@@ -483,9 +524,14 @@ def get_recently_played_playlists(limit: int = 8) -> list[dict] | None:
                     "_error": type(e).__name__,
                 }
 
-        # Parallel fetch — 4 workers, ordered by encounter order.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            results = list(pool.map(_fetch, ordered_uris))
+        # Sequential fetch with 150ms stagger — avoids the 4-simultaneous-request
+        # burst that triggers Spotify's per-Client-ID rate limiter. The playlist
+        # cover art fetches are already behind a 120s cache so this path runs
+        # infrequently; the latency cost (~600ms for 4 playlists) is acceptable.
+        results = []
+        for uri in ordered_uris:
+            results.append(_fetch(uri))
+            _time.sleep(0.15)
         return results
     except Exception as e:
         if _maybe_trip_breaker(e):
@@ -508,6 +554,7 @@ def _spotify_error_to_dict(e: Exception) -> dict:
     if "404" in msg or "Resource not found" in msg:
         return {"error": "not_found", "message": "Spotify can't access this playlist (likely a Spotify editorial playlist locked to premium). Click Edit on the Moods tab to swap in one of your own playlists."}
     if "Token expired" in msg or "401" in msg:
+        _reset_sp_instance()  # force singleton rebuild so next call gets a fresh auth
         return {"error": "auth", "message": "Spotify token expired — reconnect via /setup."}
     return {"error": "spotify_error", "message": msg[:200]}
 
@@ -535,11 +582,15 @@ def run_spotify_tool(name: str, inp: dict):
             sp.start_playback()
             return {"action": "playing"}
         except Exception as e:
+            if "401" in str(e) or "Token expired" in str(e):
+                _reset_sp_instance()
             return _spotify_error_to_dict(e)
     if name == "spotify_skip":
         try:
             sp.next_track()
             return {"action": "skipped"}
         except Exception as e:
+            if "401" in str(e) or "Token expired" in str(e):
+                _reset_sp_instance()
             return _spotify_error_to_dict(e)
     raise ValueError(f"Unknown spotify tool: {name}")

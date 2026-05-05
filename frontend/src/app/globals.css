@@ -541,6 +541,33 @@ body.density-compact {
   opacity: 0.9 !important;
 }
 
+/* ── Edit-mode resize handle overrides ────────────────────────────────────
+ * When body.edit-mode-active is set, the SE handle is ALWAYS visible and
+ * lifted above .widget-content (which has overflow-hidden and z-index: auto)
+ * so it is both visible and pointer-event-reachable.
+ * z-index: 30 matches the drag-grip z-20 + 10 to stay on top of card chrome.
+ * The ::after chevron uses --brand so it reads as an intentional affordance.
+ * ────────────────────────────────────────────────────────────────────────── */
+body.edit-mode-active .react-grid-item > .react-resizable-handle {
+  opacity: 1 !important;
+  z-index: 30 !important;
+  pointer-events: auto !important;
+}
+
+body.edit-mode-active .react-grid-item > .react-resizable-handle-se::after {
+  content: "" !important;
+  position: absolute !important;
+  right: 4px !important;
+  bottom: 4px !important;
+  width: 8px !important;
+  height: 8px !important;
+  border-right: 2px solid var(--brand) !important;
+  border-bottom: 2px solid var(--brand) !important;
+  border-bottom-right-radius: 2px !important;
+  background: none !important;
+  background-image: none !important;
+}
+
 .react-resizable-handle.react-resizable-handle-se::after {
   content: "" !important;
   position: absolute !important;

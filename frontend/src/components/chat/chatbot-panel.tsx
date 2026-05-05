@@ -29,7 +29,12 @@ const WELCOME_MESSAGE: Message = {
 };
 
 const ACTIVE_CONV_KEY = "jarvis-active-conversation-v2";
-const NARROW_BREAKPOINT = 300;
+// Narrow = the side-by-side flex layout (sidebar + chat) doesn't fit. We
+// drop from 300px to 220px because users often resize the chatbot widget
+// down via the new RGL resize handle, and we want the side-by-side layout
+// to stay viable for as long as possible. Below 220px we render the
+// sidebar as an absolute overlay (see showSidebarAsOverlay below).
+const NARROW_BREAKPOINT = 220;
 
 interface ChatbotPanelProps {
   embedded?: boolean;
@@ -54,16 +59,19 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   const loadedRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  // ── Responsive: hide sidebar when narrow ──
+  // ── Responsive observer ──
+  // We track `isNarrow` so we can switch the sidebar to absolute-overlay
+  // mode when the panel is too cramped for a side-by-side layout. We
+  // INTENTIONALLY do NOT auto-close the sidebar here — the user's explicit
+  // toggle (Menu button) is the source of truth. Auto-closing would
+  // override that intent when widgets get resized down.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const obs = new ResizeObserver((entries) => {
       for (const e of entries) {
         const w = e.contentRect.width;
-        const narrow = w < NARROW_BREAKPOINT;
-        setIsNarrow(narrow);
-        if (narrow) setSidebarOpen(false);
+        setIsNarrow(w < NARROW_BREAKPOINT);
       }
     });
     obs.observe(el);
@@ -260,19 +268,34 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
     }
   }
 
-  const showSidebar = sidebarOpen && !isNarrow;
+  // The user's explicit toggle drives visibility. When the panel is too
+  // narrow for a side-by-side layout, the sidebar takes over via absolute
+  // positioning (see overlay vs flow classes below) so the user's intent
+  // is honored regardless of the resized widget width.
+  const showSidebar = sidebarOpen;
+  const showSidebarAsOverlay = sidebarOpen && isNarrow;
 
   return (
     <div
       ref={containerRef}
-      className={`flex h-full ${embedded ? "rounded-xl border border-foreground/10 bg-card" : ""}`}
+      className={`relative flex h-full ${embedded ? "rounded-xl border border-foreground/10 bg-card" : ""}`}
       style={!embedded ? { background: "var(--surface-0)" } : undefined}
     >
-      {/* ── Sidebar ── */}
+      {/* ── Sidebar ──
+          When the panel is narrow, render the sidebar as an absolute overlay
+          so it doesn't squeeze the chat area into uselessness. When wide,
+          fall back to the flex side-by-side layout. */}
       {showSidebar && (
         <div
-          className="flex w-40 shrink-0 flex-col border-r"
-          style={{ borderColor: "var(--border-subtle)" }}
+          className={
+            showSidebarAsOverlay
+              ? "absolute left-0 top-0 bottom-0 w-40 z-10 flex flex-col border-r shadow-lg bg-card"
+              : "flex w-40 shrink-0 flex-col border-r"
+          }
+          style={{
+            borderColor: "var(--border-subtle)",
+            ...(showSidebarAsOverlay ? { background: "var(--card)" } : {}),
+          }}
         >
           <div className="flex h-10 items-center justify-between px-3">
             <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground/70">

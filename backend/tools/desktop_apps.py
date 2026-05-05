@@ -52,8 +52,11 @@ DESKTOP_TOOLS = [
     {
         "name": "outlook_get_inbox",
         "description": (
-            "Get recent emails from Microsoft Outlook desktop app. "
-            "No Azure/OAuth needed — reads directly from the open app."
+            "Use this when the user asks to 'check email', 'what's in my inbox', 'any new emails', "
+            "or when you need a list of recent messages to browse. Returns the most recent emails "
+            "with subject, sender, date, and body preview. No Azure/OAuth needed — reads directly "
+            "from the open Outlook Classic app. For searching by keyword or topic, use "
+            "outlook_search_inbox instead. Use limit to control how many emails to return (default 10)."
         ),
         "input_schema": {
             "type": "object",
@@ -97,13 +100,13 @@ DESKTOP_TOOLS = [
     {
         "name": "outlook_search_inbox",
         "description": (
-            "Search Outlook Classic inbox for messages. "
-            "When natural_query is provided, Claude Haiku ranks candidates semantically — "
-            "use this for fuzzy intent searches like 'email about residency interview'. "
-            "The literal `query` is still used for AppleScript pre-filtering; pass an empty "
-            "string or broad term if you want Haiku to do all the ranking. "
-            "Returns lightweight metadata (id, subject, sender, time, body_preview). "
-            "Pair with outlook_read_email to fetch the full body once you've narrowed it."
+            "Use this when the user wants to find an email about a topic, from a sender, or with "
+            "a keyword — e.g. 'find the email about VSLO', 'any email from Dr. Smith', 'search for "
+            "residency application', 'Lehigh Valley emails'. Returns lightweight metadata (id, subject, "
+            "sender, date, body_preview). After finding candidates, call outlook_read_email with the "
+            "message_id to get the full body. Set natural_query for fuzzy/semantic searches like "
+            "'email about interview scheduling'. The literal query param pre-filters by subject/sender; "
+            "pass empty string if you want Haiku to do all the semantic ranking."
         ),
         "input_schema": {
             "type": "object",
@@ -135,10 +138,11 @@ DESKTOP_TOOLS = [
     {
         "name": "outlook_read_email",
         "description": (
-            "Read the full PLAIN-TEXT BODY of one Outlook Classic email. "
-            "Use this when subject/sender metadata isn't enough — e.g. to find a "
-            "time, address, or instruction inside the email body. Provide either "
-            "message_id (preferred, exact) or subject_query (newest match wins)."
+            "Use this AFTER outlook_search_inbox to read the full plain-text body of a specific "
+            "Outlook Classic email. Required when you need the actual content — time, address, "
+            "instructions, attachment info — not just the subject. Prefer message_id (from search "
+            "results) for exact lookup; use subject_query as fallback when you only have a subject "
+            "substring. Returns the complete email body text."
         ),
         "input_schema": {
             "type": "object",
@@ -152,8 +156,11 @@ DESKTOP_TOOLS = [
     {
         "name": "calendar_create_event",
         "description": (
-            "Create a new event in Apple Calendar. Use after extracting a date/time "
-            "from an email body (outlook_read_email) or chat. Calendar must already exist."
+            "Use this to add a new event to Apple Calendar AFTER confirming the details with the "
+            "user. Requires title and start_iso (ISO 8601 format, e.g. '2026-04-27T07:30:00'). "
+            "Default calendar is 'School' — specify calendar_name if user wants it elsewhere. "
+            "Always confirm the event details (title, time, calendar) with the user before calling. "
+            "Typically called after extracting a date/time from outlook_read_email."
         ),
         "input_schema": {
             "type": "object",
@@ -171,7 +178,12 @@ DESKTOP_TOOLS = [
     # ── Spotify ──
     {
         "name": "spotify_get_track",
-        "description": "Get the currently playing Spotify track, artist, album, and playback state.",
+        "description": (
+            "Use this when the user asks what's currently playing, 'what song is this', "
+            "'who is this artist', 'is something playing', or anything about current Spotify state. "
+            "Returns track name, artist, album, playback state (playing/paused), and current position. "
+            "Call this before spotify_play_search or spotify_play_pause to check current state first."
+        ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -214,12 +226,12 @@ DESKTOP_TOOLS = [
     {
         "name": "calendar_get_events",
         "description": (
-            "PRIMARY calendar tool. Use this for any general calendar question — "
-            "'what's on my calendar', 'what's my next event', 'tomorrow's first thing', "
-            "'do I have anything this weekend'. Returns upcoming events from ALL of "
-            "the user's Apple Calendar calendars including their School calendar, "
-            "the one45 'Subscribed Calendar' rotation feed, and any Outlook events "
-            "that sync into Apple Calendar. Prefer this over outlook_get_calendar_events."
+            "Use this when the user asks about their schedule, upcoming events, 'what's on my "
+            "calendar', 'what's my next event', 'do I have anything [day]', or 'tomorrow's first "
+            "thing'. Returns ALL events from ALL Apple Calendar calendars — School, the one45 "
+            "Subscribed Calendar rotation feed, and synced Outlook events. Results are more complete "
+            "than the dashboard snapshot — always call this for specific calendar questions. "
+            "Use days=7 for week view, days=1 for today-only. Prefer this over outlook_get_calendar_events."
         ),
         "input_schema": {
             "type": "object",
@@ -232,7 +244,12 @@ DESKTOP_TOOLS = [
     # ── Messages ──
     {
         "name": "messages_send",
-        "description": "Send an iMessage or SMS to a phone number or contact name.",
+        "description": (
+            "Use this to send an iMessage or SMS ONLY AFTER the user has explicitly confirmed "
+            "they want to send. NEVER call this without user confirmation — show the draft message "
+            "to the user first, wait for approval, then call this. Required: to (phone number like "
+            "+1... or contact name), message (the text to send)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -244,7 +261,12 @@ DESKTOP_TOOLS = [
     },
     {
         "name": "messages_get_recent",
-        "description": "Get recent iMessages from a contact or phone number.",
+        "description": (
+            "Use this when the user asks to read or check messages from a contact — 'read my "
+            "messages from [name]', 'what did [person] say', 'check my texts with [contact]'. "
+            "Returns the most recent iMessages from that contact in chronological order. "
+            "Use limit to control how many messages to return (default 20)."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {

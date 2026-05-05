@@ -15,6 +15,7 @@ import { UWorldWidget } from "@/components/widgets/uworld-widget";
 import { NBMETrackerWidget } from "@/components/widgets/nbme-tracker-widget";
 import { WeekWidget } from "@/components/widgets/week-widget";
 import { SpotifyWidget } from "@/components/widgets/spotify-widget";
+import { DeepFocusOverlay } from "@/components/layout/deep-focus-overlay";
 
 // MorningBriefing and SpotifyWidget manage their own WidgetWrapper so they
 // can forward status/lastUpdated props from inside the component where the
@@ -41,6 +42,7 @@ export default function Home() {
       <main className="flex-1 overflow-y-auto p-4">
         <DashboardGrid widgets={widgets} />
       </main>
+      <DeepFocusOverlay />
     </div>
   );
 }

@@ -805,14 +805,16 @@ def _uworld_scrape_history() -> dict:
             "deviceTypeId": 1,
             "topLevelProductId": top_prod_id,
         })
-        # Escape for safe injection into the JS string literal
-        at_escaped = at.replace("\\", "\\\\").replace('"', '\\"')
-        subkey_escaped = api_sub_key.replace("\\", "\\\\").replace('"', '\\"')
-        config_escaped = config_params.replace("\\", "\\\\").replace('"', '\\"')
-        # endpoint is also injected into the JS string — escape backslashes and
-        # quotes like the other fields, and strip newlines that would break the
-        # single-line x.open() call and produce a JS SyntaxError at runtime.
-        endpoint_escaped = endpoint.replace("\\", "\\\\").replace('"', '\\"').replace('\n', '').replace('\r', '')
+        # Produce JS-string-safe literals by JSON-encoding each value and then
+        # stripping the surrounding double-quotes.  Applying an additional
+        # backslash+quote escape on top of config_params (already JSON) would
+        # double-escape any embedded backslashes or quotes in string values.
+        at_escaped = _json.dumps(at)[1:-1]
+        subkey_escaped = _json.dumps(api_sub_key)[1:-1]
+        config_escaped = _json.dumps(config_params)[1:-1]
+        # endpoint uses the same json.dumps approach; additionally strip embedded
+        # newlines that would break the single-line x.open() JS call at runtime.
+        endpoint_escaped = _json.dumps(endpoint.replace('\n', '').replace('\r', ''))[1:-1]
 
         js = (
             f'(function(){{'
@@ -974,13 +976,14 @@ def _uworld_scrape_history() -> dict:
         fmt_date = end_date
         try:
             # Parse "Apr 07, 2026 4:55 PM" → "Apr 7, 2026"
+            # %-d is a GNU libc extension that fails on some macOS Python builds.
             d = _dt.datetime.strptime(end_date[:12].strip(), "%b %d, %Y")
-            fmt_date = d.strftime("%b %-d, %Y")
+            fmt_date = f"{d.strftime('%b')} {d.day}, {d.year}"
         except Exception:
             try:
                 # ISO fallback
                 d = _dt.datetime.fromisoformat(end_date[:10])
-                fmt_date = d.strftime("%b %-d, %Y")
+                fmt_date = f"{d.strftime('%b')} {d.day}, {d.year}"
             except Exception:
                 pass
 
