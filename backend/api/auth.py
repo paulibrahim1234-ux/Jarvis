@@ -190,10 +190,17 @@ def anthropic_force_refresh(request: Request):
 
 
 @router.get("/anthropic/status")
-def anthropic_status(force: bool = False):
+def anthropic_status(request: Request, force: bool = False):
     """Live credential probe + cached result.
     Call ?force=true to bypass the 5-min cache (e.g. after updating the
-    credential via /setup/credentials)."""
+    credential via /setup/credentials).
+
+    Gated by _require_local_origin because ?force=true bypasses the 5-min
+    cache and fires a live Anthropic API call — without the guard any
+    cross-origin tab could drain API quota by polling with force=true.
+    """
+    from api._security import _require_local_origin
+    _require_local_origin(request)
     return _probe_claude(force=force)
 
 

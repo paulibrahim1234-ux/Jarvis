@@ -2,6 +2,9 @@
 Chat API — persistent conversations + facts memory.
 """
 
+import logging
+import traceback
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
@@ -9,6 +12,11 @@ from typing import Optional
 from agent.jarvis import chat_async
 from agent import memory
 from api._security import _require_local_origin
+
+# Module-level logger — avoids importing logging inside the except block on
+# every error path (ruff E401 antipattern). If the import itself failed during
+# error handling it would mask the original exception entirely.
+_chat_log = logging.getLogger("jarvis.chat")
 
 # Initialize DB on import.
 memory.init_db()
@@ -53,14 +61,16 @@ async def chat_endpoint(
             model_override=model_override,
         )
         return ChatResponse(reply=reply, conversation_id=cid)
-    except Exception as e:
+    except Exception:
         # G3: raise HTTP 500 so the frontend's `if (!r.ok)` branch fires and
-        # routes through the real error handler.  A 200 with an apology string
+        # routes through the real error handler. A 200 with an apology string
         # looks like a normal reply and hides the error from the client.
-        # Log full traceback server-side to avoid leaking internals to the UI.
-        import logging, traceback
-        logging.getLogger("jarvis.chat").error("chat_endpoint error: %s", traceback.format_exc())
-        raise HTTPException(status_code=500, detail="Internal server error: " + str(e)[:200])
+        # Full traceback is logged server-side; nothing internal leaves the wire.
+        # WHY no str(e) in detail: file paths, error topology, and partial token
+        # values can leak via the detail field — the log line above captures all
+        # of that for ops without exposing it to the client (Sec#5).
+        _chat_log.error("chat_endpoint error: %s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/chat/conversations")

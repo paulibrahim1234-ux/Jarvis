@@ -31,6 +31,12 @@ import {
 // iMessage brand blue — not a status color, semantic to the iMessage bubble UI.
 const IMESSAGE_BLUE = "#0b93f6";
 
+// Perf#9 — jarvisConfig is a module-level compile-time constant, so these
+// derived sets never change. Computing them once at module scope avoids the
+// useMemo overhead on every render and removes them from the useEffect dep array.
+const ALLOWLIST_SET = buildAllowlistSet(jarvisConfig.messagesContactsAllowlist);
+const NAME_LOOKUP = buildContactLookup(jarvisConfig.contacts);
+
 type ThreadMessage = {
   text: string;
   time: string;
@@ -114,16 +120,6 @@ export function IMessageWidget() {
     return subscribeDensityChange((d) => setDensityState(d));
   }, []);
 
-  // Memoize once per mount — config is compiled in.
-  const allowlist = useMemo(
-    () => buildAllowlistSet(jarvisConfig.messagesContactsAllowlist),
-    [],
-  );
-  const nameLookup = useMemo(
-    () => buildContactLookup(jarvisConfig.contacts),
-    [],
-  );
-
   useEffect(() => {
     let alive = true;
     const load = () => {
@@ -137,16 +133,16 @@ export function IMessageWidget() {
           }
           let incoming = data.conversations ?? [];
           // Apply allowlist filter on the `handle` field (more stable than `contact`).
-          if (allowlist.size > 0) {
+          if (ALLOWLIST_SET.size > 0) {
             incoming = incoming.filter((c) =>
-              passesAllowlist(c.handle || c.contact, allowlist),
+              passesAllowlist(c.handle || c.contact, ALLOWLIST_SET),
             );
           }
           // Optional client-side override: if user added contacts to
           // jarvis-config.ts, those win over the server-resolved name.
-          if (nameLookup.size > 0) {
+          if (NAME_LOOKUP.size > 0) {
             incoming = incoming.map((c) => {
-              const override = resolveDisplayName(c.handle || c.contact, nameLookup);
+              const override = resolveDisplayName(c.handle || c.contact, NAME_LOOKUP);
               // Only override if we actually found a match (resolver returns the
               // raw handle when unknown — don't let that stomp the server name).
               const wasResolved =
@@ -157,13 +153,13 @@ export function IMessageWidget() {
           setConvos(incoming);
           setLoading(false);
           setTotalUnread(
-            allowlist.size > 0
+            ALLOWLIST_SET.size > 0
               ? incoming.reduce((s, c) => s + c.unread_count, 0)
               : data.total_unread ?? 0,
           );
           setLive(true);
           setStatusMsg(
-            allowlist.size > 0 && incoming.length === 0
+            ALLOWLIST_SET.size > 0 && incoming.length === 0
               ? "No messages from allowlisted contacts"
               : null,
           );
@@ -189,7 +185,7 @@ export function IMessageWidget() {
       alive = false;
       clearInterval(t);
     };
-  }, [allowlist, nameLookup]);
+  }, []);
 
   const isWide = containerWidth > 400;
 

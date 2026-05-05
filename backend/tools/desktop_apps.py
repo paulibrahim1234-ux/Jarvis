@@ -595,6 +595,24 @@ class NewOutlookModeError(RuntimeError):
     """Raised when New Outlook mode is detected (incompatible with Classic AppleScript API)."""
 
 
+# Perf#3: confirmation cache — epoch time until which Outlook is known to be
+# running and in Classic mode.  Avoids 2 blocking subprocess.run calls
+# (200–400 ms total) on every Outlook tool entry when the app is already up.
+_OUTLOOK_CONFIRMED_UNTIL: float = 0.0
+
+
+def _outlook_invalidate_cache() -> None:
+    """Reset the Outlook running-confirmation cache to force a re-probe.
+
+    Call this from any AppleScript error path that indicates Outlook stopped
+    or became unresponsive (subprocess.CalledProcessError, osascript stderr
+    containing "not running", "connection is invalid", etc.) so the next
+    tool call re-probes rather than trusting a stale cached confirmation.
+    """
+    global _OUTLOOK_CONFIRMED_UNTIL
+    _OUTLOOK_CONFIRMED_UNTIL = 0.0
+
+
 def _ensure_outlook_running() -> None:
     """Guarantee Microsoft Outlook Classic is running before any AppleScript call.
 
@@ -604,13 +622,23 @@ def _ensure_outlook_running() -> None:
     user-legible message instead of a cryptic osascript stderr dump.
 
     Steps:
-      1. Query System Events for the process name (non-activating check).
-      2. If absent, launch via `open -a "Microsoft Outlook"` (standard macOS app open).
-      3. Poll every 0.5 s up to 15 s for the process to appear.
-      4. Once running, probe for New Outlook mode via exchange-accounts count:
+      1. Perf#3 fast path — return immediately if confirmed within last 30 s.
+      2. Query System Events for the process name (non-activating check).
+      3. If absent, launch via `open -a "Microsoft Outlook"` (standard macOS app open).
+      4. Poll every 0.5 s up to 15 s for the process to appear.
+      5. Once running, probe for New Outlook mode via exchange-accounts count:
          New Outlook swapped that property, so a specific AppleScript error signature
          indicates the user is in New Outlook and the Classic API won't work.
+      6. On success, stamp _OUTLOOK_CONFIRMED_UNTIL for 30 s.
     """
+    global _OUTLOOK_CONFIRMED_UNTIL
+    # Perf#3 fast path: skip the two blocking subprocess calls if we confirmed
+    # Outlook was running and in Classic mode within the last 30 seconds.
+    # 30 s is long enough to span a typical multi-tool sequence but short enough
+    # that a quit-and-relaunch is caught on the next widget refresh cycle.
+    if time.time() < _OUTLOOK_CONFIRMED_UNTIL:
+        return
+
     def _is_running() -> bool:
         r = subprocess.run(
             ["osascript", "-e",
@@ -659,6 +687,9 @@ def _ensure_outlook_running() -> None:
             "New Outlook is active but the Classic AppleScript API is required. "
             "Toggle off 'New Outlook' in Outlook → Help menu, then retry."
         )
+
+    # Perf#3: stamp the cache — Outlook confirmed running in Classic mode.
+    _OUTLOOK_CONFIRMED_UNTIL = time.time() + 30
 
 
 def _count_outlook_accounts() -> dict:
@@ -727,6 +758,7 @@ def _outlook_inbox(
     try:
         _ensure_outlook_running()
     except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        _outlook_invalidate_cache()  # Perf#3: app stopped — force re-probe next call
         return {"error": str(exc), "emails": []}
 
     import concurrent.futures
@@ -798,6 +830,7 @@ def _outlook_calendar(days: int = 30) -> dict:
     try:
         _ensure_outlook_running()
     except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        _outlook_invalidate_cache()  # Perf#3: app stopped — force re-probe next call
         return {"error": str(exc), "events": []}
     script = f"""
 tell application "Microsoft Outlook"
@@ -856,6 +889,7 @@ def _outlook_send(to: str, subject: str, body: str) -> dict:
     try:
         _ensure_outlook_running()
     except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        _outlook_invalidate_cache()  # Perf#3: app stopped — force re-probe next call
         return {"error": str(exc)}
     # Escape for AppleScript (handles backslash, quote, newline, CR).
     to_s = _as_str(to)
@@ -911,6 +945,7 @@ def _outlook_search_inbox(
     try:
         _ensure_outlook_running()
     except Exception as exc:
+        _outlook_invalidate_cache()  # Perf#3: any error means app state unknown — re-probe next call
         return {"error": "outlook_not_running", "message": str(exc), "candidates": []}
 
     # ── AppleScript fetch ───────────────────────────────────────────────────────
@@ -1160,6 +1195,7 @@ def _outlook_read_email(message_id: str = "", subject_query: str = "") -> dict:
     try:
         _ensure_outlook_running()
     except (OutlookNotRunningError, NewOutlookModeError) as exc:
+        _outlook_invalidate_cache()  # Perf#3: app stopped — force re-probe next call
         return {"error": str(exc)}
     if not message_id and not subject_query:
         return {"error": "Provide message_id or subject_query"}

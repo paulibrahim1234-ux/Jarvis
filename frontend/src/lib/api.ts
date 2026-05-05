@@ -580,3 +580,61 @@ export async function fetchSpotifyHome(): Promise<{
   if (!r.ok) return { available: false, error: `HTTP ${r.status}` };
   return r.json();
 }
+
+// ── Triage (chief-of-staff) ───────────────────────────────────────────────────
+
+export interface TriageInfoItem {
+  sender: string;
+  subject: string;
+  summary: string;
+}
+
+export interface TriageMeetingItem {
+  sender: string;
+  subject: string;
+  datetime_hint: string;
+  needs_calendar_check: boolean;
+}
+
+export interface TriageActionItem {
+  sender: string;
+  subject_or_thread: string;
+  excerpt: string;
+  draft_reply: string;
+  channel: "email" | "imessage";
+}
+
+export interface TriageStaleItem {
+  sender: string;
+  subject_or_thread: string;
+  days_stale: number;
+  channel: "email" | "imessage";
+}
+
+export interface TriageData {
+  skip_count: number;
+  skip_senders: string[];
+  info_only: TriageInfoItem[];
+  meeting_info: TriageMeetingItem[];
+  action_required: TriageActionItem[];
+  stale: TriageStaleItem[];
+  error?: string;
+}
+
+/**
+ * Fetch the chief-of-staff triage result. Backend caches 5 min (Opus is expensive).
+ * Pass `bust: true` to append a cache-busting query param so the backend's
+ * _cached() sees a new key and forces a fresh Anthropic call.
+ */
+export async function fetchTriage(opts: { bust?: boolean } = {}): Promise<TriageData> {
+  // WHY 60s timeout: the Opus API call inside the backend can take 10-30s on
+  // a cache miss. A short timeout would surface false "fetch failed" errors.
+  const url = opts.bust
+    ? `${BACKEND}/widgets/triage?bust=${Date.now()}`
+    : `${BACKEND}/widgets/triage`;
+  const r = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+  if (!r.ok) {
+    throw new Error(`triage fetch ${r.status}`);
+  }
+  return r.json();
+}

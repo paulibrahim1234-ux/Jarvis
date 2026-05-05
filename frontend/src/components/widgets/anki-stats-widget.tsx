@@ -53,6 +53,9 @@ function useContainerSize(ref: React.RefObject<HTMLElement | null>) {
 type Tab = "stats" | "suggested";
 type LiveStatus = "loading" | "live" | "closed" | "error";
 
+// TS#8 — module-level constant; does not change between renders
+const AUTO_ROUTE_KEY = "jarvis-anki-auto-route-shown-v1";
+
 export function AnkiStatsWidget() {
   const [tab, setTab] = useState<Tab>("stats");
   const [stats, setStats] = useState<AnkiStats | null>(null);
@@ -289,7 +292,6 @@ export function AnkiStatsWidget() {
   // reload (autoRouteRef is per-mount), permanently burying the Stats view
   // for any user with no due cards. Now: persist a one-time flag in
   // localStorage so the auto-route fires at most once across all sessions.
-  const AUTO_ROUTE_KEY = "jarvis-anki-auto-route-shown-v1";
   const autoRouteRef = useRef(false);
   useEffect(() => {
     if (autoRouteRef.current) return;

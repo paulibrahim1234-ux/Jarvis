@@ -379,6 +379,25 @@ export function SpotifyWidget() {
 
   // ── Full layout ───────────────────────────────────────────────────────────
 
+  // F8 — error branch MUST come before the !payload skeleton guard; otherwise
+  // it is unreachable (the skeleton return fires first when payload is null).
+  if (widgetStatus === "error" && !payload) {
+    return (
+      <WidgetWrapper status={widgetStatus} lastUpdated={lastUpdated}>
+        <Card
+          ref={tileRef}
+          className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card overflow-hidden"
+          style={{ padding: "var(--widget-density-pad)" }}
+        >
+          <Header live={live} webOk={webOk} authUrl={null} />
+          <CardContent className="flex-1 min-h-0 flex items-center justify-center">
+            <ErrorState message="Couldn't reach Spotify" onRetry={poll} />
+          </CardContent>
+        </Card>
+      </WidgetWrapper>
+    );
+  }
+
   if (!payload) {
     return (
       <WidgetWrapper status={widgetStatus} lastUpdated={lastUpdated}>
@@ -392,24 +411,6 @@ export function SpotifyWidget() {
             <Skeleton className="h-14 w-full" />
             <Skeleton className="h-3 w-full" />
           </div>
-        </Card>
-      </WidgetWrapper>
-    );
-  }
-
-  // F8 — when no data has ever loaded and status is error, show ErrorState
-  if (widgetStatus === "error" && !payload) {
-    return (
-      <WidgetWrapper status={widgetStatus} lastUpdated={lastUpdated}>
-        <Card
-          ref={tileRef}
-          className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card overflow-hidden"
-          style={{ padding: "var(--widget-density-pad)" }}
-        >
-          <Header live={live} webOk={webOk} authUrl={null} />
-          <CardContent className="flex-1 min-h-0 flex items-center justify-center">
-            <ErrorState message="Couldn't reach Spotify" onRetry={poll} />
-          </CardContent>
         </Card>
       </WidgetWrapper>
     );
@@ -481,7 +482,6 @@ export function SpotifyWidget() {
               progressMs={progressMs}
               progress={progress}
               fmt={fmt}
-              isNarrow={isNarrow}
               onPrev={onPrev}
               onNext={onNext}
               onToggle={onToggle}
@@ -492,7 +492,6 @@ export function SpotifyWidget() {
             <LibraryPane
               items={payload?.playlists ?? null}
               webOk={webOk}
-              isNarrow={isNarrow}
               onPlay={onPlayUri}
             />
           )}
@@ -767,7 +766,6 @@ function NowPlayingPane({
   progressMs,
   progress,
   fmt,
-  isNarrow,
   onPrev,
   onNext,
   onToggle,
@@ -777,7 +775,6 @@ function NowPlayingPane({
   progressMs: number;
   progress: number;
   fmt: (ms: number) => string;
-  isNarrow: boolean;
   onPrev: () => void;
   onNext: () => void;
   onToggle: () => void;
@@ -837,12 +834,10 @@ function NowPlayingPane({
 function LibraryPane({
   items,
   webOk,
-  isNarrow,
   onPlay,
 }: {
   items: Playlist[] | null;
   webOk: boolean;
-  isNarrow: boolean;
   onPlay: (uri: string) => void;
 }) {
   if (!webOk) return <EmptyState icon={Library} title="Connect Spotify" hint="to see your playlists" />;

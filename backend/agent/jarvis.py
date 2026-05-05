@@ -5,11 +5,43 @@ Supports image tool results (take_screenshot returns an image block).
 Persists conversations + extracts facts via agent.memory.
 """
 
+import asyncio
 import json
+import logging
 import os
+import random
+
 import anthropic
 from tools import TOOLS, dispatch
 from agent import memory
+
+# Module-level logger — avoids re-creating the logger on every chat turn.
+# WHY: logging.getLogger() is cheap but not free; creating it inside
+# chat_async added microseconds on every call and made the import structure
+# harder to follow (stdlib modules belong at the top of the file, not
+# inside functions).
+_agent_log = logging.getLogger("jarvis.agent")
+
+
+def _parse_retry_after(exc: Exception, default: int = 10) -> int:
+    """Parse the Retry-After header from a 429 response. Default 10s on parse failure.
+
+    WHY a helper: the primary and Haiku-fallback rate-limit blocks both had
+    identical try/except blocks with bare `except Exception: pass` — which
+    silently discarded parse errors and obscured why the fallback value was
+    used. Extracting to a helper deduplicates the logic, adds a debug log,
+    and narrows the except to the types that can actually be raised
+    (ValueError/TypeError from int(float(v)), AttributeError from .headers).
+    """
+    try:
+        ra = getattr(exc, "response", None)
+        if ra is not None:
+            v = ra.headers.get("retry-after")
+            if v is not None:
+                return int(float(v))
+    except (ValueError, TypeError, AttributeError):
+        _agent_log.debug("Retry-After parse failed for exception: %r", exc)
+    return default
 
 # OAuth tokens (sk-ant-oat...) need Bearer auth + oauth beta header.
 # API keys (sk-ant-api...) use x-api-key.
@@ -160,7 +192,11 @@ async def chat_async(
     # ── Dashboard + facts + breadcrumbs ──
     try:
         dashboard = await memory.dashboard_snapshot_async()
-    except Exception:
+    except Exception as exc:
+        # WHY log vs. swallow: the root cause (network, import error, etc.)
+        # is invisible to ops if we pass silently. Warning level keeps it out
+        # of the error budget but still queryable in logs.
+        _agent_log.warning("dashboard_snapshot failed: %s", exc)
         dashboard = "(dashboard snapshot failed)"
     top_facts = memory.get_top_facts(limit=10)
     breadcrumbs = memory.get_recent_tool_breadcrumbs(conversation_id, limit=10)
@@ -175,8 +211,6 @@ async def chat_async(
     # globally via the JARVIS_MODEL env var.
     model = model_override or os.getenv("JARVIS_MODEL", "claude-opus-4-5-20251101")
 
-    import asyncio
-
     final_text = ""
     # OS3: track stop_reason / last tool error so the fallback message is
     # specific instead of "please try again".
@@ -188,11 +222,11 @@ async def chat_async(
     # OS5: track tool names called this turn for cross-turn breadcrumbs.
     tool_calls_this_turn: list[str] = []
 
-    import random
-    import logging
-    _agent_log = logging.getLogger("jarvis.agent")
-
-    async def _create_with_recovery():
+    # WHY return-type annotations on inner functions: makes it explicit that
+    # _create_with_recovery can return None (rate-limited signal) vs. a real
+    # Message; _call_and_log always returns a Message. Aids static analysis
+    # and documents the contract without changing runtime behaviour.
+    async def _create_with_recovery() -> anthropic.types.Message | None:
         """Wrap async_client.messages.create with the two flaky-cases we
         actually see in this app: OAuth-token-expired 401 (refresh + retry
         once) and rate-limit 429 (Retry-After-aware backoff + Haiku fallback).
@@ -213,7 +247,7 @@ async def chat_async(
             extra_headers={"anthropic-beta": "extended-cache-ttl-2025-04-11"},
         )
 
-        async def _call_and_log(m: str, kw: dict):
+        async def _call_and_log(m: str, kw: dict) -> anthropic.types.Message:
             """Call messages.create and log token usage including cache hits."""
             resp = await async_client.messages.create(**kw)
             if hasattr(resp, "usage"):
@@ -231,7 +265,9 @@ async def chat_async(
             actual_model = model
             return await _call_and_log(model, kwargs)
         except anthropic.AuthenticationError as e:
-            from agent import claude_oauth, jarvis as _self
+            # WHY no `jarvis as _self`: the 401-retry path uses the closure-captured
+            # `async_client` directly; the self-import was unused (ruff F401).
+            from agent import claude_oauth
             # A5: refresh_on_401 calls urllib.request.urlopen (blocking I/O);
             # run it in a thread so we don't stall the FastAPI event loop.
             if await asyncio.to_thread(claude_oauth.refresh_on_401, e):
@@ -242,14 +278,10 @@ async def chat_async(
             raise
         except anthropic.RateLimitError as e:
             # Parse Retry-After header to avoid hammering the API too soon.
-            retry_after = 10  # conservative default
-            try:
-                if hasattr(e, "response") and e.response is not None:
-                    ra = e.response.headers.get("retry-after") or e.response.headers.get("Retry-After")
-                    if ra:
-                        retry_after = int(float(ra))
-            except Exception:
-                pass
+            # WHY _parse_retry_after: deduplicates the identical block in the
+            # Haiku-fallback path and replaces bare `except Exception: pass`
+            # with a targeted except + debug log.
+            retry_after = _parse_retry_after(e, default=10)
             sleep_secs = min(retry_after, 60) + random.uniform(0, 1)
             _agent_log.warning(
                 "rate_limit on %s — sleeping %.1fs before Haiku fallback", model, sleep_secs
@@ -265,15 +297,9 @@ async def chat_async(
                 except anthropic.AuthenticationError:
                     raise  # A3: auth errors must surface, not be masked as rate-limit
                 except anthropic.RateLimitError as e2:
-                    # Both models rate limited — log and surface clean error
-                    retry_after2 = 60
-                    try:
-                        if hasattr(e2, "response") and e2.response is not None:
-                            ra2 = e2.response.headers.get("retry-after") or e2.response.headers.get("Retry-After")
-                            if ra2:
-                                retry_after2 = int(float(ra2))
-                    except Exception:
-                        pass
+                    # Both models rate limited — log and surface clean error.
+                    # WHY _parse_retry_after: same deduplication as primary block.
+                    retry_after2 = _parse_retry_after(e2, default=60)
                     _agent_log.warning(
                         "rate_limit on fallback %s too — retry-after %ss", fallback_model, retry_after2
                     )

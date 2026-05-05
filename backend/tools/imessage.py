@@ -52,14 +52,16 @@ def _fmt_time(dt: datetime | None) -> str:
     today = date.today()
     d = dt.date()
     if d == today:
-        return dt.strftime("%-I:%M %p")
+        # Py#2: %-I is GNU-only and fails on macOS Python; use %I + lstrip("0") instead
+        return dt.strftime("%I:%M %p").lstrip("0") or "0"
     if d == today - timedelta(days=1):
         return "Yesterday"
     if (today - d).days < 7:
         return dt.strftime("%a")
     if d.year == today.year:
-        return dt.strftime("%b %-d")
-    return dt.strftime("%b %-d, %Y")
+        # Py#2: %-d is GNU-only; dt.day is already an int with no leading zero
+        return f"{dt.strftime('%b')} {dt.day}"
+    return f"{dt.strftime('%b')} {dt.day}, {dt.year}"
 
 
 def _fmt_time_in_thread(dt: datetime | None) -> str:
@@ -75,12 +77,15 @@ def _fmt_time_in_thread(dt: datetime | None) -> str:
     today = date.today()
     d = dt.date()
     if d == today:
-        return dt.strftime("%-I:%M %p")
+        # Py#2: %-I is GNU-only; use %I + lstrip("0") for macOS portability
+        return dt.strftime("%I:%M %p").lstrip("0") or "0"
     if (today - d).days < 7:
-        return dt.strftime("%a %-I:%M %p")
+        # Py#2: same %-I fix; weekday prefix has no leading-zero risk so %a is fine
+        return dt.strftime("%a ") + (dt.strftime("%I:%M %p").lstrip("0") or "0")
     if d.year == today.year:
-        return dt.strftime("%b %-d, %-I:%M %p")
-    return dt.strftime("%b %-d, %Y")
+        # Py#2: %-d and %-I both GNU-only; use dt.day + lstrip for the time part
+        return f"{dt.strftime('%b')} {dt.day}, " + (dt.strftime("%I:%M %p").lstrip("0") or "0")
+    return f"{dt.strftime('%b')} {dt.day}, {dt.year}"
 
 
 # ── privacy scrubber ──────────────────────────────────────────────────────────
@@ -141,7 +146,14 @@ def _connect() -> sqlite3.Connection:
     if not os.path.exists(CHAT_DB):
         raise FileNotFoundError(f"chat.db not found at {CHAT_DB}")
     try:
-        return sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{CHAT_DB}?mode=ro", uri=True)
+        # Perf#10: warm the SQLite page cache to 8 MB so repeated CTE scans
+        # over message/chat_message_join don't re-read pages from disk on each
+        # widget tick.  Negative value = kibibytes (SQLite convention).
+        # temp_store=MEMORY avoids disk spills for ORDER BY scratch space.
+        conn.execute("PRAGMA cache_size = -8192")   # 8 MB page cache
+        conn.execute("PRAGMA temp_store = MEMORY")
+        return conn
     except sqlite3.OperationalError as e:
         msg = str(e).lower()
         if "unable to open" in msg or "authorization denied" in msg:
@@ -179,6 +191,10 @@ def get_conversations(
     conn = _connect()
     conn.row_factory = sqlite3.Row
     try:
+        # Perf#4: wrap entire read in a BEGIN/COMMIT read transaction so SQLite
+        # holds a consistent snapshot and skips per-statement locking overhead.
+        conn.execute("BEGIN")
+
         style_filter = (
             f"c.style IN ({STYLE_DM},{STYLE_GROUP})" if include_groups
             else f"c.style = {STYLE_DM}"
@@ -221,6 +237,104 @@ def get_conversations(
             (limit * 3,),
         ).fetchall()
 
+        # Perf#4: batch the three per-chat sub-queries into single IN(...)
+        # queries before the loop, then index results by chat_id in Python.
+        # Old pattern: 3 queries × N chats = up to 225 round-trips.
+        # New pattern: 3 queries total for all chats, regardless of N.
+        chat_ids = [cr["chat_id"] for cr in chat_rows]
+
+        # Batch 1 of 3: participants for every candidate chat
+        participants_by_chat: dict[int, list[str]] = {cid: [] for cid in chat_ids}
+        if chat_ids:
+            ph = ",".join("?" * len(chat_ids))
+            for row in conn.execute(
+                f"""
+                SELECT chj.chat_id, h.id
+                FROM chat_handle_join chj
+                JOIN handle h ON h.ROWID = chj.handle_id
+                WHERE chj.chat_id IN ({ph})
+                ORDER BY chj.chat_id, h.ROWID
+                """,
+                chat_ids,
+            ).fetchall():
+                if row["id"]:
+                    participants_by_chat[row["chat_id"]].append(row["id"])
+
+        # Batch 2 of 3: most-recent messages per chat (top-N per group).
+        # SQLite doesn't have a LIMIT-per-group clause, so we fetch all
+        # messages for the candidate chats ordered desc and slice in Python.
+        msgs_by_chat: dict[int, list] = {cid: [] for cid in chat_ids}
+        if chat_ids:
+            ph = ",".join("?" * len(chat_ids))
+            for row in conn.execute(
+                f"""
+                SELECT m.text, m.is_from_me, m.date, m.handle_id, cmj.chat_id
+                FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE cmj.chat_id IN ({ph})
+                  AND m.text IS NOT NULL
+                  AND m.text != ''
+                ORDER BY cmj.chat_id, m.date DESC
+                """,
+                chat_ids,
+            ).fetchall():
+                cid = row["chat_id"]
+                if len(msgs_by_chat[cid]) < messages_per_thread:
+                    msgs_by_chat[cid].append(row)
+
+        # Batch 3 of 3: unread counts. We split into two sub-queries
+        # (chats that have a last_read_ts vs those that don't) to keep the
+        # WHERE clause correct — the same logic as the original per-chat code.
+        unread_by_chat: dict[int, int] = {cid: 0 for cid in chat_ids}
+        last_read_map: dict[int, int] = {
+            cr["chat_id"]: (cr["last_read_ts"] or 0) for cr in chat_rows
+        }
+        chats_with_ts = [(cid, ts) for cid, ts in last_read_map.items() if ts]
+        chats_no_ts   = [cid for cid, ts in last_read_map.items() if not ts]
+
+        if chats_with_ts:
+            # Batch unread counts for chats that have a last_read_ts.
+            # We can't use VALUES(...) as a join target in older SQLite, so
+            # we fetch all candidate unread messages and filter in Python.
+            # The IN(...) still reduces this to one round-trip instead of N.
+            ph = ",".join("?" * len(chats_with_ts))
+            cids_with_ts = [cid for cid, _ in chats_with_ts]
+            ts_map = dict(chats_with_ts)
+            for row in conn.execute(
+                f"""
+                SELECT cmj.chat_id, m.date
+                FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE cmj.chat_id IN ({ph})
+                  AND m.is_from_me = 0
+                  AND m.is_read = 0
+                """,
+                cids_with_ts,
+            ).fetchall():
+                cid = row["chat_id"]
+                # Apply the per-chat last_read_ts filter in Python —
+                # avoids the VALUES join that older SQLite doesn't support.
+                if row["date"] > ts_map.get(cid, 0):
+                    unread_by_chat[cid] = unread_by_chat.get(cid, 0) + 1
+
+        if chats_no_ts:
+            ph = ",".join("?" * len(chats_no_ts))
+            for row in conn.execute(
+                f"""
+                SELECT cmj.chat_id, COUNT(*) AS cnt
+                FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE cmj.chat_id IN ({ph})
+                  AND m.is_from_me = 0
+                  AND m.is_read = 0
+                GROUP BY cmj.chat_id
+                """,
+                chats_no_ts,
+            ).fetchall():
+                unread_by_chat[row["chat_id"]] = row["cnt"]
+
+        conn.execute("COMMIT")
+
         result: list[dict] = []
         seen_contacts: set[str] = set()
 
@@ -228,21 +342,8 @@ def get_conversations(
             chat_id = cr["chat_id"]
             is_group = cr["style"] == STYLE_GROUP
 
-            # Pull ALL handles for this chat. For DMs that's one row; for groups
-            # the full participant list — needed so the widget can render a
-            # multi-name label ("Alice, Bob & 3 others") when the chat has no
-            # display_name set.
-            participant_rows = conn.execute(
-                """
-                SELECT h.id
-                FROM chat_handle_join chj
-                JOIN handle h ON h.ROWID = chj.handle_id
-                WHERE chj.chat_id = ?
-                ORDER BY h.ROWID
-                """,
-                (chat_id,),
-            ).fetchall()
-            participant_handles: list[str] = [r["id"] for r in participant_rows if r["id"]]
+            # Use pre-fetched participant data (Perf#4 batch 1).
+            participant_handles: list[str] = participants_by_chat.get(chat_id, [])
             handle = participant_handles[0] if participant_handles else cr["chat_identifier"]
             # Pretty-format participants for label rendering (kept as the
             # group's roster regardless of who sent the most recent message).
@@ -284,56 +385,14 @@ def get_conversations(
                 continue
             seen_contacts.add(dedup_key)
 
-            # Step 2: recent messages in this chat, newest first
-            # Include handle_id so we can resolve sender names in group chats.
-            msg_rows = conn.execute(
-                """
-                SELECT m.text, m.is_from_me, m.date, m.handle_id
-                FROM message m
-                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-                WHERE cmj.chat_id = ?
-                  AND m.text IS NOT NULL
-                  AND m.text != ''
-                ORDER BY m.date DESC
-                LIMIT ?
-                """,
-                (chat_id, messages_per_thread),
-            ).fetchall()
+            # Use pre-fetched message rows (Perf#4 batch 2).
+            msg_rows = msgs_by_chat.get(chat_id, [])
 
             if not msg_rows:
                 continue
 
-            # Step 3: unread count (messages after last_read, not from me)
-            # last_read_ts NULL (stored as 0 via "or 0") maps to Apple epoch
-            # (Jan 1 2001), so "m.date > 0" would match all messages ever and
-            # massively overcount unread.  When last_read is falsy, skip the
-            # timestamp filter and rely solely on the is_read flag instead.
-            last_read = cr["last_read_ts"] or 0
-            if last_read:
-                unread_count = conn.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM message m
-                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-                    WHERE cmj.chat_id = ?
-                      AND m.is_from_me = 0
-                      AND m.date > ?
-                      AND m.is_read = 0
-                    """,
-                    (chat_id, last_read),
-                ).fetchone()[0]
-            else:
-                unread_count = conn.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM message m
-                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-                    WHERE cmj.chat_id = ?
-                      AND m.is_from_me = 0
-                      AND m.is_read = 0
-                    """,
-                    (chat_id,),
-                ).fetchone()[0]
+            # Use pre-fetched unread count (Perf#4 batch 3).
+            unread_count = unread_by_chat.get(chat_id, 0)
 
             newest = msg_rows[0]
             newest_dt = _mac_ns_to_dt(newest["date"])
@@ -389,6 +448,12 @@ def get_conversations(
                 break
 
         return result
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 

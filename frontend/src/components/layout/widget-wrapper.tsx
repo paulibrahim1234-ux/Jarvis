@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { GripVertical } from "lucide-react";
 import { useEditModeStore } from "@/lib/edit-mode-store";
 
@@ -54,14 +54,21 @@ export function WidgetWrapper({ children, status, lastUpdated }: WidgetWrapperPr
   // when the toggle fires.
   const { editMode } = useEditModeStore();
 
-  // Map status to a Tailwind background color class
-  const dotColor =
-    status === "fresh" ? "bg-green-500"
-    : status === "stale" ? "bg-yellow-500"
-    : status === "error" ? "bg-red-500"
-    : null;
+  // A11y#4 — use CSS token vars instead of Tailwind color classes so the dot
+  // inherits the theme-calibrated OKLCH values that already meet 3:1 contrast,
+  // avoiding the raw bg-green-500 etc. which have no guarantee in both themes
+  const dotStyle: CSSProperties | null =
+    status === "fresh"
+      ? { backgroundColor: "var(--status-live)" }
+      : status === "stale"
+      ? { backgroundColor: "var(--status-warn)" }
+      : status === "error"
+      ? { backgroundColor: "var(--status-error)" }
+      : null;
 
-  const dotTitle = lastUpdated ? relativeTime(lastUpdated) : status ?? "";
+  // A11y#4 — verbose label combines state name + relative time so SR users
+  // get the same info sighted users get from color + tooltip together
+  const dotAriaLabel = `Status: ${status ?? "unknown"}. ${lastUpdated ? relativeTime(lastUpdated) : ""}`;
 
   return (
     <div className="widget-outer relative h-full w-full group/widget">
@@ -77,27 +84,39 @@ export function WidgetWrapper({ children, status, lastUpdated }: WidgetWrapperPr
         us inject the affordance without modifying every widget's JSX.
       */}
       {editMode && (
-        <div
-          className="widget-drag-handle absolute top-2 right-2 z-20 flex items-center justify-center rounded p-0.5
+        // A11y#7 — grip is a <button> so keyboard users can reach it; p-1.5
+        // gives a ~28x28 hit target (44px min is ideal but 28 matches the
+        // compact card header budget without displacing content)
+        <button
+          type="button"
+          className="widget-drag-handle absolute top-2 right-2 z-20 flex items-center justify-center rounded p-1.5
             text-foreground/30 hover:text-foreground/70 hover:bg-foreground/10 transition-colors
             [cursor:grab] active:[cursor:grabbing]"
-          aria-label="Drag to reposition widget"
+          aria-label="Reposition widget"
           title="Drag to move"
         >
           <GripVertical className="h-4 w-4" aria-hidden />
-        </div>
+        </button>
       )}
 
       {/* Status dot — top-left corner, only when a status is provided.
           Kept outside widget content so it composites above everything
           without affecting the widget's own header layout. z-10 keeps it
           below the edit-mode grip (z-20) so grips still win on overlap. */}
-      {dotColor && (
+      {dotStyle && (
+        // A11y#4 — role="status" lets SR announce live-region changes;
+        // 8px dot (was 6px) + 1px surface ring improves contrast on all backgrounds
         <span
-          className={`pointer-events-none absolute top-2 left-2 z-10 rounded-full ${dotColor}`}
-          style={{ width: 6, height: 6 }}
-          title={dotTitle}
-          aria-label={dotTitle}
+          role="status"
+          className="pointer-events-none absolute top-2 left-2 z-10 rounded-full"
+          style={{
+            width: 8,
+            height: 8,
+            boxShadow: "0 0 0 1px var(--surface-0)",
+            ...dotStyle,
+          }}
+          title={dotAriaLabel}
+          aria-label={dotAriaLabel}
         />
       )}
 

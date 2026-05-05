@@ -17,7 +17,21 @@ import json
 # Reads JARVIS_BROWSER from env at module load.  Default is "Comet" because
 # the user runs Perplexity Comet as their default browser.
 # To use Chrome instead: set JARVIS_BROWSER=Google Chrome in backend/.env
-BROWSER_APP: str = os.environ.get("JARVIS_BROWSER", "Comet").strip() or "Comet"
+#
+# Py#1 — allowlist validation: BROWSER_APP is interpolated verbatim into
+# `tell application "..."` AppleScript strings.  An env value containing
+# quotes or semicolons would allow AppleScript injection.  Validate here at
+# module load so no AppleScript call can ever receive a tainted app name.
+_ALLOWED_BROWSERS = {"Comet", "Google Chrome", "Safari", "Firefox", "Arc", "Brave Browser"}
+_raw = os.environ.get("JARVIS_BROWSER", "Comet").strip()
+if _raw not in _ALLOWED_BROWSERS:
+    import logging as _logging
+    _logging.getLogger("jarvis.browser").warning(
+        "JARVIS_BROWSER=%r not in allowlist; falling back to Comet", _raw
+    )
+    BROWSER_APP = "Comet"
+else:
+    BROWSER_APP = _raw
 
 
 BROWSER_TOOLS = [
@@ -139,7 +153,19 @@ BROWSER_TOOLS = [
 # ── Chrome AppleScript helpers ────────────────────────────────────────────────
 
 def _chrome_js(code: str, timeout: int = 10) -> str:
-    """Run JS in frontmost Chrome tab via AppleScript. Returns result as string."""
+    """Execute JS in the frontmost browser tab.
+
+    SECURITY NOTE (Sec#3): this runs ARBITRARY JavaScript from the agent's tool calls.
+    Prompt injection attacks on browsed pages can chain through here to exfil
+    sessionStorage / cookies via outbound fetch() calls.  Mitigations in place:
+      - URL allowlist on browser_navigate (see Sec#10 — file:// removed)
+      - Future: outbound fetch() domain filtering
+    Visibility: every call is logged at DEBUG so audit trails are available.
+    """
+    import logging as _logging
+    _logging.getLogger("jarvis.browser").debug(
+        "browser_run_js called (len=%d)", len(code or "")
+    )
     # Wrap in try/catch so errors surface clearly
     safe_code = (
         "(function() {"
@@ -183,7 +209,10 @@ def _chrome_navigate(url: str):
     # We call it twice with a 1s pause to ensure Comet focuses the tab.
     if not url or '\n' in url or '\r' in url:
         raise ValueError('invalid URL: contains newlines')
-    if not url.startswith(('http://', 'https://', 'about:', 'chrome://', 'file://')):
+    # Sec#10 — file:// removed: browser tools are for web navigation only.
+    # Allowing file:// would let a prompt-injected page chain into local file
+    # exfiltration by navigating the browser to a sensitive path.
+    if not url.startswith(('http://', 'https://', 'about:', 'chrome://')):
         raise ValueError(f'invalid URL scheme: {url!r}')
     safe = url.replace('\\', '\\\\').replace('"', '\\"')
     script = f'tell application "{BROWSER_APP}" to open location "{safe}"'

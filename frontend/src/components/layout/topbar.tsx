@@ -215,14 +215,19 @@ export function Topbar() {
           style={{
             borderColor: "var(--border-subtle)",
             backgroundColor: "var(--surface-2)",
-            fontSize: "10px",
-            color: "var(--ink-tertiary)",
+            // WHY ink-secondary + 11px/600: `ink-tertiary` at 10px is borderline
+            // on WCAG 4.5:1 for small text. ink-secondary is darker (passes
+            // across both themes) and 11px/600 clears the AA threshold for
+            // text this small without visually dominating the chip.
+            fontSize: "11px",
+            fontWeight: 600,
+            color: "var(--ink-secondary)",
             letterSpacing: "0.04em",
           }}
           title={`Backend: ${statusLabel}`}
         >
           <span className="jv-live-dot" data-state={statusState} />
-          <span style={{ textTransform: "uppercase", fontWeight: 500 }}>
+          <span style={{ textTransform: "uppercase" }}>
             {statusLabel}
           </span>
         </span>
@@ -237,10 +242,17 @@ export function Topbar() {
             rel="noreferrer"
             className="hidden sm:inline-flex items-center gap-1.5 rounded-full border px-2 py-[2px] hover:opacity-90 transition-opacity"
             style={{
-              borderColor: "rgba(245, 158, 11, 0.4)",
-              backgroundColor: "rgba(245, 158, 11, 0.12)",
-              fontSize: "10px",
-              color: "rgb(252, 211, 77)",
+              // WHY CSS vars instead of hardcoded RGB: `rgb(252, 211, 77)` on
+              // `rgba(245,158,11,0.12)` fails WCAG 4.5:1 contrast on light theme
+              // because both values are light-theme-only constants. The design
+              // tokens `--status-warn` / `--status-warn-soft` are defined per
+              // theme in globals.css and are calibrated to meet contrast in both
+              // dark and light modes without needing a media query here.
+              borderColor: "color-mix(in oklch, var(--status-warn) 40%, transparent)",
+              backgroundColor: "var(--status-warn-soft)",
+              fontSize: "11px",
+              fontWeight: 600,
+              color: "var(--status-warn)",
               letterSpacing: "0.04em",
               textDecoration: "none",
             }}
@@ -248,7 +260,7 @@ export function Topbar() {
           >
             <span style={{
               width: 6, height: 6, borderRadius: 999,
-              backgroundColor: "rgb(245, 158, 11)",
+              backgroundColor: "var(--status-warn)",
               display: "inline-block",
             }} />
             <span style={{ textTransform: "uppercase", fontWeight: 500 }}>

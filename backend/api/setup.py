@@ -5,21 +5,46 @@ POST /setup/credentials saves them and triggers the OAuth flow.
 """
 
 import os
+import re
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+# Sec#9: validate Anthropic token format before writing to .env / Keychain.
+# Accepts both API keys (sk-ant-api...) and OAuth tokens (sk-ant-oat...).
+# Rejects obviously invalid strings early — catches copy-paste mistakes and
+# prompt-injection attempts that try to smuggle env-breaking chars into the
+# value (newlines, equals signs, etc. are excluded by the character class).
+_TOKEN_RE = re.compile(r"^sk-ant-(api|oat)\d+-[A-Za-z0-9_-]{20,}$")
+
 from api._security import _require_local_origin
-from tools.computer import _write_env
+from tools.computer import _write_env as _write_env_unsafe
 
 router = APIRouter()
 
-_ALLOWED = {
+# Allowlist of env keys this module may write.
+# The old _ALLOWED set was defined but never enforced — all writes were
+# hardcoded literals so the guard was dead code. Enforcing it here means
+# a future refactor that introduces user-controlled key routing is caught
+# at the write site rather than silently persisting arbitrary env vars.
+_ALLOWED_KEYS: frozenset[str] = frozenset({
     "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REDIRECT_URI",
     "MS_CLIENT_ID", "MS_TENANT_ID",
     "UWORLD_USERNAME", "UWORLD_PASSWORD",
     "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
-}
+})
+
+
+def _write_env(key: str, value: str) -> None:
+    """Write an env key to .env — raises ValueError if key is not allowlisted.
+
+    Wraps tools.computer._write_env with an explicit guard so that if a
+    future refactor accidentally passes a user-controlled key here, it fails
+    loudly instead of writing arbitrary environment variables to .env.
+    """
+    if key not in _ALLOWED_KEYS:
+        raise ValueError(f"Refusing to write env key not in allowlist: {key}")
+    _write_env_unsafe(key, value)
 
 
 # ── GET /setup ────────────────────────────────────────────────────────────────
@@ -112,6 +137,17 @@ def save_credentials(
     if service == "claude":
         token = anthropic_token.strip()
         if token:
+            # Sec#9: reject tokens that don't match the expected format before
+            # writing. This catches copy-paste mistakes (e.g. pasting a URL or
+            # a truncated token) and prevents env-file injection via embedded
+            # newlines or equals signs (the regex character class excludes them).
+            if not _TOKEN_RE.match(token):
+                return HTMLResponse(
+                    "<h2>Invalid token format.</h2>"
+                    "<p>Expected <code>sk-ant-api…</code> or <code>sk-ant-oat…</code>. "
+                    "<a href='/setup'>Go back</a></p>",
+                    status_code=400,
+                )
             if token.startswith("sk-ant-oat"):
                 _write_env("CLAUDE_CODE_OAUTH_TOKEN", token)
                 os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = token

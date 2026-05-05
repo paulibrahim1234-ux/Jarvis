@@ -355,8 +355,11 @@ def refresh_now(force: bool = False) -> dict:
         except Exception:
             pass
 
+        # Sec#6: log only the fixed 13-char prefix ("sk-ant-oat01-") so zero
+        # unique token material leaks to log files. The first 13 chars are
+        # constant across all Claude OAuth tokens and carry no entropy.
         log.info("OAuth refresh OK — expires in %ds (token prefix=%s...)",
-                 expires_in, access[:20])
+                 expires_in, access[:13])
         return {"ok": True, "action": "refreshed", "expires_in": expires_in}
 
 

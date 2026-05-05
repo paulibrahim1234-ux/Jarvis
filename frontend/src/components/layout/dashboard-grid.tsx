@@ -26,6 +26,7 @@ const WIDGET_LABELS: Record<string, string> = {
   qbank: "QBank",
   nbme: "NBME Progress",
   chatbot: "Jarvis Chat",
+  triage: "Triage",
 };
 
 const DEFAULT_LAYOUT: ReactGridLayout.Layout[] = [
@@ -41,6 +42,9 @@ const DEFAULT_LAYOUT: ReactGridLayout.Layout[] = [
   { i: "streak",    x: 0, y: 24, w: 12, h: 6,  minH: 5, minW: 4 },
   { i: "qbank",     x: 0, y: 30, w: 8,  h: 9,  minH: 6, minW: 3 },
   { i: "nbme",      x: 8, y: 30, w: 4,  h: 9,  minH: 6, minW: 2 },
+  // WHY y:39: bottom row ends at y:30+h:9=39, so triage slots cleanly below
+  // without displacing any existing widget.
+  { i: "triage",    x: 0, y: 39, w: 4,  h: 8,  minH: 5, minW: 3 },
 ];
 
 // WHY module scope: re-creating this object on every render causes React to
@@ -49,6 +53,22 @@ const DEFAULT_LAYOUT: ReactGridLayout.Layout[] = [
 const BREAKPOINT_COLS: Record<string, number> = { lg: 12, md: 8, sm: 4 };
 
 const ALL_KEYS = DEFAULT_LAYOUT.map((l) => l.i);
+
+// WHY module scope: these helpers have no closure over component state, so
+// recreating them as inline arrows on every render wastes identity and
+// defeats memoisation in callbacks that reference them (useCallback deps
+// would need to include the arrow, triggering spurious re-runs).
+// Stable module-scope functions also make the eslint exhaustive-deps rule
+// happy without eslint-disable comments.
+function safeSet(key: string, value: string) {
+  // iOS Safari throws QuotaExceededError when localStorage is near its ~5MB
+  // cap. Swallow silently — losing layout persistence beats crashing the grid
+  // with an error that React bubbles to an error boundary.
+  try { localStorage.setItem(key, value); } catch { /* ignore quota errors */ }
+}
+function safeRemove(key: string) {
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
+}
 
 interface DashboardGridProps {
   widgets: Record<string, React.ReactNode>;
@@ -157,25 +177,12 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [showPanel]);
 
-  // localStorage on iOS Safari throws QuotaExceededError when storage is
-  // near full (~5MB cap, easy to hit with cached app data). Wrap every
-  // setItem so the layout-change handler can never crash the grid with
-  // an unhandled exception that React bubbles to an error boundary.
-  const safeSet = (key: string, value: string) => {
-    try {
-      localStorage.setItem(key, value);
-    } catch {
-      // Silently drop — better to lose layout persistence than to crash.
-      // A future enhancement: surface a one-time toast.
-    }
-  };
-  const safeRemove = (key: string) => {
-    try { localStorage.removeItem(key); } catch { /* ignore */ }
-  };
-
   const onLayoutChange = useCallback(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (_current: any, allLayouts: any) => {
+    // WHY proper RGL types: ReactGridLayout.Layout[] for the current
+    // breakpoint snapshot and ReactGridLayout.Layouts for the full map.
+    // Using `any` here suppressed real type errors and broke exhaustive
+    // checking on the allLayouts object downstream.
+    (_current: ReactGridLayout.Layout[], allLayouts: ReactGridLayout.Layouts) => {
       setLayouts(allLayouts);
       safeSet(LAYOUT_KEY, JSON.stringify(allLayouts));
     },

@@ -73,29 +73,45 @@ def _sp():
     4-burst pattern that tripped Spotify's rate limiter. The singleton is kept
     until a 401 forces a rebuild via _reset_sp_instance().
 
-    The _SP_INSTANCE_LOCK serializes construction only on the cold path — once
-    the instance exists, reads are lock-free (GIL protects the pointer read).
+    Py#6 — lock-order fix: the old code held _SP_INSTANCE_LOCK (outer) while
+    acquiring _TOKEN_REFRESH_LOCK (inner) and doing network I/O. Problems:
+      1. Nested lock-order hazard — any path taking _TOKEN_REFRESH_LOCK first
+         then _SP_INSTANCE_LOCK would deadlock.
+      2. All threads blocked on _SP_INSTANCE_LOCK during a token-refresh HTTP
+         round-trip (up to 8 s), serialising every concurrent widget tick.
+
+    New pattern: fast-path read with no locks (GIL guards the pointer read),
+    then network I/O under _TOKEN_REFRESH_LOCK alone, then briefly take
+    _SP_INSTANCE_LOCK only for the cheap pointer assignment. The double-check
+    inside the instance lock handles the race where two threads both took the
+    slow path — the second one returns whichever instance won the assignment.
     """
-    global _SP_INSTANCE
+    # Fast path: singleton already built — no lock needed (GIL protects read).
+    if _SP_INSTANCE is not None:
+        return _SP_INSTANCE
+
+    # Slow path: build a new client. Validate the cached token under the
+    # refresh lock alone so concurrent widget threads don't race on the
+    # Spotify token endpoint (rotation: first write wins, others get 401).
+    import spotipy
+    auth = _auth()
+    with _TOKEN_REFRESH_LOCK:
+        auth.validate_token(auth.cache_handler.get_cached_token())
+    new_client = spotipy.Spotify(
+        auth_manager=auth,
+        retries=0,             # don't auto-retry — we'd rather see the failure quick
+        status_retries=0,
+        backoff_factor=0,
+        requests_timeout=8,    # per-call HTTP timeout in seconds
+    )
+    # Brief instance-lock window — only the pointer assignment, no I/O.
+    # Double-check: if another thread won the race and set _SP_INSTANCE
+    # while we were building new_client, return their instance (both are
+    # equally valid; only one refresh-token write matters, already done
+    # above under _TOKEN_REFRESH_LOCK).
     with _SP_INSTANCE_LOCK:
         if _SP_INSTANCE is None:
-            import spotipy
-            auth = _auth()
-            # Hold the refresh lock while validating the cached token so that at most
-            # one thread performs the network round-trip to Spotify's token endpoint.
-            # Spotify rotates refresh tokens on use — if several threads call
-            # refresh_access_token() concurrently (which SpotifyOAuth does internally
-            # when it finds an expired token), only the first save is valid; the rest
-            # cache a stale refresh token that yields 401s on the next widget cycle.
-            with _TOKEN_REFRESH_LOCK:
-                auth.validate_token(auth.cache_handler.get_cached_token())
-            _SP_INSTANCE = spotipy.Spotify(
-                auth_manager=auth,
-                retries=0,             # don't auto-retry — we'd rather see the failure quick
-                status_retries=0,
-                backoff_factor=0,
-                requests_timeout=8,    # per-call HTTP timeout in seconds
-            )
+            globals()["_SP_INSTANCE"] = new_client
         return _SP_INSTANCE
 
 
@@ -567,7 +583,8 @@ def run_spotify_tool(name: str, inp: dict):
     remaining = _check_rate_limited()
     if remaining > 0:
         import datetime as _dt
-        retry_at = _dt.datetime.fromtimestamp(_time.time() + remaining).strftime("%-I:%M %p")
+        # Py#2: %-I is GNU-only and fails on macOS Python; use %I + lstrip("0")
+        retry_at = _dt.datetime.fromtimestamp(_time.time() + remaining).strftime("%I:%M %p").lstrip("0") or "0"
         return {"error": "rate_limited", "message": f"Spotify rate-limited — retry after {retry_at}"}
 
     sp = _sp()

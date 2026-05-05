@@ -9,9 +9,9 @@ Server-side persistent memory for Jarvis chatbot.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -79,21 +79,42 @@ def _scrub_phi(text: str) -> "str | None":
 # ─────────────────────────────────────────────────────────────────────── #
 
 
+# Thread-local storage for the connection pool.
+# WHY: every chat turn previously opened and closed ~14 sqlite3 connections
+# (one per DB helper call). With FastAPI's threadpool (~4-50 workers) each
+# thread now holds one persistent WAL connection for its lifetime, cutting
+# per-turn connection overhead to a single dict lookup. WAL mode (set once
+# in init_db) handles concurrent readers + one writer without locking.
+_local = threading.local()
+
+
 def _connect() -> sqlite3.Connection:
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=5.0, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
+    """Per-thread persistent connection. WAL mode is sticky from init_db."""
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        DB_DIR.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = conn
     return conn
 
 
 def init_db() -> None:
-    """Create tables on startup."""
-    conn = _connect()
-    # WAL is sticky in the file header — set once at init.
-    conn.execute("PRAGMA journal_mode=WAL")
+    """Create tables on startup.
+
+    WHY a dedicated connection here: init_db runs once at startup (from
+    api/chat.py import time) and must set WAL mode then close. Using a
+    separate raw connect() — not the thread-local pool — avoids storing
+    a connection on the startup thread that FastAPI later recycles, which
+    would leave a stale handle in _local.conn on that thread.
+    """
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    # Dedicated one-shot connection: set WAL (sticky in file header) then close.
+    init_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    init_conn.execute("PRAGMA journal_mode=WAL")
     try:
-        conn.executescript(
+        init_conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS conversations (
                 id           TEXT PRIMARY KEY,
@@ -127,9 +148,9 @@ def init_db() -> None:
                 ON facts(last_used_at DESC);
             """
         )
-        conn.commit()
+        init_conn.commit()
     finally:
-        conn.close()
+        init_conn.close()
 
 
 # ────────────────────────── conversations ────────────────────────── #
@@ -139,84 +160,71 @@ def create_conversation(title: Optional[str] = None) -> dict:
     now = _now_iso()
     title = title or "New chat"
     conn = _connect()
-    try:
-        conn.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (cid, title, now, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    # WHY no close: thread-local pool — connection persists for thread lifetime.
+    conn.execute(
+        "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        (cid, title, now, now),
+    )
+    conn.commit()
     return {"id": cid, "title": title, "created_at": now, "updated_at": now}
 
 
 def list_conversations() -> list[dict]:
     conn = _connect()
-    try:
-        rows = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_conversation(cid: str) -> Optional[dict]:
     conn = _connect()
-    try:
-        row = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
-            (cid,),
-        ).fetchone()
-        if not row:
-            return None
-        msgs = conn.execute(
-            "SELECT id, role, content, tool_calls, created_at FROM messages "
-            "WHERE conversation_id = ? ORDER BY id ASC",
-            (cid,),
-        ).fetchall()
-        return {
-            **dict(row),
-            "messages": [
-                {
-                    "id": m["id"],
-                    "role": m["role"],
-                    "content": m["content"],
-                    "tool_calls": json.loads(m["tool_calls"]) if m["tool_calls"] else None,
-                    "created_at": m["created_at"],
-                }
-                for m in msgs
-            ],
-        }
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
+        (cid,),
+    ).fetchone()
+    if not row:
+        return None
+    msgs = conn.execute(
+        "SELECT id, role, content, tool_calls, created_at FROM messages "
+        "WHERE conversation_id = ? ORDER BY id ASC",
+        (cid,),
+    ).fetchall()
+    return {
+        **dict(row),
+        "messages": [
+            {
+                "id": m["id"],
+                "role": m["role"],
+                "content": m["content"],
+                "tool_calls": json.loads(m["tool_calls"]) if m["tool_calls"] else None,
+                "created_at": m["created_at"],
+            }
+            for m in msgs
+        ],
+    }
 
 
 def delete_conversation(cid: str) -> bool:
     conn = _connect()
-    try:
-        cur = conn.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-        # CASCADE handles messages
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
+    cur = conn.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+    # CASCADE handles messages
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def conversation_exists(conversation_id: str) -> bool:
     """Return True if the conversation row exists — used to give a clear error
     when a client sends a stale or deleted conversation_id before we attempt
     to append a message and hit a FK constraint."""
-    # sqlite3's context manager only commits/rolls-back — it does NOT close the
-    # connection.  Use try/finally so every call path closes the file handle.
+    # WHY no close: thread-local pool — connection persists for thread lifetime.
+    # The old try/finally:close was correct for the old per-call connect model;
+    # with the pool, closing would drop the shared handle mid-thread.
     conn = _connect()
-    try:
-        row = conn.execute(
-            "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
-        ).fetchone()
-        return row is not None
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+    ).fetchone()
+    return row is not None
 
 
 def append_message(
@@ -227,37 +235,34 @@ def append_message(
 ) -> None:
     now = _now_iso()
     conn = _connect()
-    try:
-        conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_calls, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                conversation_id,
-                role,
-                content,
-                json.dumps(tool_calls) if tool_calls is not None else None,
-                now,
-            ),
-        )
-        conn.execute(
-            "UPDATE conversations SET updated_at = ? WHERE id = ?",
-            (now, conversation_id),
-        )
-        # Auto-title: if first user message, set as title (truncated)
-        if role == "user":
-            row = conn.execute(
-                "SELECT title FROM conversations WHERE id = ?", (conversation_id,)
-            ).fetchone()
-            if row and row["title"] in (None, "", "New chat"):
-                title = content.strip().splitlines()[0][:60]
-                if title:
-                    conn.execute(
-                        "UPDATE conversations SET title = ? WHERE id = ?",
-                        (title, conversation_id),
-                    )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, tool_calls, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            conversation_id,
+            role,
+            content,
+            json.dumps(tool_calls) if tool_calls is not None else None,
+            now,
+        ),
+    )
+    conn.execute(
+        "UPDATE conversations SET updated_at = ? WHERE id = ?",
+        (now, conversation_id),
+    )
+    # Auto-title: if first user message, set as title (truncated)
+    if role == "user":
+        row = conn.execute(
+            "SELECT title FROM conversations WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        if row and row["title"] in (None, "", "New chat"):
+            title = content.strip().splitlines()[0][:60]
+            if title:
+                conn.execute(
+                    "UPDATE conversations SET title = ? WHERE id = ?",
+                    (title, conversation_id),
+                )
+    conn.commit()
 
 
 def get_recent_messages(conversation_id: str, limit: int = 40) -> list[dict]:
@@ -267,19 +272,16 @@ def get_recent_messages(conversation_id: str, limit: int = 40) -> list[dict]:
     SQL so the LIMIT applies only to real messages — without this, breadcrumbs
     would steal context budget and Claude would lose earlier turns."""
     conn = _connect()
-    try:
-        rows = conn.execute(
-            "SELECT role, content FROM messages "
-            "WHERE conversation_id = ? "
-            "  AND NOT (role = 'assistant' AND content LIKE '[tool] %') "
-            "ORDER BY id DESC LIMIT ?",
-            (conversation_id, limit),
-        ).fetchall()
-        msgs = [{"role": r["role"], "content": r["content"]} for r in rows]
-        msgs.reverse()
-        return msgs
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT role, content FROM messages "
+        "WHERE conversation_id = ? "
+        "  AND NOT (role = 'assistant' AND content LIKE '[tool] %') "
+        "ORDER BY id DESC LIMIT ?",
+        (conversation_id, limit),
+    ).fetchall()
+    msgs = [{"role": r["role"], "content": r["content"]} for r in rows]
+    msgs.reverse()
+    return msgs
 
 
 # ─────────────────────────── tool breadcrumbs ────────────────────────── #
@@ -294,33 +296,27 @@ def append_tool_summary(conversation_id: str, summary: str) -> None:
     text = summary if summary.startswith("[tool] ") else f"[tool] {summary}"
     now = _now_iso()
     conn = _connect()
-    try:
-        conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, tool_calls, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (conversation_id, "assistant", text, None, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content, tool_calls, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (conversation_id, "assistant", text, None, now),
+    )
+    conn.commit()
 
 
 def get_recent_tool_breadcrumbs(conversation_id: str, limit: int = 10) -> list[str]:
     """Return the most-recent tool breadcrumbs for the conversation, oldest-first.
     Each item is the full content string (with the "[tool] " prefix stripped)."""
     conn = _connect()
-    try:
-        rows = conn.execute(
-            "SELECT content FROM messages WHERE conversation_id = ? "
-            "AND role = 'assistant' AND content LIKE '[tool] %' "
-            "ORDER BY id DESC LIMIT ?",
-            (conversation_id, limit),
-        ).fetchall()
-        items = [(r["content"] or "")[len("[tool] "):] for r in rows]
-        items.reverse()
-        return items
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT content FROM messages WHERE conversation_id = ? "
+        "AND role = 'assistant' AND content LIKE '[tool] %' "
+        "ORDER BY id DESC LIMIT ?",
+        (conversation_id, limit),
+    ).fetchall()
+    items = [(r["content"] or "")[len("[tool] "):] for r in rows]
+    items.reverse()
+    return items
 
 
 # ──────────────────────────── facts ──────────────────────────────── #
@@ -328,37 +324,31 @@ def get_recent_tool_breadcrumbs(conversation_id: str, limit: int = 10) -> list[s
 def add_fact(topic: str, fact: str) -> None:
     now = _now_iso()
     conn = _connect()
-    try:
-        # dedupe on (topic, fact) — update timestamps if exists
-        existing = conn.execute(
-            "SELECT id FROM facts WHERE topic = ? AND fact = ?", (topic, fact)
-        ).fetchone()
-        if existing:
-            conn.execute(
-                "UPDATE facts SET last_used_at = ? WHERE id = ?", (now, existing["id"])
-            )
-        else:
-            conn.execute(
-                "INSERT INTO facts (topic, fact, created_at, last_used_at) "
-                "VALUES (?, ?, ?, ?)",
-                (topic, fact, now, now),
-            )
-        conn.commit()
-    finally:
-        conn.close()
+    # dedupe on (topic, fact) — update timestamps if exists
+    existing = conn.execute(
+        "SELECT id FROM facts WHERE topic = ? AND fact = ?", (topic, fact)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE facts SET last_used_at = ? WHERE id = ?", (now, existing["id"])
+        )
+    else:
+        conn.execute(
+            "INSERT INTO facts (topic, fact, created_at, last_used_at) "
+            "VALUES (?, ?, ?, ?)",
+            (topic, fact, now, now),
+        )
+    conn.commit()
 
 
 def get_top_facts(limit: int = 10) -> list[dict]:
     conn = _connect()
-    try:
-        rows = conn.execute(
-            "SELECT topic, fact, created_at, last_used_at FROM facts "
-            "ORDER BY last_used_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT topic, fact, created_at, last_used_at FROM facts "
+        "ORDER BY last_used_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def touch_facts(ids: list[int]) -> None:
@@ -366,15 +356,12 @@ def touch_facts(ids: list[int]) -> None:
         return
     now = _now_iso()
     conn = _connect()
-    try:
-        qmarks = ",".join("?" for _ in ids)
-        conn.execute(
-            f"UPDATE facts SET last_used_at = ? WHERE id IN ({qmarks})",
-            (now, *ids),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    qmarks = ",".join("?" for _ in ids)
+    conn.execute(
+        f"UPDATE facts SET last_used_at = ? WHERE id IN ({qmarks})",
+        (now, *ids),
+    )
+    conn.commit()
 
 
 def extract_facts_async(user_msg: str, assistant_reply: str) -> None:
@@ -454,25 +441,19 @@ async def _fetch_one(client: httpx.AsyncClient, path: str) -> dict:
     return {}
 
 
-async def dashboard_snapshot_async() -> str:
-    """Concurrent fetch of widget state → 5-line summary."""
+def _format_snapshot(anki: dict, cal: dict, email: dict, spotify: dict) -> str:
+    """Format widget dicts into the 5-line dashboard string.
+
+    WHY extracted: both the in-process cache path and the HTTP fallback path in
+    dashboard_snapshot_async need identical formatting. A shared helper ensures
+    the two paths produce the same output and keeps each path lean.
+    """
     # %-I and %-d are GNU libc extensions that fail on some macOS Python builds,
     # rendering as literal "%-I"/"%-d".  Strip leading zeros manually instead.
     _now = datetime.now()
     _hour = _now.strftime("%I").lstrip("0") or "0"
     _day  = str(_now.day)
     now_label = _now.strftime(f"%a %b {_day}, {_hour}:%M%p")
-    try:
-        async with httpx.AsyncClient() as client:
-            import asyncio
-            anki, cal, email, spotify = await asyncio.gather(
-                _fetch_one(client, "/widgets/anki"),
-                _fetch_one(client, "/widgets/calendar"),
-                _fetch_one(client, "/widgets/email"),
-                _fetch_one(client, "/widgets/spotify"),
-            )
-    except Exception:
-        anki = cal = email = spotify = {}
 
     lines = [f"Now: {now_label}."]
 
@@ -480,7 +461,6 @@ async def dashboard_snapshot_async() -> str:
     _ROTATION_CALENDARS = {"Rotation", "Subscribed Calendar", "Work"}
     events = cal.get("events") or []
     if events:
-        # Find first non-rotation event
         e0 = None
         for e in events:
             cal_name = (e.get("calendar") or "").strip()
@@ -526,6 +506,49 @@ async def dashboard_snapshot_async() -> str:
         lines.append("Spotify: not running.")
 
     return "\n".join(lines)
+
+
+async def dashboard_snapshot_async() -> str:
+    """Build the 5-line dashboard summary for the agent system prompt.
+
+    Fast path (Perf#2): read widget data directly from api.widgets._CACHE
+    (in-process dict lookup, ~0 ms) instead of firing 4 loopback HTTP GETs
+    (~60-100 ms). Falls back to HTTP if the cache is cold or the import fails
+    (e.g. cyclic import edge case on first startup).
+    """
+    import asyncio as _asyncio
+
+    # ── Fast path: in-process cache read ──────────────────────────────────
+    try:
+        from api.widgets import build_snapshot_from_cache
+        cached = build_snapshot_from_cache()
+        if cached:
+            # At least one widget hot — format and return immediately.
+            return _format_snapshot(
+                anki=cached.get("anki_stats", {}),
+                cal=cached.get("calendar", {}),
+                email=cached.get("email", {}),
+                spotify=cached.get("spotify", {}),
+            )
+    except ImportError:
+        # WHY catch ImportError only: a cyclic import at startup is the one
+        # expected failure mode. Any other exception (e.g. KeyError in the
+        # cache read) should surface, not be silently swallowed here.
+        pass
+
+    # ── Slow path: loopback HTTP (cache cold or import unavailable) ───────
+    try:
+        async with httpx.AsyncClient() as client:
+            anki, cal, email, spotify = await _asyncio.gather(
+                _fetch_one(client, "/widgets/anki"),
+                _fetch_one(client, "/widgets/calendar"),
+                _fetch_one(client, "/widgets/email"),
+                _fetch_one(client, "/widgets/spotify"),
+            )
+    except Exception:
+        anki = cal = email = spotify = {}
+
+    return _format_snapshot(anki=anki, cal=cal, email=email, spotify=spotify)
 
 
 def dashboard_snapshot() -> str:

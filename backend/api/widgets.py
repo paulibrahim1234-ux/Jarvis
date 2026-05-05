@@ -3,9 +3,10 @@ Widget endpoints — try desktop apps first, fall back to API-based tools.
 Desktop apps (Outlook, Spotify) work with no OAuth or Azure setup.
 """
 
+import datetime as _datetime
 import threading
 import time
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from api._security import _require_local_origin
 from tools.anki import _invoke as anki_invoke, _invoke_multi as anki_invoke_multi
@@ -108,6 +109,59 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
     return value
 
 
+
+def build_snapshot_from_cache() -> dict:
+    """In-process snapshot of cached widget data for the agent system prompt.
+
+    WHY this exists: dashboard_snapshot_async previously HTTP-called itself for
+    the same data already in _CACHE. The loopback HTTP roundtrip (~60-100 ms)
+    was the dominant non-Anthropic latency in /chat. Reading _CACHE directly
+    cuts it to a dict lookup (~0 ms).
+
+    Cache keys confirmed against _cached() call sites in this file:
+      anki_stats  -> /widgets/anki (key="anki_stats", ttl=30s)
+      calendar    -> /widgets/calendar (key="calendar", ttl=600s)
+      email       -> /widgets/email default (key="email::::", ttl=60s)
+      spotify     -> /widgets/spotify is a live composite; use "spotify_now_web"
+                     (ttl=5s) as best-effort. Absent in desktop-only mode.
+
+    Returns dict of hot keys only. Empty dict = all cold, caller uses HTTP path.
+    """
+    now = time.time()
+    out: dict = {}
+
+    anki_entry = _CACHE.get("anki_stats")
+    if anki_entry and anki_entry[0] > now:
+        out["anki_stats"] = anki_entry[1]
+
+    cal_entry = _CACHE.get("calendar")
+    if cal_entry and cal_entry[0] > now:
+        out["calendar"] = cal_entry[1]
+
+    # Default email key: folder="" account="" gives "email::::"
+    email_entry = _CACHE.get("email::::")
+    if email_entry and email_entry[0] > now:
+        out["email"] = email_entry[1]
+
+    # Spotify: composite endpoint has no single _cached() key. Use
+    # "spotify_now_web" (Web API path, 5s TTL) as best-effort.
+    # Desktop-only users will get {} here, which _format_snapshot turns into
+    # "Spotify: not running." -- identical to the HTTP fallback output.
+    spotify_entry = _CACHE.get("spotify_now_web")
+    if spotify_entry and spotify_entry[0] > now and spotify_entry[1]:
+        raw = spotify_entry[1]
+        out["spotify"] = {
+            "available": True,
+            "track": {
+                "title": raw.get("title") or raw.get("name"),
+                "name": raw.get("name") or raw.get("title"),
+                "is_playing": raw.get("is_playing", False),
+            },
+        }
+
+    return out
+
+
 # ── Anki ──────────────────────────────────────────────────────────────────────
 
 @router.get("/widgets/anki")
@@ -201,7 +255,9 @@ def _compute_streak() -> int:
             # Detect ms vs s: ms timestamps are > 1e12
             secs = ts / 1000.0 if ts > 1e12 else float(ts)
             reviewed_dates.add(
-                __import__("datetime").date.fromtimestamp(secs).isoformat()
+                # Use module-level _datetime import — __import__ adds per-call
+                # import machinery overhead and defers the import unnecessarily.
+                _datetime.date.fromtimestamp(secs).isoformat()
             )
         except Exception:
             continue
@@ -422,7 +478,7 @@ def uworld_widget():
 
 
 @router.post("/widgets/uworld/refresh")
-def uworld_refresh(request: Request):
+def uworld_refresh(request: Request, response: Response):
     """Trigger a live UWorld scrape from the logged-in browser session (default: Comet).
 
     Calls _uworld_scrape_history() from tools/browser.py, persists results
@@ -431,6 +487,8 @@ def uworld_refresh(request: Request):
     helpful message) as valid responses.
     Browser not running = returns logged_out state with clear message.
     """
+    # no-store: POST responses must not be cached — each scrape produces fresh data.
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     import datetime as _dt
     try:
@@ -500,7 +558,7 @@ def uworld_refresh(request: Request):
 # ── UWorld deep-link navigation ──────────────────────────────────────────────
 
 @router.post("/widgets/uworld/open-question")
-def uworld_open_question(payload: dict, request: Request):
+def uworld_open_question(payload: dict, request: Request, response: Response):
     """Navigate the user's existing UWorld tab in Comet to the question URL.
 
     Why a backend endpoint instead of `window.open`? `window.open` opens a NEW
@@ -517,6 +575,8 @@ def uworld_open_question(payload: dict, request: Request):
       "url": "https://apps.uworld.com/courseapp/.../results/14842106/422970934/2"
     }
     """
+    # no-store: navigation POSTs must not be cached — each call navigates a live tab.
+    response.headers["Cache-Control"] = "no-store"
     # Reject cross-origin requests: combined with _uw_set_tab_url accepting any
     # URL, a missing CSRF guard would let a page on another origin navigate the
     # user's live UWorld tab to an arbitrary URL via a cross-site POST.
@@ -689,7 +749,7 @@ _ANKI_BUILD_LOCK = threading.Lock()
 
 
 @router.post("/widgets/anki/build-index")
-def anki_build_index_start(request: Request):
+def anki_build_index_start(request: Request, response: Response):
     """Kick off a background build of the QID → cards index.
 
     Strategy that does NOT crash Anki:
@@ -701,6 +761,8 @@ def anki_build_index_start(request: Request):
     Returns immediately with status; subsequent calls to /widgets/anki/build-index/status
     report progress. On completion, /widgets/anki/suggestions becomes instant.
     """
+    # no-store: kicks off a background build; result is a one-time status token.
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     import threading
 
@@ -715,7 +777,9 @@ def anki_build_index_start(request: Request):
             "running": True,
             "progress": 0,
             "total": 0,
-            "started_at": __import__("datetime").datetime.utcnow().isoformat(),
+            # Use module-level _datetime import — __import__ adds per-call
+            # import machinery overhead; utcnow() is called on every index build.
+            "started_at": _datetime.datetime.utcnow().isoformat(),
             "error": None,
         })
     # Lock released here — state is fully consistent before the thread starts.
@@ -737,7 +801,7 @@ def anki_build_index_start(request: Request):
         def _persist():
             import tempfile as _tempfile, os as _os
             snapshot = dict(index)
-            snapshot["__built_at__"] = __import__("datetime").datetime.utcnow().isoformat()
+            snapshot["__built_at__"] = _datetime.datetime.utcnow().isoformat()
             _ANKI_QID_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
             # Write to a temp file then atomically replace the target. A direct
             # open("w") + json.dump leaves a window where a crash produces a
@@ -868,9 +932,11 @@ class AnkiUnsuspendBody(BaseModel):
 
 
 @router.post("/widgets/anki/unsuspend")
-def anki_unsuspend(body: AnkiUnsuspendBody, request: Request):
+def anki_unsuspend(body: AnkiUnsuspendBody, request: Request, response: Response):
     """Unsuspend the given Anki card IDs via AnkiConnect. Requires explicit
     click in the dashboard. Cross-site POSTs are rejected."""
+    # no-store: unsuspend is a one-shot mutation; caching the response is unsafe.
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     ids = [int(x) for x in (body.card_ids or [])]
     if not ids:
@@ -892,7 +958,10 @@ def anki_unsuspend(body: AnkiUnsuspendBody, request: Request):
 # ── iMessage ──────────────────────────────────────────────────────────────────
 
 @router.get("/widgets/imessage")
-def imessage_widget(include_groups: bool = True, limit: int = 25):
+def imessage_widget(response: Response, include_groups: bool = True, limit: int = 25):
+    # Cache-Control: 8s matches the server-side TTL — browser reuses cached
+    # payload during that window and revalidates in the background via SWR.
+    response.headers["Cache-Control"] = "max-age=8, stale-while-revalidate=15"
     # Group chats are now ON by default — verified via the iMessage MCP that
     # group-chat unreads (e.g. tapback "Laughed at..." in the family thread)
     # were silently dropped before. The user's complaint about "messages
@@ -1066,9 +1135,13 @@ def email_body(id: str = Query(..., description="Outlook message id")):
 
 @router.get("/widgets/email")
 def email_widget(
+    response: Response,
     folder: str = Query("", description="Optional mail folder name"),
     account: str = Query("", description="Optional account name/email filter"),
 ):
+    # Cache-Control: email changes slowly; 120s browser cache prevents redundant
+    # fetches from rapid widget re-renders while SWR keeps it from going stale.
+    response.headers["Cache-Control"] = "max-age=120, stale-while-revalidate=240"
     # Cache per (folder, account) pair; 60s TTL.
     # Canonical default key (both empty) must match what warm_widgets and
     # briefing_widget use: "email::::".  The formula is:
@@ -1145,7 +1218,10 @@ def _compute_calendar():
 
 
 @router.get("/widgets/calendar")
-def calendar_widget(start: str = "", end: str = ""):
+def calendar_widget(response: Response, start: str = "", end: str = ""):
+    # Cache-Control: calendar data is expensive to fetch (30-60s AppleScript);
+    # 120s browser cache absorbs repeated fetches from multiple widget renders.
+    response.headers["Cache-Control"] = "max-age=120, stale-while-revalidate=240"
     # 10 min cache — Calendar.app AppleScript takes 30-60s on user's
     # 12-calendar setup. Pass _SEM_CALENDAR so concurrent warm + read requests
     # don't both fire AppleScript in parallel; the semaphore's cold-start
@@ -1189,10 +1265,63 @@ def calendar_widget(start: str = "", end: str = ""):
     }
 
 
+# ── Triage (chief-of-staff: email + iMessage classification) ─────────────────
+
+@router.get("/widgets/triage")
+def triage_widget(response: Response):
+    """Chief-of-staff 4-tier triage of unread email + iMessage. 5-min cache.
+
+    WHY read-only GET with no CSRF guard: this endpoint only reads data and
+    calls the Anthropic API — it never mutates local state. _require_local_origin
+    is only needed on mutating endpoints (POST/PUT/DELETE).
+    """
+    # Cache-Control: triage calls Anthropic (expensive); 5-min browser cache
+    # matches the server-side TTL and prevents redundant Opus calls on tab focus.
+    response.headers["Cache-Control"] = "max-age=300, stale-while-revalidate=600"
+    def _compute():
+        # Fetch payloads using the same functions the existing email/iMessage
+        # endpoints use so we reuse any warm cache entries and avoid duplicate
+        # AppleScript calls running concurrently.
+        email_data = _compute_email()
+        try:
+            from tools.imessage import get_conversations as _get_convos
+            imessage_data = {
+                "conversations": _get_convos(
+                    limit=25, messages_per_thread=10, include_groups=True
+                )
+            }
+        except Exception as e:
+            imessage_data = {"conversations": [], "error": str(e)[:200]}
+
+        # WHY local import: avoids a circular-import risk at module load time.
+        # agent.triage imports agent.jarvis which imports tools — keeping the
+        # import deferred to call time is the safe pattern already used by
+        # other endpoints (e.g. tools.outlook, tools.desktop_apps).
+        from agent.triage import compute_triage
+        try:
+            return compute_triage(email_data, imessage_data)
+        except Exception as e:
+            # Surface a typed error object so the frontend can render ErrorState
+            # instead of an unhandled blank widget.
+            return {
+                "error": str(e)[:200],
+                "skip_count": 0,
+                "skip_senders": [],
+                "info_only": [],
+                "meeting_info": [],
+                "action_required": [],
+                "stale": [],
+            }
+
+    # 300s = 5 minutes. Opus calls are expensive (~$0.015/call); caching keeps
+    # cost manageable while keeping the widget reasonably fresh for an MS3's pace.
+    return _cached("triage", 300, _compute)
+
+
 # ── On-demand warmup ──────────────────────────────────────────────────────────
 
 @router.post("/widgets/warm")
-def warm_widgets(request: Request):
+def warm_widgets(request: Request, response: Response):
     """Fire all slow AppleScript compute functions in the background so caches
     are hot before the user's first widget interaction.
 
@@ -1200,6 +1329,8 @@ def warm_widgets(request: Request):
     which were triggered. Safe to call multiple times — semaphores prevent
     duplicate in-flight AppleScript invocations.
     """
+    # no-store: warmup result is a one-time status snapshot, not cacheable data.
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     import concurrent.futures
 
@@ -1316,7 +1447,11 @@ def _spotify_queue_cached():
 
 
 @router.get("/widgets/spotify")
-def spotify_widget(request: Request):
+def spotify_widget(request: Request, response: Response):
+    # Cache-Control: short TTL so the progress bar stays accurate without
+    # hammering AppleScript on every animation frame. stale-while-revalidate
+    # lets the browser show stale data instantly while revalidating in the background.
+    response.headers["Cache-Control"] = "max-age=5, stale-while-revalidate=10"
     # 1) Now playing from AppleScript (free, no auth).
     now = {}
     try:
@@ -1446,7 +1581,8 @@ class SpotifyVolumeBody(BaseModel):
 
 
 @router.post("/widgets/spotify/search")
-def spotify_search(body: SpotifySearchBody, request: Request):
+def spotify_search(body: SpotifySearchBody, request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     if not _spotify_web_ok():
         return {
@@ -1464,8 +1600,9 @@ def spotify_search(body: SpotifySearchBody, request: Request):
 
 
 @router.post("/widgets/spotify/play")
-def spotify_play(body: SpotifyPlayBody, request: Request):
+def spotify_play(body: SpotifyPlayBody, request: Request, response: Response):
     """Play a Spotify URI via AppleScript (requires Spotify desktop app open)."""
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     data = _spotify_play_uri(body.uri)
     if "error" in data:
@@ -1474,7 +1611,8 @@ def spotify_play(body: SpotifyPlayBody, request: Request):
 
 
 @router.post("/widgets/spotify/control")
-def spotify_control(body: SpotifyControlBody, request: Request):
+def spotify_control(body: SpotifyControlBody, request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     action_map = {
         "play": "play",
@@ -1499,12 +1637,13 @@ class SpotifyContextBody(BaseModel):
 
 
 @router.post("/widgets/spotify/play-context")
-def spotify_play_context(body: SpotifyContextBody, request: Request):
+def spotify_play_context(body: SpotifyContextBody, request: Request, response: Response):
     """Play a Spotify context (playlist/album) via Web API.
 
     Preferred for playlists — uses PUT /v1/me/player/play with context_uri
     so the whole playlist plays in order, not just a single track.
     """
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     if not _spotify_web_ok():
         return {"ok": False, "error": "Spotify Web API not connected"}
@@ -1513,7 +1652,8 @@ def spotify_play_context(body: SpotifyContextBody, request: Request):
 
 
 @router.post("/widgets/spotify/volume")
-def spotify_volume(body: SpotifyVolumeBody, request: Request):
+def spotify_volume(body: SpotifyVolumeBody, request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store"
     _require_local_origin(request)
     v = max(0, min(100, int(body.volume)))
     data = _spotify_volume(v)
@@ -1605,7 +1745,7 @@ _BRIEFING_HIDDEN: frozenset[str] = frozenset({
 # ── Morning briefing ──────────────────────────────────────────────────────────
 
 @router.get("/widgets/briefing")
-def briefing_widget():
+def briefing_widget(response: Response):
     """
     Aggregates Anki stats + today's calendar events + unread mail count
     + folder-level mail breakdown + iMessage unread + Spotify now-playing
@@ -1614,6 +1754,9 @@ def briefing_widget():
     Each fetcher runs in a ThreadPoolExecutor with a per-task 3s timeout so
     one slow integration can't block the whole briefing.
     """
+    # Cache-Control: briefing is the most expensive endpoint (parallel Anthropic
+    # calls); 60s browser cache prevents redundant fetches from tab focus events.
+    response.headers["Cache-Control"] = "max-age=60, stale-while-revalidate=120"
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
     now = datetime.now()

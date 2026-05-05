@@ -16,6 +16,7 @@ import { NBMETrackerWidget } from "@/components/widgets/nbme-tracker-widget";
 import { WeekWidget } from "@/components/widgets/week-widget";
 import { SpotifyWidget } from "@/components/widgets/spotify-widget";
 import { DeepFocusOverlay } from "@/components/layout/deep-focus-overlay";
+import { TriageWidget } from "@/components/widgets/triage-widget";
 
 // MorningBriefing and SpotifyWidget manage their own WidgetWrapper so they
 // can forward status/lastUpdated props from inside the component where the
@@ -33,6 +34,7 @@ const widgets: Record<string, React.ReactNode> = {
   qbank:     <WidgetWrapper><UWorldWidget /></WidgetWrapper>,
   nbme:      <WidgetWrapper><NBMETrackerWidget /></WidgetWrapper>,
   chatbot:   <ChatbotPanel embedded />,
+  triage:    <WidgetWrapper><TriageWidget /></WidgetWrapper>,
 };
 
 export default function Home() {

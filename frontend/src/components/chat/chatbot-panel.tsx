@@ -58,6 +58,13 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const loadedRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+  // A11y#6 — refs for sidebar overlay focus management: track the Menu button
+  // that opened the sidebar so we can return focus to it on close
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const newChatSidebarRef = useRef<HTMLButtonElement>(null);
+  // TS#5 — tracks whether the in-flight send was aborted so the finally block
+  // can skip the nextId increment (cancels don't consume id slots)
+  const wasAborted = useRef(false);
 
   // ── Responsive observer ──
   // We track `isNarrow` so we can switch the sidebar to absolute-overlay
@@ -132,6 +139,36 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
       clearInterval(id);
     };
   }, []);
+
+  // A11y#6 — when sidebar opens as an overlay (narrow mode), focus the New Chat
+  // button; when it closes, return focus to the Menu button that triggered it.
+  // Uses sidebarOpen && isNarrow directly — avoids hoisting the derived variable
+  // above where it is normally computed in the render body.
+  useEffect(() => {
+    const isOverlay = sidebarOpen && isNarrow;
+    if (!isOverlay) {
+      // Sidebar just closed — restore focus to the Menu trigger
+      if (!sidebarOpen) menuButtonRef.current?.focus();
+      return;
+    }
+    // Sidebar just opened as overlay — push focus to the New Chat button
+    const raf = requestAnimationFrame(() => {
+      newChatSidebarRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [sidebarOpen, isNarrow]);
+
+  // A11y#6 — ESC closes the sidebar overlay without closing the full panel.
+  // Uses globalThis.KeyboardEvent (DOM) explicitly — the file imports React's
+  // KeyboardEvent<Element> type which is incompatible with window.addEventListener.
+  useEffect(() => {
+    if (!(sidebarOpen && isNarrow)) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sidebarOpen, isNarrow]);
 
   const refreshConversations = useCallback(async () => {
     try {
@@ -223,6 +260,9 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
     setNextId((n) => n + 1);
     setIsTyping(true);
 
+    // TS#5 — reset abort flag before each send so finally knows whether this
+    // particular request was cancelled vs completed/errored
+    wasAborted.current = false;
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -238,11 +278,18 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
         ...prev,
         { id: prev.length + 1, role: "jarvis", text: reply },
       ]);
-      refreshConversations();
+      // TS#4 — void the floating promise; the inner catch in refreshConversations
+      // already swallows errors so no unhandled rejection can bubble here
+      void refreshConversations();
     } catch (err: unknown) {
       abortRef.current = null;
       const isAbort = err instanceof Error && err.name === "AbortError";
-      if (isAbort) return; // handleStop already appended the cancelled message
+      if (isAbort) {
+        // TS#5 — flag the abort so finally skips the nextId increment;
+        // handleStop already appended the cancelled message
+        wasAborted.current = true;
+        return;
+      }
       const isOffline = err instanceof TypeError && err.message.includes("fetch");
       const rawMsg = err instanceof Error ? err.message : "Something went wrong.";
       // Detect Anthropic 401 specifically — token expired or wrong format.
@@ -257,7 +304,9 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
       setMessages((prev) => [...prev, { id: prev.length + 1, role: "jarvis", text: errText }]);
     } finally {
       setIsTyping(false);
-      setNextId((n) => n + 2);
+      // TS#5 — only bump nextId when the request actually completed or errored;
+      // aborted sends don't consume an id slot so the sequence stays tight
+      if (!wasAborted.current) setNextId((n) => n + 2);
     }
   }
 
@@ -286,7 +335,12 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
           so it doesn't squeeze the chat area into uselessness. When wide,
           fall back to the flex side-by-side layout. */}
       {showSidebar && (
+        // A11y#6 — when rendered as an overlay (narrow mode), apply dialog role
+        // so screen readers enter a modal context; aria-label names it "Chat history"
         <div
+          {...(showSidebarAsOverlay
+            ? { role: "dialog" as const, "aria-modal": true, "aria-label": "Chat history" }
+            : {})}
           className={
             showSidebarAsOverlay
               ? "absolute left-0 top-0 bottom-0 w-40 z-10 flex flex-col border-r shadow-lg bg-card"
@@ -301,7 +355,9 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
             <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground/70">
               Chats
             </span>
+            {/* A11y#6 — newChatSidebarRef: initial focus target when sidebar opens as overlay */}
             <button
+              ref={newChatSidebarRef}
               onClick={handleNewChat}
               title="New chat"
               className="rounded p-0.5 text-muted-foreground/70 hover:text-foreground transition-colors"
@@ -317,21 +373,32 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                 </div>
               )}
               {conversations.map((c) => (
-                <div
-                  key={c.id}
-                  onClick={() => loadConversation(c.id)}
-                  className={`group flex cursor-pointer items-center gap-1.5 rounded px-2 py-1.5 text-xs transition-colors ${
-                    activeId === c.id
-                      ? "bg-foreground/10 text-foreground"
-                      : "text-muted-foreground/80 hover:bg-foreground/5"
-                  }`}
-                >
-                  <MessageSquare className="h-3 w-3 shrink-0 opacity-50" />
-                  <span className="flex-1 truncate">{c.title || "New chat"}</span>
+                // TS#12 + A11y#6 — row is now a <button> (was a non-interactive div
+                // with onClick), which is valid HTML and keyboard-accessible.
+                // The delete button is a positioned sibling, not nested, to avoid
+                // invalid button-inside-button markup.
+                <div key={c.id} className="relative group">
                   <button
+                    type="button"
+                    onClick={() => loadConversation(c.id)}
+                    className={`w-full flex items-center gap-1.5 rounded px-2 py-1.5 text-xs transition-colors text-left pr-7 ${
+                      activeId === c.id
+                        ? "bg-foreground/10 text-foreground"
+                        : "text-muted-foreground/80 hover:bg-foreground/5"
+                    }`}
+                  >
+                    <MessageSquare className="h-3 w-3 shrink-0 opacity-50" />
+                    <span className="flex-1 truncate">{c.title || "New chat"}</span>
+                  </button>
+                  {/* Delete sits absolutely outside the row button — avoids nested
+                      interactive elements (invalid HTML) while staying visually
+                      co-located. Visible on hover/focus for discoverability. */}
+                  <button
+                    type="button"
                     onClick={(e) => handleDeleteConversation(c.id, e)}
                     title="Delete chat"
-                    className="opacity-0 group-hover:opacity-60 hover:opacity-100 transition-opacity"
+                    aria-label={`Delete chat: ${c.title || "New chat"}`}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-60 focus-visible:opacity-100 transition-opacity rounded p-0.5"
                   >
                     <Trash2 className="h-3 w-3" />
                   </button>
@@ -355,7 +422,9 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                 sidebar was already open in normal-width layouts, leaving
                 no way to collapse it). */}
             {!isNarrow && (
+              // A11y#6 — menuButtonRef: focus returns here when sidebar overlay closes
               <button
+                ref={menuButtonRef}
                 onClick={() => setSidebarOpen((s) => !s)}
                 title={sidebarOpen ? "Hide chat list" : "Show chat list"}
                 aria-label={sidebarOpen ? "Hide chat list" : "Show chat list"}
@@ -365,7 +434,9 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
               </button>
             )}
             {isNarrow && !sidebarOpen && (
+              // A11y#6 — same ref for the narrow-mode Menu trigger
               <button
+                ref={menuButtonRef}
                 onClick={() => setSidebarOpen(true)}
                 title="Show chat list"
                 aria-label="Show chat list"
@@ -453,10 +524,26 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
           </div>
         )}
 
+        {/* A11y#8 — sr-only live region: announces only when a NEW assistant
+            message arrives. Placing aria-live here (off the scrollable message
+            list) prevents every re-render of the full list from triggering an
+            announcement, which was noisy and caused SR to re-read everything. */}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
+          {/* Text updates when the last message is from Jarvis (not while typing) */}
+          {!isTyping && messages[messages.length - 1]?.role === "jarvis"
+            ? messages[messages.length - 1].text
+            : ""}
+        </div>
+
         {/* Messages */}
-        <ScrollArea className="flex-1 min-h-0">
+        {/* A11y#8 — aria-busy signals to SR that new content is streaming */}
+        <ScrollArea aria-busy={isTyping} className="flex-1 min-h-0">
           <div ref={scrollRef} className="flex flex-col gap-3 p-4">
-            <div aria-live="polite" aria-atomic="false" className="contents">
             {messages.map((msg) => (
               <div
                 key={msg.id}
@@ -507,6 +594,9 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                     className="typing-dot inline-block h-1.5 w-1.5 rounded-full"
                     style={{ backgroundColor: "var(--ink-muted)" }}
                   />
+                  {/* A11y#8 — sr-only label next to the typing dots so SR users
+                      know Jarvis is composing a response */}
+                  <span className="sr-only">Jarvis is typing</span>
                 </div>
                 <button
                   type="button"
@@ -518,7 +608,6 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
                 </button>
               </div>
             )}
-            </div>
             <div ref={bottomRef} aria-hidden="true" />
           </div>
         </ScrollArea>
