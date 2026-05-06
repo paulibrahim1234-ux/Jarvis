@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import time
 import urllib.parse
+from typing import Optional
 
 
 def _as_str(value: str) -> str:
@@ -1541,21 +1542,134 @@ end tell
 
 # ── Apple Calendar ────────────────────────────────────────────────────────────
 
+def _calendar_events_via_icalbuddy(days: int) -> Optional[dict]:
+    """Fast path: use icalBuddy CLI to read Calendar.app data directly.
+
+    WHY this exists: AppleScript's calendar predicate evaluator is structurally
+    slow on machines with CalDAV-backed calendars (4-22s observed), and
+    `every event of cal` skips birthday auto-events and recurring-event
+    instances entirely. icalBuddy reads the underlying Calendar.app SQLite
+    store and surfaces all event types in <300ms.
+
+    Returns the same dict shape as the AppleScript path
+    (`{available, events, error}`) so it's a drop-in fast path, OR None to
+    signal "icalBuddy unavailable, fall back to AppleScript."
+    """
+    import shutil
+    binary = shutil.which("icalBuddy")
+    if not binary:
+        return None
+
+    # `-b ""` removes the bullet prefix; `-nrd` returns absolute dates;
+    # `-nc` omits per-event calendar names (we don't render them yet);
+    # `-iep title,datetime,location` includes only the fields we render.
+    try:
+        result = subprocess.run(
+            [
+                binary,
+                "-nc", "-nrd", "-b", "",
+                "-iep", "title,datetime,location",
+                f"eventsToday+{int(days)}",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    if result.returncode != 0:
+        # "No calendars" stderr indicates the macOS Privacy & Security ->
+        # Calendars panel hasn't granted icalBuddy access yet. Fall through
+        # to AppleScript which has its own permission grant path.
+        return None
+
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return {"available": True, "events": [], "error": None}
+
+    # Parse: each event begins with a non-indented line (the title); the
+    # following indented lines are properties. Properties we care about:
+    #   "    location: <text>" (sometimes spans multiple indented lines)
+    #   "    May 7, 2026 at 8:00 AM - 10:30 AM"  ← date line
+    events: list = []
+    cur_title: Optional[str] = None
+    cur_loc: str = ""
+    cur_date: str = ""
+    multiline_loc_buf: list = []
+
+    def _flush() -> None:
+        nonlocal cur_title, cur_loc, cur_date, multiline_loc_buf
+        if cur_title:
+            full_loc = cur_loc
+            if multiline_loc_buf:
+                full_loc = ", ".join(
+                    [cur_loc] + [m.strip() for m in multiline_loc_buf if m.strip()]
+                ).lstrip(", ").strip()
+            events.append({
+                "title": cur_title.strip(),
+                "start": cur_date.strip(),
+                "end": "",  # icalBuddy embeds the end-time in cur_date already
+                "calendar": "",
+                "location": full_loc,
+                "uid": "",
+            })
+        cur_title = None
+        cur_loc = ""
+        cur_date = ""
+        multiline_loc_buf = []
+
+    for raw_line in raw.split("\n"):
+        # Non-indented line = new event title; indented = property continuation
+        if raw_line and not raw_line[0].isspace():
+            _flush()
+            cur_title = raw_line
+            continue
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("location:"):
+            cur_loc = line[len("location:"):].strip()
+        elif line.startswith("notes:"):
+            # Skip notes blocks — multi-line content confuses the
+            # location-continuation accumulator.
+            continue
+        elif (", 20" in line) or (" at " in line):
+            # Date heuristic: e.g. "May 6, 2026" or
+            # "May 7, 2026 at 8:00 AM - 10:30 AM"
+            cur_date = line
+        elif cur_loc and not cur_date:
+            # Continuation of multi-line location (street addresses)
+            multiline_loc_buf.append(line)
+        # Otherwise ignore unknown indented lines (notes content, etc.)
+    _flush()
+
+    return {"available": True, "events": events, "error": None}
+
+
 def _calendar_events(days: int = 30) -> dict:
     """Get upcoming events from calendars on the allowlist.
+
+    Tries icalBuddy first (fast path, <300ms, surfaces birthdays + recurring
+    instances). Falls through to AppleScript if icalBuddy is unavailable or
+    fails (e.g. macOS Calendar permission not yet granted to the binary).
 
     Names are drawn from the CALENDAR_ALLOWLIST env var (comma-separated).
     Defaults to common names: Work, Subscribed Calendar, Classes, School,
     Family. The one45 rotation feed lives under "Subscribed Calendar" in
     Apple Calendar and is surfaced here as "Rotation".
 
-    WHY fast-path / slow-path split: "Subscribed Calendar" (one45 rotation
-    feed) is the most likely cause of AppleScript hangs — external CalDAV
-    subscriptions can stall Calendar.app indefinitely while syncing.
-    We run user-owned calendars first with a 5s budget, then attempt the
-    subscribed feed with its own 5s budget and silently drop it on timeout
-    rather than hanging the whole request.
+    WHY fast-path / slow-path split (AppleScript fallback): "Subscribed
+    Calendar" (one45 rotation feed) is the most likely cause of AppleScript
+    hangs — external CalDAV subscriptions can stall Calendar.app indefinitely
+    while syncing. We run user-owned calendars first with a 5s budget, then
+    attempt the subscribed feed with its own 5s budget and silently drop it
+    on timeout rather than hanging the whole request.
     """
+    # Fast path — sub-300ms when icalBuddy is installed AND has Calendar
+    # permission. Returns same shape as the AppleScript path; None on failure.
+    fast = _calendar_events_via_icalbuddy(days)
+    if fast is not None:
+        return fast
+    # Otherwise fall through to the slower AppleScript path below.
     # Pinned-allowlist scan. The naive `whose start date ...` predicate
     # against every calendar can take tens of seconds on large setups,
     # even for calendars that end up empty. Iterating only the calendars
