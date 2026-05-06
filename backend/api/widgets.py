@@ -1194,8 +1194,10 @@ def _compute_calendar():
         # exceed _ensure_outlook_running's internal 23s budget — the 5s future
         # timeout cuts that off at the endpoint level.
         _ol_fut = _pool.submit(_outlook_calendar, 14)
-        # Apple Calendar call: _calendar_events now runs its own 5+5s sub-passes
-        # internally; 6s outer cap is a belt-and-suspenders guard.
+        # Apple Calendar call: _calendar_events runs a resilient batch + parallel
+        # per-cal fallback. Worst case: ~8s reliable batch + ~8s parallel slow
+        # cals (Work, School, pi37) run concurrently = ~16s total wall time.
+        # The 18s cap here allows that while still bounding the endpoint latency.
         _ac_fut = _pool.submit(_calendar_events, 14)
 
         try:
@@ -1205,16 +1207,19 @@ def _compute_calendar():
         except (_FTE, Exception):
             pass
 
+        ac_responded = False
         try:
-            ac = _ac_fut.result(timeout=6)
+            ac = _ac_fut.result(timeout=18)
+            ac_responded = True
             if isinstance(ac, dict) and ac.get("events"):
                 all_events.extend(ac["events"])
         except (_FTE, Exception):
             pass
 
-    # If both timed out, surface the structured error so the endpoint can
-    # return available:false immediately instead of serving an empty payload.
-    if not all_events:
+    # If at least one source responded (even with 0 events), return available:True.
+    # "0 events" is a valid state — it means the next 14 days have nothing scheduled.
+    # Only return available:False with an error when both sources fully timed out.
+    if not all_events and not ac_responded:
         return {
             "available": False,
             "events": [],
@@ -1238,6 +1243,10 @@ def _compute_calendar():
             return {"events": data.get("events", []), "available": True, "source": "graph_api"}
     except Exception:
         pass
+    # Calendar sources responded but found no events in the window.
+    # Return available:True with empty list — "no upcoming events" is valid.
+    if ac_responded:
+        return {"events": [], "available": True, "source": "desktop"}
     return None
 
 

@@ -1650,29 +1650,33 @@ end tell
             return []
         return result.get("output", "").split("###ROW###")
 
-    def _fetch_cals_resilient(cal_list: list, per_cal_timeout_s: int) -> list:
-        """Try cal_list as a batch; on timeout retry with parallel per-cal calls.
+    # Calendars known to cause AppleScript hangs on this system:
+    #   Work     — Exchange CalDAV, 727+ events, hangs on any event query
+    #   School   — iCloud CalDAV, hangs when mid-sync (frequent)
+    #   pi37@njit.edu — iCloud personal, same sync issue as School
+    # These are run individually in separate subprocesses so their hangs
+    # don't affect the reliable calendars (Europe, Family, Classes, etc.)
+    _KNOWN_SLOW = {"Work", "School", "pi37@njit.edu"}
 
-        Strategy:
-        1. Fast path: one batch AppleScript for all cals — fastest when Calendar.app
-           is healthy (no CalDAV sync in progress).
-        2. Fallback: if the batch times out (any cal mid-sync blocks the script),
-           re-run each calendar in its own subprocess IN PARALLEL. Calendar.app
-           handles concurrent osascript connections as separate requests, so a
-           syncing calendar (School, pi37@njit.edu) times out by itself without
-           blocking Europe, Family, Classes, etc.
+    def _fetch_cals_safe_batch(cal_list: list, timeout_s: int) -> list:
+        """Run reliable (non-blocking) calendars in one batch AppleScript."""
+        if not cal_list:
+            return []
+        result = _osascript(_build_script(cal_list), timeout=timeout_s)
+        if "error" in result:
+            return []
+        return result.get("output", "").split("###ROW###")
+
+    def _fetch_cals_parallel(cal_list: list, per_cal_timeout_s: int) -> list:
+        """Run each calendar in its own subprocess concurrently.
+
+        Used for calendars known to block Calendar.app (Work, School, pi37):
+        each gets its own osascript process so a hang only burns its own timeout
+        budget without blocking the others.
         """
         import concurrent.futures as _cf
         if not cal_list:
             return []
-        # ── Fast path: single batch script ──────────────────────────────────
-        batch_timeout = min(per_cal_timeout_s, 8)
-        result = _osascript(_build_script(cal_list), timeout=batch_timeout)
-        if "error" not in result:
-            return result.get("output", "").split("###ROW###")
-        # ── Fallback: parallel per-calendar subprocesses ─────────────────────
-        # Each calendar gets its own osascript call. Syncing cals timeout
-        # independently; responsive ones complete within per_cal_timeout_s.
         rows: list = []
         with _cf.ThreadPoolExecutor(max_workers=len(cal_list)) as pool:
             futs = {pool.submit(_osascript, _build_script([cal]), per_cal_timeout_s): cal
@@ -1686,25 +1690,42 @@ end tell
                     pass
         return rows
 
-    # All fast calendars handled by the resilient fetcher which tries a
-    # single-batch first, then falls back to parallel per-cal on timeout.
-    # This handles two failure modes:
-    #   • Work[2] (727-event Exchange cal) — blocks any script it's in
-    #   • School/pi37@njit.edu (iCloud CalDAV) — mid-sync lockout
-    # Both are isolated by the fallback path so they timeout independently.
-    fast_rows = _fetch_cals_resilient(fast_cals, per_cal_timeout_s=8)
+    # Split: reliable batch + slow-cal parallel, both run concurrently
+    # so the total time is max(batch_time, slow_cal_time), not their sum.
+    import concurrent.futures as _pool
+    _reliable = [c for c in fast_cals if c not in _KNOWN_SLOW]
+    _slow_cal_list = [c for c in fast_cals if c in _KNOWN_SLOW]
 
-    # Slow path: subscribed feed (one45 rotation). 5s cap — if it times out
-    # we still return the fast-path events rather than hanging.
-    slow_rows = _fetch_cals(slow_cals, timeout_s=5)
+    # Strategy: reliable batch first (no Calendar.app contention), then
+    # slow calendars in parallel with subscribed feed.
+    # WHY not all concurrent: Calendar.app serializes AppleScript connections.
+    # Launching 5+ concurrent osascript processes causes ALL of them to slow
+    # down — even the fast ones get queued behind the slow ones. Running the
+    # reliable batch alone (no competing processes) finishes in ~4-6s.
+    # Then the slow/subscribed cals run concurrently with each other (they're
+    # all going to timeout anyway, so they race rather than stack).
+    reliable_result = _osascript(_build_script(_reliable), timeout=8) if _reliable else {"output": ""}
+    reliable_succeeded = "error" not in reliable_result
+    fast_rows = reliable_result.get("output", "").split("###ROW###") if reliable_succeeded else []
+
+    # Now run the slow/known-hanging cals + subscribed feed concurrently.
+    # They share the same Calendar.app queue but since they're all expected
+    # to timeout, running them in parallel limits total wait to 8s not 13s.
+    with _pool.ThreadPoolExecutor(max_workers=2) as pool:
+        fut_slow = pool.submit(_fetch_cals_parallel, _slow_cal_list, 8)
+        fut_sub  = pool.submit(_fetch_cals, slow_cals, 5)
+        fast_rows = fast_rows + fut_slow.result()
+        slow_rows = fut_sub.result()
 
     all_rows = fast_rows + slow_rows
 
     # Synthetic "output" string fed into the existing parser below.
     raw_combined = "###ROW###".join(all_rows)
 
-    # Check we got anything at all; return structured error only if both paths failed.
-    if not any(r.strip().lstrip(",").strip() for r in all_rows):
+    # Return structured error only when the reliable batch itself failed to run
+    # (Calendar.app not responding at all). Zero events from a successful batch
+    # just means no events in the requested window — that's a valid result.
+    if not reliable_succeeded and not any(r.strip().lstrip(",").strip() for r in all_rows):
         return {"error": "Calendar fetch timed out — try opening Calendar.app to refresh subscribed feeds", "events": []}
 
     # Reuse existing parse path by constructing a fake _osascript-style result.
