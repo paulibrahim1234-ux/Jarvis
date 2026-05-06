@@ -1558,14 +1558,16 @@ def spotify_widget(request: Request, response: Response):
 
     # D-HIGH-1: surface rate-limit state so the frontend can show a retry banner
     # instead of silently treating a 429 as "nothing playing".
-    from tools.spotify import _check_rate_limited, _RATE_LIMIT_UNTIL
-    import time as _time
-    rl_remaining = _check_rate_limited()
+    # Compute remaining fresh on every request — the breaker is in-process state,
+    # checking it is sub-millisecond.  Only set rate_limit_message when the breaker
+    # is ACTUALLY active; never surface a stale message from a prior 429 window.
+    from tools.spotify import _check_rate_limited
+    import datetime as _dt
+    _rl_remaining = _check_rate_limited()
     rate_limit_message: str | None = None
-    if rl_remaining > 0:
-        retry_at = _RATE_LIMIT_UNTIL
-        retry_str = _datetime.datetime.fromtimestamp(retry_at).strftime("%H:%M")
-        rate_limit_message = f"Spotify rate-limited — retrying at {retry_str}"
+    if _rl_remaining > 0:
+        retry_at = (_dt.datetime.now() + _dt.timedelta(seconds=int(_rl_remaining))).strftime("%-I:%M %p").lstrip("0").lstrip(" ")
+        rate_limit_message = f"Spotify rate-limited — retrying at {retry_at}"
 
     return {
         "available": bool(track_block) or web_ok,
@@ -1585,22 +1587,25 @@ def spotify_widget(request: Request, response: Response):
 
 @router.get("/widgets/spotify/home")
 def spotify_home():
-    def _compute():
+    def _compute_data():
+        # WHY rate-limit fields are NOT in this cached dict:
+        # If we cache rate_limited=True for 60s and the breaker expires within
+        # that window (it routinely does), the UI keeps showing "Spotify is
+        # rate-limiting Jarvis" for up to 60 more seconds — confusing and the
+        # exact perception bug the user has reported repeatedly. We cache only
+        # the EXPENSIVE-TO-FETCH data (top_tracks, top_artists, playlists)
+        # and compute rate-limit fields fresh on every request below.
         if not _spotify_web_ok():
             return {"available": False, "error": "Spotify Web API not connected"}
         from tools.spotify import (
             get_top_tracks, get_top_artists, RATE_LIMITED_SENTINEL,
-            rate_limit_status,
         )
-        # Probe each list, collapsing the breaker sentinel into [] but
-        # tracking it so we can surface a single clear UI message.
         def _norm(v):
             return [] if v is RATE_LIMITED_SENTINEL else (v or [])
         top_tracks = _norm(get_top_tracks("short_term", 8))
         top_artists = _norm(get_top_artists("short_term", 8))
         recent_playlists = _norm(_spotify_recent_playlists_cached())
         playlists = _norm(_spotify_playlists_cached())
-        rls = rate_limit_status()
         return {
             "available": True,
             "top_tracks": top_tracks,
@@ -1608,18 +1613,28 @@ def spotify_home():
             # recently_played is now playlist-only (user feedback: don't show songs)
             "recently_played": recent_playlists,
             "playlists": playlists,
-            # Rate-limit hints — let the UI render a banner instead of leaving
-            # the user staring at four empty sections wondering what broke.
-            "rate_limited": rls["rate_limited"],
-            "rate_limit_retry_in_seconds": rls["retry_in_seconds"],
-            "rate_limit_message": (
-                f"Spotify is rate-limiting Jarvis right now (about "
-                f"{max(1, rls['retry_in_seconds']//60)} min until retry). "
-                f"This usually clears on its own; no action needed."
-                if rls["rate_limited"] else ""
-            ),
         }
-    return _cached("spotify_home", 60, _compute)
+
+    cached_data = _cached("spotify_home", 60, _compute_data)
+    # Always compute rate-limit fields FRESH (microseconds, no caching).
+    # This is the fix for the stale "Spotify is rate-limiting Jarvis right
+    # now" banner persisting after the breaker expires.
+    from tools.spotify import _check_rate_limited
+    _rl = _check_rate_limited()
+    rate_limited = _rl > 0
+    rate_limit_retry_in_seconds = int(_rl) if rate_limited else 0
+    rate_limit_message = (
+        f"Spotify is rate-limiting Jarvis right now (about "
+        f"{max(1, rate_limit_retry_in_seconds//60)} min until retry). "
+        f"This usually clears on its own; no action needed."
+        if rate_limited else ""
+    )
+    return {
+        **cached_data,
+        "rate_limited": rate_limited,
+        "rate_limit_retry_in_seconds": rate_limit_retry_in_seconds,
+        "rate_limit_message": rate_limit_message,
+    }
 
 
 # ── Spotify control endpoints ─────────────────────────────────────────────────
@@ -2261,6 +2276,9 @@ end tell
                     'Return STRICT JSON: { "tasks": [{ "title": "<imperative>", '
                     '"due_hint": "<date phrase or empty string>", '
                     '"source_email_id": "<id>" }] } '
+                    "For each task, source_email_id MUST be the exact `id` field from the "
+                    "input email (do not invent, do not abbreviate, do not leave blank). "
+                    "If you cannot determine which email a task came from, do not emit that task. "
                     "Skip FYI / receipts / newsletters / pure announcements. "
                     "ONLY emails containing a clear ASK or DEADLINE produce a task. "
                     "Example: a 'RE: Missing: CSLL Post-Assessment' email → "
@@ -2311,13 +2329,9 @@ end tell
                     )
 
                 # ── Push to Reminders.app (cross-device via iCloud) ─────────
-                # WHY this lives here: extracted todos should also appear on
-                # the user's iPhone Reminders app. Using a persistent
-                # email_id → reminder_id dedupe map prevents double-push
-                # across briefing refreshes. After a successful push, the
-                # task is REMOVED from extracted — list_reminders() will
-                # surface it as `source: "reminders"` on the next refresh,
-                # which is the canonical cross-device state.
+                # Canonical key = normalized email subject (stable across Haiku variants).
+                # Two calls that produce different titles for the same email both key
+                # on the subject, so only the first push happens.
                 _SYNC_PATH = (
                     _Path(__file__).resolve().parent.parent
                     / "storage"
@@ -2332,6 +2346,13 @@ end tell
                 except Exception:
                     _sync_state = {}
 
+                # Build email_id → subject map for stable dedupe key lookup.
+                _eid_to_subject: dict[str, str] = {
+                    str(e.get("id") or ""): (e.get("subject") or "").strip().lower()[:80]
+                    for e in top_emails
+                    if e.get("id")
+                }
+
                 _state_dirty = False
                 _remaining: list[dict] = []
                 from tools.reminders import (
@@ -2339,51 +2360,66 @@ end tell
                     list_reminders as _list_for_dedupe,
                 )
 
-                # Title-based dedupe is the FALLBACK when email_id is empty.
-                # Haiku sometimes returns blank source_email_id, so we also
-                # check (a) the persisted sync_state values, and (b) the
-                # current Reminders.app titles, before pushing.
-                _existing_titles: set[str] = {
-                    (v.get("title") or "").strip().lower()
-                    for v in _sync_state.values()
-                }
+                # Collect existing Reminders.app titles for substring-based live dedupe.
+                _existing_reminders: list[str] = []
                 try:
                     for _r in _list_for_dedupe():
-                        _existing_titles.add(
-                            (_r.get("text") or "").strip().lower()
-                        )
+                        _existing_reminders.append((_r.get("text") or "").strip().lower())
                 except Exception:
-                    pass  # best-effort dedupe; better to push once than block
+                    pass  # best-effort; prefer pushing once over blocking
+
+                def _subject_already_live(subject_key: str) -> bool:
+                    """Return True if any current reminder title contains all significant
+                    tokens from the subject key (catches 'HIPAA' matching existing reminders)."""
+                    tokens = [t for t in subject_key.split() if len(t) > 4]
+                    if not tokens:
+                        return False
+                    for rem_title in _existing_reminders:
+                        if all(tok in rem_title for tok in tokens):
+                            return True
+                    return False
 
                 for _task in extracted:
                     _eid = _task.get("source_email_id") or ""
-                    _norm_title = (_task.get("text") or "").strip().lower()
+                    _subj_key = _eid_to_subject.get(_eid, "")
 
-                    # Already-synced check: id-based OR title-based.
-                    if _eid and _eid in _sync_state:
+                    # Determine dedupe key: prefer stable subject; fall back to email_id.
+                    _state_key = (
+                        _subj_key
+                        or _eid
+                        or f"_title:{(_task.get('text') or '').strip().lower()}"
+                    )
+
+                    # Already in persisted state?
+                    if _state_key and _state_key in _sync_state:
                         continue
-                    if _norm_title and _norm_title in _existing_titles:
+
+                    # Already exists as a live reminder? (substring/token match)
+                    if _subj_key and _subject_already_live(_subj_key):
+                        # Record in state so we don't re-check next time.
+                        _sync_state[_state_key] = {
+                            "email_id": _eid,
+                            "reminder_id": "",
+                            "title": _task["text"],
+                            "synced_at": now.isoformat(timespec="seconds"),
+                        }
+                        _state_dirty = True
                         continue
 
                     _rid = _push_reminder(_task["text"])
                     if _rid:
-                        # Use email_id as state key when present; otherwise
-                        # fall back to a stable title-based pseudo-key so
-                        # the next refresh's title-dedupe also catches it.
-                        _key = _eid or f"_title:{_norm_title}"
-                        _sync_state[_key] = {
+                        _sync_state[_state_key] = {
+                            "email_id": _eid,
                             "reminder_id": _rid,
                             "title": _task["text"],
                             "synced_at": now.isoformat(timespec="seconds"),
                         }
                         _state_dirty = True
-                        _existing_titles.add(_norm_title)
-                        # Don't include in auto_todos — the next refresh
-                        # surfaces it as source=reminders (canonical).
+                        _existing_reminders.append((_task.get("text") or "").strip().lower())
+                        # Pushed to Reminders — next refresh surfaces it as source=reminders.
                         continue
 
-                    # Reminders push failed (permission denied etc.) —
-                    # keep as source=auto so the user still sees it.
+                    # Push failed — keep in auto_todos so user still sees it.
                     _remaining.append(_task)
 
                 if _state_dirty:
@@ -2398,9 +2434,7 @@ end tell
                             _json_auto.dump(_sync_state, _wf)
                         _os2.replace(_tmp, str(_SYNC_PATH))
                     except Exception:
-                        # If we couldn't persist, accept that next refresh
-                        # will re-push (Reminders has its own dedupe — the
-                        # title would still appear). Better to log later.
+                        # Accept re-push on next refresh; live-dedupe catches it.
                         pass
 
                 return _remaining
@@ -2831,3 +2865,76 @@ def todos_complete(payload: dict, request: Request, response: Response):
     _CACHE.pop("briefing", None)
     _CACHE.pop("reminders_todos", None)
     return {"ok": ok}
+
+
+@router.post("/widgets/todos/dedupe")
+def todos_dedupe(request: Request, response: Response) -> dict:
+    """One-shot cleanup: collapse duplicate reminders in the Jarvis list.
+
+    Groups all incomplete reminders by canonical key (significant lowercase
+    tokens from the title), keeps the one with the lexicographically largest
+    id (latest by Reminders internal ordering), and deletes the rest.
+
+    Returns {"ok": True, "deleted": N, "kept": [...titles...]}.
+
+    WHY manual-only: deletion is destructive; we never run this automatically.
+    The user hits this endpoint once after a Haiku-variant duplication event.
+    """
+    _require_local_origin(request)
+    response.headers["Cache-Control"] = "no-store"
+
+    from tools.reminders import (
+        list_all_reminders_with_completed as _list_all,
+        delete_reminder_by_id as _del_by_id,
+    )
+
+    all_reminders = _list_all()
+    # Only operate on incomplete reminders — don't touch completed ones.
+    incomplete = [r for r in all_reminders if not r.get("completed", False)]
+
+    def _canonical_tokens(title: str) -> frozenset:
+        """Extract significant tokens (>4 chars) as the grouping key."""
+        return frozenset(t.lower() for t in title.split() if len(t) > 4)
+
+    # Group by token-set overlap: two reminders are dupes if one's token set
+    # is a superset/subset of the other, and neither is empty.
+    groups: list[list[dict]] = []
+    used: set[int] = set()
+
+    for i, rem in enumerate(incomplete):
+        if i in used:
+            continue
+        group = [rem]
+        tokens_i = _canonical_tokens(rem["text"])
+        for j, other in enumerate(incomplete):
+            if j <= i or j in used:
+                continue
+            tokens_j = _canonical_tokens(other["text"])
+            if tokens_i and tokens_j and (tokens_i <= tokens_j or tokens_j <= tokens_i):
+                group.append(other)
+                used.add(j)
+        used.add(i)
+        groups.append(group)
+
+    deleted_count = 0
+    kept_titles: list[str] = []
+
+    for group in groups:
+        if len(group) == 1:
+            kept_titles.append(group[0]["text"])
+            continue
+        # Keep the reminder with the lexicographically largest id (latest).
+        group.sort(key=lambda r: r["id"], reverse=True)
+        keeper = group[0]
+        kept_titles.append(keeper["text"])
+        for dupe in group[1:]:
+            if _del_by_id(dupe["id"]):
+                deleted_count += 1
+
+    # Bust caches so the next briefing poll reflects the cleanup.
+    _CACHE.pop("reminders_todos", None)
+    for k in list(_CACHE.keys()):
+        if k.startswith("briefing"):
+            _CACHE.pop(k, None)
+
+    return {"ok": True, "deleted": deleted_count, "kept": kept_titles}

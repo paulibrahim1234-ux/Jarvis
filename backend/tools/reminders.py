@@ -181,3 +181,58 @@ end tell
         return "ok" in result.stdout
     except subprocess.TimeoutExpired:
         return False
+
+
+def list_all_reminders_with_completed() -> list[dict]:
+    """Return ALL reminders (incomplete + completed) in the Jarvis list.
+
+    WHY: cleanup/dedupe operations need to see the full set including
+    completed items so they don't accidentally re-create deleted entries.
+    Returns [] on permission denial or timeout rather than raising.
+    """
+    _ensure_list_exists()
+    script = f'''
+tell application "Reminders"
+    set theList to list "{JARVIS_LIST}"
+    set out to ""
+    repeat with r in (reminders of theList)
+        set rid to id of r as text
+        set rname to name of r as text
+        set rcompleted to completed of r as text
+        set out to out & rid & "|||FIELD|||" & rname & "|||FIELD|||" & rcompleted & "|||ROW|||"
+    end repeat
+    return out
+end tell
+'''
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return []
+        items: list[dict] = []
+        for line in result.stdout.strip().split("|||ROW|||"):
+            if not line.strip():
+                continue
+            parts = line.split("|||FIELD|||")
+            if len(parts) >= 3:
+                items.append({
+                    "id": parts[0].strip(),
+                    "text": parts[1].strip(),
+                    "completed": parts[2].strip().lower() == "true",
+                    "source": "reminders",
+                })
+        return items
+    except subprocess.TimeoutExpired:
+        return []
+
+
+def delete_reminder_by_id(reminder_id: str) -> bool:
+    """Delete a reminder by its AppleScript id. Alias for delete_reminder.
+
+    WHY an alias: the dedupe endpoint uses an explicit name that clarifies
+    intent at the call site; the underlying implementation is identical.
+    Returns True on success, False on failure or timeout.
+    """
+    return delete_reminder(reminder_id)
