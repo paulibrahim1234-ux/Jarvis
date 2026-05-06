@@ -28,6 +28,11 @@ MODEL_MAP = {
     "sonnet": "claude-sonnet-4-5-20250929",
 }
 
+# Default to Haiku to conserve Opus quota. The frontend can request Opus
+# explicitly via ?model=opus when complexity warrants. Haiku is fast enough
+# for the tool-calling loop and leaves Opus budget for long-form reasoning.
+_DEFAULT_MODEL = "haiku"
+
 
 class ChatRequest(BaseModel):
     messages: list[dict]
@@ -54,7 +59,9 @@ async def chat_endpoint(
     # trigger those — gate on Origin/Referer being localhost.
     _require_local_origin(request)
     try:
-        model_override = MODEL_MAP.get(model) if model else None
+        # Fall back to _DEFAULT_MODEL (haiku) when no ?model= param is given.
+        resolved = model if model else _DEFAULT_MODEL
+        model_override = MODEL_MAP.get(resolved)
         reply, cid = await chat_async(
             req.messages,
             conversation_id=req.conversation_id,

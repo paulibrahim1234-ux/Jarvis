@@ -129,6 +129,7 @@ export function SpotifyWidget() {
   const poll = useCallback(() => {
     fetchSpotify()
       .then((data: SpotifyPayload) => {
+        setWidgetStatus("fresh"); // clear any prior error state before updating payload
         setPayload(data);
         if (data.track) {
           setTrack(data.track);
@@ -140,7 +141,6 @@ export function SpotifyWidget() {
         }
         const now = Date.now();
         setLastUpdated(now);
-        setWidgetStatus("fresh");
       })
       .catch(() => {
         setWidgetStatus("error");

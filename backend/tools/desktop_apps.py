@@ -52,11 +52,12 @@ DESKTOP_TOOLS = [
     {
         "name": "outlook_get_inbox",
         "description": (
-            "Use this when the user asks to 'check email', 'what's in my inbox', 'any new emails', "
-            "or when you need a list of recent messages to browse. Returns the most recent emails "
-            "with subject, sender, date, and body preview. No Azure/OAuth needed — reads directly "
-            "from the open Outlook Classic app. For searching by keyword or topic, use "
-            "outlook_search_inbox instead. Use limit to control how many emails to return (default 10)."
+            "Use this when the user asks 'check email', 'what's in my inbox', 'any new emails', "
+            "'what did I get today', or when you need to browse recent messages without a specific "
+            "keyword. Returns the most recent emails with subject, sender, date, and body preview. "
+            "Reads directly from open Outlook Classic — no Azure/OAuth needed. "
+            "Use limit to control how many emails to return (default 10, max ~50). "
+            "For keyword/topic/sender searches, use outlook_search_inbox instead."
         ),
         "input_schema": {
             "type": "object",
@@ -100,13 +101,15 @@ DESKTOP_TOOLS = [
     {
         "name": "outlook_search_inbox",
         "description": (
-            "Use this when the user wants to find an email about a topic, from a sender, or with "
-            "a keyword — e.g. 'find the email about VSLO', 'any email from Dr. Smith', 'search for "
-            "residency application', 'Lehigh Valley emails'. Returns lightweight metadata (id, subject, "
-            "sender, date, body_preview). After finding candidates, call outlook_read_email with the "
-            "message_id to get the full body. Set natural_query for fuzzy/semantic searches like "
-            "'email about interview scheduling'. The literal query param pre-filters by subject/sender; "
-            "pass empty string if you want Haiku to do all the semantic ranking."
+            "Use this when the user wants to find an email by topic, sender, keyword, or urgency — "
+            "e.g. 'find the email about VSLO', 'any email from Dr. Smith', 'search for residency "
+            "application', 'Lehigh Valley emails', 'anything urgent from school'. "
+            "Returns lightweight metadata: id, subject, sender, date, body_preview. "
+            "Use query to pre-filter by subject/sender substring (case-insensitive). "
+            "Use natural_query for fuzzy/semantic ranking (e.g. 'email about interview scheduling'). "
+            "After finding candidates, call outlook_read_email with message_id to get the full body. "
+            "Use top_k to cap ranked results (default 8). "
+            "Pass query='' with only natural_query to let semantic ranking do all the work."
         ),
         "input_schema": {
             "type": "object",
@@ -227,11 +230,13 @@ DESKTOP_TOOLS = [
         "name": "calendar_get_events",
         "description": (
             "Use this when the user asks about their schedule, upcoming events, 'what's on my "
-            "calendar', 'what's my next event', 'do I have anything [day]', or 'tomorrow's first "
-            "thing'. Returns ALL events from ALL Apple Calendar calendars — School, the one45 "
-            "Subscribed Calendar rotation feed, and synced Outlook events. Results are more complete "
-            "than the dashboard snapshot — always call this for specific calendar questions. "
-            "Use days=7 for week view, days=1 for today-only. Prefer this over outlook_get_calendar_events."
+            "calendar', 'what's my next event', 'what time is [event]', 'do I have anything [day]', "
+            "'any rotation this week', 'when does [shift] start', or 'tomorrow's first thing'. "
+            "Returns ALL events from ALL Apple Calendar calendars — School, the one45 rotation feed, "
+            "and synced Outlook events — with title, start/end time, calendar name, and location. "
+            "More complete than the dashboard snapshot; always call this for specific calendar questions. "
+            "Use days=1 for today-only, days=7 for week view (default 30). "
+            "Prefer this over outlook_get_calendar_events for general schedule questions."
         ),
         "input_schema": {
             "type": "object",
@@ -262,9 +267,11 @@ DESKTOP_TOOLS = [
     {
         "name": "messages_get_recent",
         "description": (
-            "Use this when the user asks to read or check messages from a contact — 'read my "
-            "messages from [name]', 'what did [person] say', 'check my texts with [contact]'. "
-            "Returns the most recent iMessages from that contact in chronological order. "
+            "Use this when the user asks 'did [name] text me back', 'what did [person] say', "
+            "'check my texts with [contact]', 'read my messages from [name]', or 'did anyone text me'. "
+            "Returns the most recent iMessages from that contact in chronological order, "
+            "with sender, timestamp, and message text. "
+            "Use contact to specify a phone number (+1...) or contact name (e.g. 'Rish', 'Mom'). "
             "Use limit to control how many messages to return (default 20)."
         ),
         "input_schema": {
@@ -1541,6 +1548,13 @@ def _calendar_events(days: int = 30) -> dict:
     Defaults to common names: Work, Subscribed Calendar, Classes, School,
     Family. The one45 rotation feed lives under "Subscribed Calendar" in
     Apple Calendar and is surfaced here as "Rotation".
+
+    WHY fast-path / slow-path split: "Subscribed Calendar" (one45 rotation
+    feed) is the most likely cause of AppleScript hangs — external CalDAV
+    subscriptions can stall Calendar.app indefinitely while syncing.
+    We run user-owned calendars first with a 5s budget, then attempt the
+    subscribed feed with its own 5s budget and silently drop it on timeout
+    rather than hanging the whole request.
     """
     # Pinned-allowlist scan. The naive `whose start date ...` predicate
     # against every calendar can take tens of seconds on large setups,
@@ -1554,10 +1568,20 @@ def _calendar_events(days: int = 30) -> dict:
     # `first calendar whose name is X` returns whichever Calendar.app
     # decides; we iterate ALL calendars matching the name to cover both.
     import os
-    _default_cals = "Work,Subscribed Calendar,Classes,School,Family"
-    _cals = [c.strip() for c in os.environ.get("CALENDAR_ALLOWLIST", _default_cals).split(",") if c.strip()]
-    _target_list = ", ".join(f'"{c}"' for c in _cals)
-    script = f"""
+
+    _default_fast = "Work,Classes,School,Family"
+    _default_slow = "Subscribed Calendar"  # one45 rotation — separate because it can hang
+
+    fast_raw = os.environ.get("CALENDAR_ALLOWLIST", _default_fast)
+    fast_cals = [c.strip() for c in fast_raw.split(",") if c.strip() and c.strip() != _default_slow]
+    slow_cals = [_default_slow]  # always attempt; timeout is the safety valve
+
+    def _fetch_cals(cal_list: list, timeout_s: int) -> list:
+        """Run one AppleScript pass over cal_list; return raw event rows."""
+        if not cal_list:
+            return []
+        _target_list = ", ".join(f'"{c}"' for c in cal_list)
+        script = f"""
 tell application "Calendar"
     set startDate to current date
     set endDate to startDate + ({days} * days)
@@ -1593,10 +1617,28 @@ tell application "Calendar"
     return evtList
 end tell
 """
-    # 20s is plenty with the allowlist; raises only if Calendar.app is wedged.
-    result = _osascript(script, timeout=20)
-    if "error" in result:
-        return result
+        result = _osascript(script, timeout=timeout_s)
+        if "error" in result:
+            return []
+        return result.get("output", "").split("###ROW###")
+
+    # Fast path: user-owned calendars, 5s hard cap.
+    fast_rows = _fetch_cals(fast_cals, timeout_s=5)
+    # Slow path: subscribed feed (one45 rotation). 5s cap — if it times out
+    # we still return the fast-path events rather than hanging.
+    slow_rows = _fetch_cals(slow_cals, timeout_s=5)
+
+    all_rows = fast_rows + slow_rows
+
+    # Synthetic "output" string fed into the existing parser below.
+    raw_combined = "###ROW###".join(all_rows)
+
+    # Check we got anything at all; return structured error only if both paths failed.
+    if not any(r.strip().lstrip(",").strip() for r in all_rows):
+        return {"error": "Calendar fetch timed out — try opening Calendar.app to refresh subscribed feeds", "events": []}
+
+    # Reuse existing parse path by constructing a fake _osascript-style result.
+    result = {"output": raw_combined}
 
     events = []
     raw = result.get("output", "")

@@ -263,7 +263,7 @@ def is_authenticated() -> bool:
 
 def get_now_playing() -> dict | None:
     if _check_rate_limited() > 0:
-        return None  # widget already shows breaker banner; no point in a second one here
+        return RATE_LIMITED_SENTINEL  # type: ignore[return-value]  # distinguish from "nothing playing"
     try:
         sp = _sp()
         current = sp.current_playback()

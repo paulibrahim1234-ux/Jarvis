@@ -421,11 +421,67 @@ export async function fetchCalendar(range?: { start: string; end: string }) {
 }
 
 // Morning briefing aggregator (anki + events + unread + greeting).
+
+/** A single todo item returned by /widgets/briefing.
+ * Manual todos have source "manual" (or undefined for pre-existing items).
+ * Auto-extracted todos from Haiku have source "auto" and additionally carry
+ * source_email_id linking back to the originating email.
+ * Reminders-backed todos have source "reminders" and a Reminders app id. */
+export interface BriefingTodo {
+  id: string;
+  text: string;
+  done: boolean;
+  due: string | null;
+  created_at: string;
+  /** Provenance: "manual" = user-created, "auto" = Haiku-extracted from email,
+   * "reminders" = synced from Reminders.app via the backend bridge. */
+  source?: "manual" | "auto" | "reminders";
+  /** Present only when source === "auto". The Outlook email id the task came from. */
+  source_email_id?: string;
+  /** Present only when source === "reminders". The Reminders.app item id. */
+  reminders_id?: string;
+}
+
 export async function fetchBriefing() {
   const r = await fetch(`${BACKEND}/widgets/briefing`, {
     signal: AbortSignal.timeout(20000),
   });
   if (!r.ok) throw new Error(`briefing ${r.status}`);
+  return r.json();
+}
+
+/** Create a new Reminders.app item via the backend bridge.
+ * Optimistic callers should append locally; the backend response includes
+ * the assigned Reminders id so the item can be completed/deleted later. */
+export async function addTodoReminder(
+  title: string,
+  due_hint?: string,
+): Promise<{ ok: boolean; id?: string }> {
+  const r = await fetch(`${BACKEND}/widgets/todos/add`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, due_hint }),
+  });
+  if (!r.ok) {
+    // Swallow the body — caller inspects ok flag, not the error detail.
+    await r.json().catch(() => ({}));
+    return { ok: false };
+  }
+  return r.json();
+}
+
+/** Mark a Reminders.app item complete via the backend bridge.
+ * Callers should optimistically remove the item from the local list
+ * and only show an error if the response comes back ok: false. */
+export async function completeTodoReminder(
+  id: string,
+): Promise<{ ok: boolean }> {
+  const r = await fetch(`${BACKEND}/widgets/todos/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!r.ok) return { ok: false };
   return r.json();
 }
 

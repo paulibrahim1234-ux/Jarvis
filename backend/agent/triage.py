@@ -104,7 +104,7 @@ def compute_triage(email_payload: dict, imessage_payload: dict) -> dict:
     # KV once per hour and charges ~10% of input cost on cache hits.
     # The user content block changes every call so it must NOT carry cache_control.
     response = client.messages.create(
-        model="claude-opus-4-5-20251101",
+        model="claude-haiku-4-5-20251001",
         max_tokens=2048,
         system=[
             {

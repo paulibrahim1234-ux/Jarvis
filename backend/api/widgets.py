@@ -120,7 +120,7 @@ def build_snapshot_from_cache() -> dict:
 
     Cache keys confirmed against _cached() call sites in this file:
       anki_stats  -> /widgets/anki (key="anki_stats", ttl=30s)
-      calendar    -> /widgets/calendar (key="calendar", ttl=600s)
+      calendar    -> /widgets/calendar (key="calendar", ttl=60s)
       email       -> /widgets/email default (key="email::::", ttl=60s)
       spotify     -> /widgets/spotify is a live composite; use "spotify_now_web"
                      (ttl=5s) as best-effort. Absent in desktop-only mode.
@@ -1179,24 +1179,48 @@ def email_folders_endpoint():
 def _compute_calendar():
     """14-day rolling window across all user calendars + rotation feed.
 
-    Was 30 days but Calendar.app AppleScript routinely exceeds the 45s
-    osascript timeout at 30 days (~80s observed for 30d, 42s for 14d).
-    14d covers the dashboard's Upcoming + This Week + Briefing needs and
-    fits inside the AppleScript budget.
+    WHY ThreadPoolExecutor with wall-clock deadlines: both _outlook_calendar and
+    _calendar_events call _osascript internally. _outlook_calendar also calls
+    _ensure_outlook_running which can spin for up to 23s (15s poll + 8s probe)
+    before even starting the 30s AppleScript call. The individual subprocess
+    timeouts don't bound the total wall time — we need an outer deadline so
+    the /widgets/calendar endpoint never hangs past ~7s total.
     """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FTE
     all_events = []
-    try:
-        ol = _outlook_calendar(days=14)
-        if ol.get("events"):
-            all_events.extend(ol["events"])
-    except Exception:
-        pass
-    try:
-        ac = _calendar_events(days=14)
-        if ac.get("events"):
-            all_events.extend(ac["events"])
-    except Exception:
-        pass
+
+    with ThreadPoolExecutor(max_workers=2) as _pool:
+        # Outlook call: give it 5s. If Outlook is not running / wedged it will
+        # exceed _ensure_outlook_running's internal 23s budget — the 5s future
+        # timeout cuts that off at the endpoint level.
+        _ol_fut = _pool.submit(_outlook_calendar, 14)
+        # Apple Calendar call: _calendar_events now runs its own 5+5s sub-passes
+        # internally; 6s outer cap is a belt-and-suspenders guard.
+        _ac_fut = _pool.submit(_calendar_events, 14)
+
+        try:
+            ol = _ol_fut.result(timeout=5)
+            if isinstance(ol, dict) and ol.get("events"):
+                all_events.extend(ol["events"])
+        except (_FTE, Exception):
+            pass
+
+        try:
+            ac = _ac_fut.result(timeout=6)
+            if isinstance(ac, dict) and ac.get("events"):
+                all_events.extend(ac["events"])
+        except (_FTE, Exception):
+            pass
+
+    # If both timed out, surface the structured error so the endpoint can
+    # return available:false immediately instead of serving an empty payload.
+    if not all_events:
+        return {
+            "available": False,
+            "events": [],
+            "error": "Calendar fetch timed out — try opening Calendar.app to refresh subscribed feeds",
+        }
+
     seen = set()
     deduped = []
     for e in all_events:
@@ -1227,8 +1251,22 @@ def calendar_widget(response: Response, start: str = "", end: str = ""):
     # don't both fire AppleScript in parallel; the semaphore's cold-start
     # fallback in _cached ensures the first caller still gets data even if
     # the semaphore can't be acquired immediately.
-    cached = _cached("calendar", 600, _compute_calendar, _SEM_CALENDAR)
+    cached = _cached("calendar", 60, _compute_calendar, _SEM_CALENDAR)
     if cached:
+        # WHY: if _compute_calendar returned a timeout-error dict (from the
+        # new fast/slow-path split in _calendar_events), surface it as a
+        # structured non-hanging response instead of returning stale data.
+        if cached.get("available") is False or (
+            "error" in cached and not cached.get("events")
+        ):
+            return {
+                "available": False,
+                "error": cached.get(
+                    "error",
+                    "Calendar fetch timed out — try opening Calendar.app to refresh subscribed feeds",
+                ),
+                "events": [],
+            }
         # Apply date-range filtering when both start and end are provided.
         # Events now carry ISO 8601 in `start` (parsed from AppleScript human
         # strings inside _calendar_events). Older cache entries may still hold
@@ -1335,7 +1373,7 @@ def warm_widgets(request: Request, response: Response):
     import concurrent.futures
 
     tasks = {
-        "calendar": ("calendar", 600, _compute_calendar, _SEM_CALENDAR),
+        "calendar": ("calendar", 60, _compute_calendar, _SEM_CALENDAR),
         "email": ("email::::", 60, lambda: _compute_email(), _SEM_EMAIL),
         "email_folders": ("email_folders", 300, _compute_email_folders, _SEM_EMAIL_FOLDERS),
         "study_streak": ("study_streak", 1800, _compute_study_streak_days, _SEM_STUDY_STREAK),
@@ -1392,7 +1430,7 @@ def _spotify_album_art(now: dict) -> str | None:
         try:
             from tools.spotify import get_now_playing as _wp
             wp = _wp()
-            if wp and wp.get("album_art"):
+            if wp is not _RATE_LIMITED_SENTINEL and wp and wp.get("album_art"):
                 return wp["album_art"]
         except Exception:
             pass
@@ -1488,7 +1526,7 @@ def spotify_widget(request: Request, response: Response):
             try:
                 from tools.spotify import get_now_playing
                 wp = get_now_playing()
-                if wp:
+                if wp is not _RATE_LIMITED_SENTINEL and wp:
                     return {**wp, "name": wp.get("title")}
             except Exception:
                 pass
@@ -1508,6 +1546,18 @@ def spotify_widget(request: Request, response: Response):
         if v is _RATE_LIMITED_SENTINEL:
             return []
         return v
+
+    # D-HIGH-1: surface rate-limit state so the frontend can show a retry banner
+    # instead of silently treating a 429 as "nothing playing".
+    from tools.spotify import _check_rate_limited, _RATE_LIMIT_UNTIL
+    import time as _time
+    rl_remaining = _check_rate_limited()
+    rate_limit_message: str | None = None
+    if rl_remaining > 0:
+        retry_at = _RATE_LIMIT_UNTIL
+        retry_str = _datetime.datetime.fromtimestamp(retry_at).strftime("%H:%M")
+        rate_limit_message = f"Spotify rate-limited — retrying at {retry_str}"
+
     return {
         "available": bool(track_block) or web_ok,
         "source": "desktop" if now.get("track") else ("web_api" if web_ok else None),
@@ -1520,6 +1570,7 @@ def spotify_widget(request: Request, response: Response):
         "queue": _safe(_spotify_queue_cached()),
         "playlists": _safe(_spotify_playlists_cached()),
         "recently_played": _safe(_spotify_recents_cached()),
+        "rate_limit_message": rate_limit_message,
     }
 
 
@@ -2102,14 +2153,21 @@ end tell
             pending = [t for t in items if not t.get("done")]
             # Sort: items with a due date first (soonest first), then undated,
             # then most-recently-created.
-            def _key(t):
+            def _key(t: dict) -> tuple:
                 due = t.get("due") or ""
                 created = t.get("created_at") or ""
                 # We want items with `due` to come before those without;
                 # within "has due", sort by date ascending.
                 return (0 if due else 1, due, created)
             pending.sort(key=_key)
-            return pending[:6]
+            # Tag manual todos so the frontend can distinguish them from
+            # auto-extracted ones (which carry source: "auto").
+            out: list[dict] = []
+            for t in pending[:6]:
+                item = dict(t)
+                item.setdefault("source", "manual")
+                out.append(item)
+            return out
         except Exception as e:
             errors.append(f"todos: {e}")
             return []
@@ -2139,6 +2197,140 @@ end tell
                 errors.append(f"{name}: {e}")
                 results[name] = None
 
+    # ── Auto-extract todos from important emails (Haiku, cached 5 min) ─────────
+    # Runs AFTER the parallel block so it uses the LLM-reranked important_unread
+    # list already produced by fetch_important_unread above.
+    auto_todos: list[dict] = []
+    try:
+        important_emails: list[dict] = results.get("important_unread") or []
+        top_emails: list[dict] = important_emails[:10]  # cap to keep prompt small
+
+        if top_emails:
+            import json as _json_auto
+
+            # Build a stable cache key from email ids — invalidates when the
+            # important-email set changes between refreshes.
+            _email_ids_key = ":".join(str(e.get("id") or "") for e in top_emails)
+            _auto_cache_key = f"briefing_auto_todos::{_email_ids_key}"
+
+            def _compute_auto_todos() -> list[dict]:
+                """Call Haiku to extract concrete action items from top emails."""
+                raw_key: str = (
+                    _os.getenv("ANTHROPIC_API_KEY")
+                    or _os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+                    or ""
+                )
+                if not raw_key:
+                    return []
+
+                if raw_key.startswith("sk-ant-oat"):
+                    _client = _anthropic.Anthropic(
+                        auth_token=raw_key,
+                        default_headers={"anthropic-beta": "oauth-2025-04-20"},
+                    )
+                else:
+                    _client = _anthropic.Anthropic(api_key=raw_key)
+
+                # Compact email representation — subject + from only so token
+                # cost stays low and the model focuses on the right signal.
+                email_snippets: list[dict] = [
+                    {
+                        "id": str(e.get("id") or ""),
+                        "from": (e.get("from") or "")[:60],
+                        "subject": (e.get("subject") or "")[:80],
+                    }
+                    for e in top_emails
+                ]
+
+                # WHY cache_control on the system block: the prompt template is
+                # static; only the email list changes. Ephemeral caching with
+                # 1h TTL (extended-cache-ttl beta) saves ~10x on system-prompt
+                # tokens for back-to-back briefing refreshes within an hour.
+                _AUTO_TODO_SYSTEM = (
+                    "Given these important unread emails, extract any concrete TODO items "
+                    "the user must act on this week. "
+                    'Return STRICT JSON: { "tasks": [{ "title": "<imperative>", '
+                    '"due_hint": "<date phrase or empty string>", '
+                    '"source_email_id": "<id>" }] } '
+                    "Skip FYI / receipts / newsletters / pure announcements. "
+                    "ONLY emails containing a clear ASK or DEADLINE produce a task. "
+                    "Example: a 'RE: Missing: CSLL Post-Assessment' email → "
+                    '{ "title": "Complete CSLL Post-Assessment survey", "due_hint": "asap", '
+                    '"source_email_id": "..." }'
+                )
+
+                resp = _client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=512,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": _AUTO_TODO_SYSTEM,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": _json_auto.dumps(email_snippets),
+                        }
+                    ],
+                    extra_headers={"anthropic-beta": "extended-cache-ttl-2025-04-11"},
+                )
+
+                raw_text: str = (resp.content[0].text if resp.content else "").strip()
+                # Strip optional markdown fences some model versions emit.
+                raw_text = _re.sub(r"```[a-z]*", "", raw_text).strip()
+                parsed: dict = _json_auto.loads(raw_text)
+                tasks: list[dict] = parsed.get("tasks") or []
+
+                extracted: list[dict] = []
+                for task in tasks:
+                    title: str = str(task.get("title") or "").strip()
+                    if not title:
+                        continue
+                    extracted.append(
+                        {
+                            "id": f"auto_{task.get('source_email_id', '')}",
+                            "text": title,
+                            "done": False,
+                            "due": task.get("due_hint") or None,
+                            "created_at": now.isoformat(timespec="seconds"),
+                            "source": "auto",
+                            "source_email_id": str(task.get("source_email_id") or ""),
+                        }
+                    )
+                return extracted
+
+            cached_auto = _cached(_auto_cache_key, 300, _compute_auto_todos)
+            if isinstance(cached_auto, list):
+                auto_todos = cached_auto
+    except Exception as _auto_err:
+        # Non-fatal: degrade gracefully — manual todos are still returned.
+        errors.append(f"auto_todos: {_auto_err}")
+        auto_todos = []
+
+    # Pull from Reminders.app — these are the source of truth for cross-device sync.
+    # WHY cached 30s: AppleScript to Reminders is ~200ms normally, but can spike if
+    # the app is syncing iCloud. 30s avoids hammering osascript on every briefing poll.
+    reminders_todos: list[dict] = []
+    try:
+        reminders_cached = _CACHE.get("reminders_todos")
+        if reminders_cached and reminders_cached[0] > time.time():
+            reminders_todos = reminders_cached[1]
+        else:
+            from tools.reminders import list_reminders as _list_reminders
+            reminders_todos = _list_reminders()
+            with _CACHE_LOCK:
+                _CACHE["reminders_todos"] = (time.time() + 30, reminders_todos)
+    except Exception as _rem_err:
+        errors.append(f"reminders: {str(_rem_err)[:60]}")
+
+    # Merge: manual todos first (user-created, sorted by due date),
+    # then auto-extracted ones, then Reminders.app items (cross-device source of truth).
+    manual_todos: list[dict] = results.get("todos") or []
+    merged_todos: list[dict] = manual_todos + auto_todos + reminders_todos
+
     events_payload = results.get("events") or {}
     if isinstance(events_payload, dict):
         events_today = events_payload.get("events")
@@ -2154,7 +2346,7 @@ end tell
         # are the only sections the user wants to see in the dashboard
         # summary. Other widgets handle iMessage / Spotify / NBME details.
         "important_unread": results.get("important_unread") or [],
-        "todos": results.get("todos") or [],
+        "todos": merged_todos,
         # Legacy fields — kept for back-compat with anything else still
         # consuming /widgets/briefing (agent tools, future surfaces).
         "anki": results.get("anki"),
@@ -2492,3 +2684,46 @@ def todos_delete(todo_id: str, request: Request):
         raise HTTPException(status_code=404, detail="todo not found")
     _save_todos(new_items)
     return {"ok": True}
+
+
+# ── Reminders.app sync endpoints ──────────────────────────────────────────────
+#
+# These operate on the "Jarvis" list in macOS Reminders.app. The frontend
+# distinguishes Reminders-sourced items by source=="reminders" and routes
+# add/complete actions here instead of the file-backed PATCH/DELETE above.
+
+@router.post("/widgets/todos/add")
+def todos_add(payload: dict, request: Request, response: Response):
+    """Add a new reminder to Reminders.app (Jarvis list) and bust the briefing cache.
+
+    WHY bust briefing cache: the new reminder should appear on the next briefing
+    poll without waiting for the 30s Reminders cache to expire naturally.
+    """
+    _require_local_origin(request)
+    response.headers["Cache-Control"] = "no-store"
+    title = (payload or {}).get("title", "").strip()
+    due_hint = (payload or {}).get("due_hint")
+    if not title:
+        raise HTTPException(status_code=400, detail="title required")
+    from tools.reminders import add_reminder as _add_reminder
+    rid = _add_reminder(title, due_hint)
+    # Bust both the briefing cache and the reminders sub-cache so the next
+    # briefing refresh picks up the new item without a 30s wait.
+    _CACHE.pop("briefing", None)
+    _CACHE.pop("reminders_todos", None)
+    return {"ok": rid is not None, "id": rid}
+
+
+@router.post("/widgets/todos/complete")
+def todos_complete(payload: dict, request: Request, response: Response):
+    """Mark a Reminders.app reminder as completed and bust the briefing cache."""
+    _require_local_origin(request)
+    response.headers["Cache-Control"] = "no-store"
+    rid = (payload or {}).get("id", "").strip()
+    if not rid:
+        raise HTTPException(status_code=400, detail="id required")
+    from tools.reminders import complete_reminder as _complete_reminder
+    ok = _complete_reminder(rid)
+    _CACHE.pop("briefing", None)
+    _CACHE.pop("reminders_todos", None)
+    return {"ok": ok}

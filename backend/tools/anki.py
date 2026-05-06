@@ -11,12 +11,22 @@ ANKICONNECT_URL = os.getenv("ANKICONNECT_URL", "http://localhost:8765")
 ANKI_TOOLS = [
     {
         "name": "anki_get_stats",
-        "description": "Get today's Anki review stats: due count, reviewed, new cards introduced.",
+        "description": (
+            "Use this when the user asks 'how many Anki cards do I have due', 'what's my Anki "
+            "progress today', 'did I do my reviews', or 'how am I doing on Anki'. "
+            "Returns today's review stats: due count, cards reviewed, new cards introduced. "
+            "Requires Anki open with the AnkiConnect add-on running."
+        ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "anki_find_cards",
-        "description": "Search Anki cards by query (same syntax as Anki browser). Returns card IDs.",
+        "description": (
+            "Use this when the user asks 'find cards tagged [topic]', 'how many [subject] cards', "
+            "'show me my UWorld cardiology cards', or needs to search the Anki deck by tag/field. "
+            "Uses Anki browser query syntax (e.g. 'tag:UWorld::Cardiology', 'deck:Default is:due'). "
+            "Returns card IDs and count. Use query to specify the Anki search expression."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
