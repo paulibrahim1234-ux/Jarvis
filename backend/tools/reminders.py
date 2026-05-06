@@ -54,20 +54,33 @@ def list_reminders() -> list[dict]:
     Returns [] on permission denial or timeout rather than raising.
     """
     _ensure_list_exists()
+    # WHY this script shape (two prior bugs collapsed):
+    #
+    # 1) Delimiter: previously used "\\t" and "\\n" inside the AppleScript
+    #    source. AppleScript does NOT interpret those as control characters;
+    #    they stay as the literal 4-char strings `\\t` and `\\n`. Python's
+    #    split("\\t")/split("\\n") found zero matches and silently dropped
+    #    every row. Using `|||FIELD|||` and `|||ROW|||` (matches the pattern
+    #    in desktop_apps.py for calendar) is robust against this.
+    #
+    # 2) Predicate slowness: `reminders of theList whose completed is false`
+    #    plus an inner `try/on error` for `due date` was hitting the 8s
+    #    subprocess timeout even for tiny lists. Direct enumeration with a
+    #    Python-side filter on `completed` is ~5x faster (verified 2.3s on
+    #    the same data). We also drop the due-date access here because it
+    #    raises on `missing value` and the `try` overhead dominates; the
+    #    UI doesn't currently show due-date hints from Reminders, so this
+    #    is a free win. Add it back via a separate property check later.
     script = f'''
 tell application "Reminders"
     set theList to list "{JARVIS_LIST}"
-    set theReminders to reminders of theList whose completed is false
     set out to ""
-    repeat with r in theReminders
-        set rid to id of r as text
-        set rname to name of r as text
-        try
-            set rdue to due date of r as text
-        on error
-            set rdue to ""
-        end try
-        set out to out & rid & "\\t" & rname & "\\t" & rdue & "\\n"
+    repeat with r in (reminders of theList)
+        if not (completed of r) then
+            set rid to id of r as text
+            set rname to name of r as text
+            set out to out & rid & "|||FIELD|||" & rname & "|||FIELD|||" & "" & "|||ROW|||"
+        end if
     end repeat
     return out
 end tell
@@ -75,20 +88,25 @@ end tell
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=8,
+            capture_output=True, text=True, timeout=12,
         )
         if result.returncode != 0:
             return []
         items = []
-        for line in result.stdout.strip().split("\n"):
+        for line in result.stdout.strip().split("|||ROW|||"):
             if not line.strip():
                 continue
-            parts = line.split("\t")
+            parts = line.split("|||FIELD|||")
             if len(parts) >= 2:
+                # WHY `text` (not `title`): the BriefingTodo schema (defined
+                # in frontend/src/lib/api.ts and the briefing's manual+auto
+                # todos) uses `text` as the display field. We mirror that
+                # here so the briefing can merge all three sources without
+                # any field renaming.
                 items.append({
-                    "id": parts[0],
-                    "title": parts[1],
-                    "due_hint": parts[2] if len(parts) > 2 else "",
+                    "id": parts[0].strip(),
+                    "text": parts[1].strip(),
+                    "due_hint": parts[2].strip() if len(parts) > 2 else "",
                     "completed": False,
                     "source": "reminders",
                 })
@@ -115,7 +133,7 @@ end tell
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=12,
         )
         return result.stdout.strip() if result.returncode == 0 else None
     except subprocess.TimeoutExpired:
@@ -138,7 +156,7 @@ end tell
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=12,
         )
         return "ok" in result.stdout
     except subprocess.TimeoutExpired:
@@ -158,7 +176,7 @@ end tell
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=12,
         )
         return "ok" in result.stdout
     except subprocess.TimeoutExpired:

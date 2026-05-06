@@ -2300,7 +2300,101 @@ end tell
                             "source_email_id": str(task.get("source_email_id") or ""),
                         }
                     )
-                return extracted
+
+                # ── Push to Reminders.app (cross-device via iCloud) ─────────
+                # WHY this lives here: extracted todos should also appear on
+                # the user's iPhone Reminders app. Using a persistent
+                # email_id → reminder_id dedupe map prevents double-push
+                # across briefing refreshes. After a successful push, the
+                # task is REMOVED from extracted — list_reminders() will
+                # surface it as `source: "reminders"` on the next refresh,
+                # which is the canonical cross-device state.
+                _SYNC_PATH = (
+                    _Path(__file__).resolve().parent.parent
+                    / "storage"
+                    / "auto_todos_synced.json"
+                )
+                try:
+                    if _SYNC_PATH.exists():
+                        with _SYNC_PATH.open() as _sf:
+                            _sync_state: dict = _json_auto.load(_sf)
+                    else:
+                        _sync_state = {}
+                except Exception:
+                    _sync_state = {}
+
+                _state_dirty = False
+                _remaining: list[dict] = []
+                from tools.reminders import (
+                    add_reminder as _push_reminder,
+                    list_reminders as _list_for_dedupe,
+                )
+
+                # Title-based dedupe is the FALLBACK when email_id is empty.
+                # Haiku sometimes returns blank source_email_id, so we also
+                # check (a) the persisted sync_state values, and (b) the
+                # current Reminders.app titles, before pushing.
+                _existing_titles: set[str] = {
+                    (v.get("title") or "").strip().lower()
+                    for v in _sync_state.values()
+                }
+                try:
+                    for _r in _list_for_dedupe():
+                        _existing_titles.add(
+                            (_r.get("text") or "").strip().lower()
+                        )
+                except Exception:
+                    pass  # best-effort dedupe; better to push once than block
+
+                for _task in extracted:
+                    _eid = _task.get("source_email_id") or ""
+                    _norm_title = (_task.get("text") or "").strip().lower()
+
+                    # Already-synced check: id-based OR title-based.
+                    if _eid and _eid in _sync_state:
+                        continue
+                    if _norm_title and _norm_title in _existing_titles:
+                        continue
+
+                    _rid = _push_reminder(_task["text"])
+                    if _rid:
+                        # Use email_id as state key when present; otherwise
+                        # fall back to a stable title-based pseudo-key so
+                        # the next refresh's title-dedupe also catches it.
+                        _key = _eid or f"_title:{_norm_title}"
+                        _sync_state[_key] = {
+                            "reminder_id": _rid,
+                            "title": _task["text"],
+                            "synced_at": now.isoformat(timespec="seconds"),
+                        }
+                        _state_dirty = True
+                        _existing_titles.add(_norm_title)
+                        # Don't include in auto_todos — the next refresh
+                        # surfaces it as source=reminders (canonical).
+                        continue
+
+                    # Reminders push failed (permission denied etc.) —
+                    # keep as source=auto so the user still sees it.
+                    _remaining.append(_task)
+
+                if _state_dirty:
+                    # Atomic write to survive crashes mid-sync.
+                    import tempfile as _tf, os as _os2
+                    try:
+                        _SYNC_PATH.parent.mkdir(parents=True, exist_ok=True)
+                        _fd, _tmp = _tf.mkstemp(
+                            dir=str(_SYNC_PATH.parent), suffix=".tmp"
+                        )
+                        with _os2.fdopen(_fd, "w") as _wf:
+                            _json_auto.dump(_sync_state, _wf)
+                        _os2.replace(_tmp, str(_SYNC_PATH))
+                    except Exception:
+                        # If we couldn't persist, accept that next refresh
+                        # will re-push (Reminders has its own dedupe — the
+                        # title would still appear). Better to log later.
+                        pass
+
+                return _remaining
 
             cached_auto = _cached(_auto_cache_key, 300, _compute_auto_todos)
             if isinstance(cached_auto, list):
@@ -2311,8 +2405,9 @@ end tell
         auto_todos = []
 
     # Pull from Reminders.app — these are the source of truth for cross-device sync.
-    # WHY cached 30s: AppleScript to Reminders is ~200ms normally, but can spike if
-    # the app is syncing iCloud. 30s avoids hammering osascript on every briefing poll.
+    # WHY cached 10s (was 30s): user expects "check it off in Reminders → gone from
+    # dashboard" with minimal lag. AppleScript to Reminders is ~3s on cold cache, so
+    # 10s caps the overhead at ~30% while keeping the UI responsive to external edits.
     reminders_todos: list[dict] = []
     try:
         reminders_cached = _CACHE.get("reminders_todos")
@@ -2322,7 +2417,7 @@ end tell
             from tools.reminders import list_reminders as _list_reminders
             reminders_todos = _list_reminders()
             with _CACHE_LOCK:
-                _CACHE["reminders_todos"] = (time.time() + 30, reminders_todos)
+                _CACHE["reminders_todos"] = (time.time() + 10, reminders_todos)
     except Exception as _rem_err:
         errors.append(f"reminders: {str(_rem_err)[:60]}")
 

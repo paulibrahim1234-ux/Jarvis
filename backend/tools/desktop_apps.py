@@ -1569,19 +1569,37 @@ def _calendar_events(days: int = 30) -> dict:
     # decides; we iterate ALL calendars matching the name to cover both.
     import os
 
-    _default_fast = "Work,Classes,School,Family"
+    # Previous default ("Work,Classes,School,Family") was too restrictive: it
+    # missed the user's iCloud personal calendar (pi37@njit.edu) where personal
+    # events live, plus Europe and Birthdays/Holidays. All confirmed calendars
+    # that can appear in Calendar.app are listed here. CALENDAR_ALLOWLIST env
+    # var overrides the fast list entirely (comma-separated, case-sensitive).
+    _default_fast = "Work,School,Family,Classes,Europe,pi37@njit.edu,Birthdays,US Holidays"
     _default_slow = "Subscribed Calendar"  # one45 rotation — separate because it can hang
 
     fast_raw = os.environ.get("CALENDAR_ALLOWLIST", _default_fast)
     fast_cals = [c.strip() for c in fast_raw.split(",") if c.strip() and c.strip() != _default_slow]
     slow_cals = [_default_slow]  # always attempt; timeout is the safety valve
 
-    def _fetch_cals(cal_list: list, timeout_s: int) -> list:
-        """Run one AppleScript pass over cal_list; return raw event rows."""
-        if not cal_list:
-            return []
-        _target_list = ", ".join(f'"{c}"' for c in cal_list)
-        script = f"""
+    def _build_script(cal_list: list) -> str:
+        """Build a single AppleScript that fetches all cals in cal_list.
+
+        WHY no 'whose' predicate: some CalDAV-backed calendars (notably large
+        Exchange Work calendars) hang indefinitely on any 'whose start date >= X'
+        query — even with just a lower-bound filter. We avoid 'whose' entirely
+        and instead iterate 'every event of cal' in start-date order, collecting
+        events in [startDate, endDate] and breaking as soon as we pass endDate.
+
+        WHY single script for the batch (not one subprocess per calendar):
+        Calendar.app serializes AppleScript connections. Multiple simultaneous
+        osascript processes cause it to queue/stall them, making each one time
+        out before its turn. A single script for the non-problematic calendars
+        runs them sequentially inside one AppleScript process — fast and reliable.
+        Work is excluded from this batch because it takes 10–20 s regardless
+        (CalDAV sync lock) and would burn the whole budget for everyone else.
+        """
+        _target_list = ", ".join(f'"{_as_str(c)}"' for c in cal_list)
+        return f"""
 tell application "Calendar"
     set startDate to current date
     set endDate to startDate + ({days} * days)
@@ -1592,22 +1610,27 @@ tell application "Calendar"
             set matchingCals to (every calendar whose name is (calName as string))
             repeat with cal in matchingCals
                 try
-                    set calEvts to (every event of cal whose start date >= startDate and start date <= endDate)
-                    repeat with evt in calEvts
+                    -- No 'whose' predicate: avoids CalDAV sync lock on large cals.
+                    -- Events are stored in start-date order so we break early.
+                    repeat with evt in (every event of cal)
                         try
-                            set evtSummary to summary of evt
-                            set evtStart to start date of evt as string
-                            set evtEnd to end date of evt as string
-                            set evtLoc to ""
-                            try
-                                set evtLoc to location of evt
-                            end try
-                            if evtLoc is missing value then set evtLoc to ""
-                            set evtUid to ""
-                            try
-                                set evtUid to uid of evt
-                            end try
-                            set end of evtList to (evtSummary & "|||" & evtStart & "|||" & evtEnd & "|||" & (calName as string) & "|||" & evtLoc & "|||" & evtUid & "###ROW###")
+                            set evtStart to start date of evt
+                            if evtStart > endDate then exit repeat
+                            if evtStart >= startDate then
+                                set evtSummary to summary of evt
+                                set evtStartStr to evtStart as string
+                                set evtEnd to end date of evt as string
+                                set evtLoc to ""
+                                try
+                                    set evtLoc to location of evt
+                                end try
+                                if evtLoc is missing value then set evtLoc to ""
+                                set evtUid to ""
+                                try
+                                    set evtUid to uid of evt
+                                end try
+                                set end of evtList to (evtSummary & "|||" & evtStartStr & "|||" & evtEnd & "|||" & (calName as string) & "|||" & evtLoc & "|||" & evtUid & "###ROW###")
+                            end if
                         end try
                     end repeat
                 end try
@@ -1617,13 +1640,60 @@ tell application "Calendar"
     return evtList
 end tell
 """
-        result = _osascript(script, timeout=timeout_s)
+
+    def _fetch_cals(cal_list: list, timeout_s: int) -> list:
+        """Run one AppleScript covering all cals in cal_list; return raw rows."""
+        if not cal_list:
+            return []
+        result = _osascript(_build_script(cal_list), timeout=timeout_s)
         if "error" in result:
             return []
         return result.get("output", "").split("###ROW###")
 
-    # Fast path: user-owned calendars, 5s hard cap.
-    fast_rows = _fetch_cals(fast_cals, timeout_s=5)
+    def _fetch_cals_resilient(cal_list: list, per_cal_timeout_s: int) -> list:
+        """Try cal_list as a batch; on timeout retry with parallel per-cal calls.
+
+        Strategy:
+        1. Fast path: one batch AppleScript for all cals — fastest when Calendar.app
+           is healthy (no CalDAV sync in progress).
+        2. Fallback: if the batch times out (any cal mid-sync blocks the script),
+           re-run each calendar in its own subprocess IN PARALLEL. Calendar.app
+           handles concurrent osascript connections as separate requests, so a
+           syncing calendar (School, pi37@njit.edu) times out by itself without
+           blocking Europe, Family, Classes, etc.
+        """
+        import concurrent.futures as _cf
+        if not cal_list:
+            return []
+        # ── Fast path: single batch script ──────────────────────────────────
+        batch_timeout = min(per_cal_timeout_s, 8)
+        result = _osascript(_build_script(cal_list), timeout=batch_timeout)
+        if "error" not in result:
+            return result.get("output", "").split("###ROW###")
+        # ── Fallback: parallel per-calendar subprocesses ─────────────────────
+        # Each calendar gets its own osascript call. Syncing cals timeout
+        # independently; responsive ones complete within per_cal_timeout_s.
+        rows: list = []
+        with _cf.ThreadPoolExecutor(max_workers=len(cal_list)) as pool:
+            futs = {pool.submit(_osascript, _build_script([cal]), per_cal_timeout_s): cal
+                    for cal in cal_list}
+            for fut in _cf.as_completed(futs, timeout=per_cal_timeout_s + 1):
+                try:
+                    r = fut.result()
+                    if "error" not in r:
+                        rows.extend(r.get("output", "").split("###ROW###"))
+                except Exception:
+                    pass
+        return rows
+
+    # All fast calendars handled by the resilient fetcher which tries a
+    # single-batch first, then falls back to parallel per-cal on timeout.
+    # This handles two failure modes:
+    #   • Work[2] (727-event Exchange cal) — blocks any script it's in
+    #   • School/pi37@njit.edu (iCloud CalDAV) — mid-sync lockout
+    # Both are isolated by the fallback path so they timeout independently.
+    fast_rows = _fetch_cals_resilient(fast_cals, per_cal_timeout_s=8)
+
     # Slow path: subscribed feed (one45 rotation). 5s cap — if it times out
     # we still return the fast-path events rather than hanging.
     slow_rows = _fetch_cals(slow_cals, timeout_s=5)
