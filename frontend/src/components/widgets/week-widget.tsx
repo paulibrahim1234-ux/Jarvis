@@ -51,6 +51,12 @@ export function WeekWidget() {
     return () => ro.disconnect();
   }, []);
 
+  // Distinguish calendar-level unavailability from true backend offline.
+  // "available: false" in a 200 response = Calendar.app timed out or
+  // AppleScript failed — the backend is reachable. Only a network error /
+  // thrown exception means the backend is actually offline.
+  const [calendarError, setCalendarError] = useState<"timeout" | "offline" | null>(null);
+
   useEffect(() => {
     const range = rangeForNextDays(7);
     const load = (initial: boolean) => {
@@ -60,11 +66,17 @@ export function WeekWidget() {
             setAuthUrl(data.auth_url ?? `${BACKEND}/auth/microsoft`);
           } else if (data.available && Array.isArray(data.events)) {
             setEvents(data.events as RawCalendarEvent[]);
+            setCalendarError(null);
             setLive(true);
+          } else if (!data.available) {
+            // Backend answered but Calendar.app couldn't supply events
+            // (AppleScript timeout, Calendar not open, etc.).
+            setCalendarError("timeout");
           }
         })
         .catch(() => {
-          /* backend offline — leave empty; render empty-state */
+          // Fetch itself threw — network failure or 5xx — backend is offline.
+          setCalendarError("offline");
         })
         .finally(() => {
           if (initial) setLoading(false);
@@ -93,6 +105,17 @@ export function WeekWidget() {
 
   const unavailable = !loading && !live;
 
+  // Human-readable status for unavailable state.
+  // "timeout" = backend answered but Calendar.app failed (AppleScript issue).
+  // "offline" = network/fetch error — backend itself is unreachable.
+  const unavailableReason = authUrl
+    ? "connect Outlook above"
+    : calendarError === "offline"
+    ? "backend offline"
+    : calendarError === "timeout"
+    ? "Calendar fetch timed out"
+    : "Calendar unavailable";
+
   return (
     <Card className="h-full flex flex-col rounded-xl border border-foreground/10 bg-card hover:border-foreground/15 transition-colors">
       <CardHeader className="p-5 pb-3">
@@ -119,7 +142,7 @@ export function WeekWidget() {
         {unavailable ? (
           <div className="flex h-full items-center justify-center text-center">
             <p className="text-xs text-muted-foreground/70">
-              Calendar unavailable — {authUrl ? "connect Outlook above" : "backend offline"}.
+              Calendar unavailable — {unavailableReason}.
             </p>
           </div>
         ) : (

@@ -9,6 +9,7 @@ Server-side persistent memory for Jarvis chatbot.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+
+_logger = logging.getLogger("jarvis.memory")
 
 DB_DIR = Path.home() / ".jarvis"
 DB_PATH = DB_DIR / "chat.db"
@@ -425,8 +428,9 @@ def extract_facts_async(user_msg: str, assistant_reply: str) -> None:
                 if _scrub_phi(topic) is None or _scrub_phi(fact) is None:
                     continue
                 add_fact(topic, fact)
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.debug("extract_facts_async failed (best-effort): %s", exc)
+        # intentionally not re-raised — fact extraction is best-effort
 
 
 # ─────────────────────── dashboard snapshot ──────────────────────── #
@@ -436,8 +440,9 @@ async def _fetch_one(client: httpx.AsyncClient, path: str) -> dict:
         r = await client.get(f"{BACKEND_URL}{path}", timeout=3.0)
         if r.status_code == 200:
             return r.json()
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.debug("dashboard widget %s fetch failed (best-effort): %s", path, exc)
+        # intentionally not re-raised — widget fetch is best-effort
     return {}
 
 
@@ -545,7 +550,9 @@ async def dashboard_snapshot_async() -> str:
                 _fetch_one(client, "/widgets/email"),
                 _fetch_one(client, "/widgets/spotify"),
             )
-    except Exception:
+    except Exception as exc:
+        _logger.warning("dashboard_snapshot gather failed (affects user-visible state): %s", exc)
+        # intentionally not re-raised — fall back to empty dicts
         anki = cal = email = spotify = {}
 
     return _format_snapshot(anki=anki, cal=cal, email=email, spotify=spotify)

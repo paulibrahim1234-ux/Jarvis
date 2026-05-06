@@ -8,11 +8,14 @@ must have Full Disk Access. Grant in System Settings → Privacy & Security → 
 One conversation entry per contact (DM). Group chats filtered by default.
 """
 
+import logging
 import re
 import sqlite3
 import os
 import sys
 from datetime import datetime, timezone, date, timedelta
+
+_logger = logging.getLogger("jarvis.imessage")
 
 CHAT_DB = os.path.expanduser("~/Library/Messages/chat.db")
 
@@ -484,7 +487,8 @@ def get_recent_messages(contact_handles: list[str], limit: int = 20) -> list[dic
             """,
             (*contact_handles, limit),
         ).fetchall()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        _logger.warning("imessage chat.db error: %s", exc)
         # Schema drift, lock timeout, etc. — return an empty list instead
         # of crashing the agent tool dispatch.
         rows = []

@@ -7,8 +7,11 @@ Setup: visit http://127.0.0.1:8000/setup — enter credentials there.
 Token stored at ~/.jarvis/spotify_token (auto-refreshed).
 """
 
+import logging
 import os
 from pathlib import Path
+
+_logger = logging.getLogger("jarvis.spotify")
 
 CACHE_PATH = str(Path.home() / ".jarvis" / "spotify_token")
 SCOPES = (
@@ -284,7 +287,9 @@ def get_now_playing() -> dict | None:
             "uri": item.get("uri"),
         }
     except Exception as e:
-        _maybe_trip_breaker(e)
+        if not _maybe_trip_breaker(e):
+            # Not a 429 — log so non-rate-limit failures are visible
+            _logger.warning("get_now_playing failed: %s", e)
         return None
 
 
