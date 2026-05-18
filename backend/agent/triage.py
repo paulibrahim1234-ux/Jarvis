@@ -7,8 +7,6 @@ classifier independently of the main jarvis.py loop.
 """
 
 import json
-import os
-import anthropic
 from datetime import datetime
 
 # We import the sync client from jarvis instead of building a duplicate so
@@ -50,6 +48,11 @@ Return STRICT JSON matching:
 }
 Output ONLY the JSON object — no markdown fences, no explanation.
 </output_schema>
+
+<output_budget>
+Cap excerpt to 100 chars, draft_reply to 200 chars, summary to 80 chars.
+If a tier exceeds 12 items, keep the 12 most recent and add the rest to skip_count.
+</output_budget>
 '''
 
 # Empty-result shape returned when there is nothing to triage or on hard failures.
@@ -105,7 +108,7 @@ def compute_triage(email_payload: dict, imessage_payload: dict) -> dict:
     # The user content block changes every call so it must NOT carry cache_control.
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=2048,
+        max_tokens=6000,
         system=[
             {
                 "type": "text",
@@ -137,6 +140,20 @@ def compute_triage(email_payload: dict, imessage_payload: dict) -> dict:
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError as exc:
+        # WHY raw_decode salvage: with large email payloads the model can still
+        # emit a truncated response even at max_tokens=6000 in edge cases.
+        # raw_decode parses whatever leading valid JSON object exists and discards
+        # the trailing garbage — better to return a partial result than an error.
+        try:
+            salvaged, _ = json.JSONDecoder().raw_decode(raw_text.lstrip())
+            if isinstance(salvaged, dict):
+                # Merge with _EMPTY_RESULT so missing keys are always present.
+                merged = dict(_EMPTY_RESULT)
+                merged.update(salvaged)
+                merged["error"] = f"partial JSON (salvaged): truncated at char {exc.pos}"
+                return merged
+        except (json.JSONDecodeError, ValueError):
+            pass
         # Return a partial result with an error key rather than propagating.
         # The endpoint wraps this in its own try/except too, but belt-and-suspenders.
         result = dict(_EMPTY_RESULT)

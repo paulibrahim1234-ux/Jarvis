@@ -543,22 +543,13 @@ function HomePane({
     uri?: string | null;
   };
 
-  const rateLimited = data.rate_limited === true;
-  const retryMin = Math.max(1, Math.ceil((data.rate_limit_retry_in_seconds ?? 0) / 60));
-  const banner = rateLimited ? (
-    <div
-      className="mb-3 px-3 py-2 rounded-lg text-[11px] leading-snug"
-      style={{
-        background: "color-mix(in oklab, var(--surface-2) 80%, transparent)",
-        border: "1px solid var(--border-2)",
-        color: "var(--ink-2)",
-      }}
-      role="status"
-    >
-      Spotify is rate-limiting Jarvis right now (~{retryMin} min until retry).
-      This usually clears on its own — no action needed.
-    </div>
-  ) : null;
+  // Rate-limit banner intentionally suppressed: when the Web API breaker
+  // is tripped, the affected rows (top tracks/artists/playlists) render
+  // empty on their own — that's the natural UX signal. Surfacing a
+  // dedicated banner created anxiety without adding actionable info,
+  // since the user's currently-playing track + queue come from the
+  // desktop AppleScript path which is unaffected.
+  const banner = null;
 
   const rows: { label: string; items: HomeItem[] }[] = [
     ...(
@@ -585,10 +576,11 @@ function HomePane({
         <div key={row.label}>
           <div className="text-[11px] text-muted-foreground/60 mb-1.5 px-0.5">{row.label}</div>
           <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
-            {/* D5 — use stable uri as key instead of array index */}
+            {/* D5 — uri prefix + index because rows can legitimately contain
+                 duplicate uris (same track appears in multiple recent-play rows). */}
             {row.items.slice(0, 8).map((item, i) => (
               <button
-                key={item.uri ?? i}
+                key={`${item.uri ?? ""}-${i}`}
                 className="flex-shrink-0 flex flex-col items-center gap-1 group/tile"
                 onClick={() => { if (item.uri) onPlay(item.uri); }}
               >
@@ -693,20 +685,20 @@ function MoodsPane({
                       value={draftEmoji}
                       onChange={(e) => setDraftEmoji(e.target.value)}
                       placeholder="Emoji"
-                      className="w-10 rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 text-center text-sm focus:outline-none"
+                      className="w-10 rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 text-center text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
                     />
                     <input
                       value={draftName}
                       onChange={(e) => setDraftName(e.target.value)}
                       placeholder="Name"
-                      className="flex-1 rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 focus:outline-none"
+                      className="flex-1 rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 focus:outline-none focus:ring-2 focus:ring-[var(--brand)]"
                     />
                   </div>
                   <input
                     value={draftPlaylistId}
                     onChange={(e) => setDraftPlaylistId(e.target.value)}
                     placeholder="Playlist URL or ID"
-                    className="w-full rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 focus:outline-none text-[10px]"
+                    className="w-full rounded bg-foreground/5 border border-foreground/10 px-1.5 py-0.5 focus:outline-none focus:ring-2 focus:ring-[var(--brand)] text-[10px]"
                   />
                   <div className="flex gap-1.5">
                     <button
@@ -794,8 +786,8 @@ function NowPlayingPane({
       <div className="space-y-0.5">
         <div className="h-1 w-full rounded-full bg-foreground/10 overflow-hidden">
           <div
-            className="h-full rounded-full bg-[#1DB954] transition-all duration-1000"
-            style={{ width: `${progress * 100}%` }}
+            className="h-full rounded-full bg-[#1DB954] transition-transform duration-1000 ease-linear origin-left"
+            style={{ transform: `scaleX(${progress})`, width: '100%' }}
           />
         </div>
         <div className="flex justify-between text-[10px] text-muted-foreground/50 tabular-nums">
@@ -841,7 +833,19 @@ function LibraryPane({
   onPlay: (uri: string) => void;
 }) {
   if (!webOk) return <EmptyState icon={Library} title="Connect Spotify" hint="to see your playlists" />;
-  if (!items) return <p className="px-2 py-3 text-[11px] text-muted-foreground/60">Loading…</p>;
+  if (!items) return (
+    <ul className="space-y-1 px-1 py-1" aria-hidden>
+      {[0, 1, 2, 3, 4].map((i) => (
+        <li key={i} className="flex items-center gap-2 px-1 py-1">
+          <Skeleton className="h-8 w-8 rounded" />
+          <div className="flex-1 space-y-1">
+            <Skeleton className="h-3 w-3/4" />
+            <Skeleton className="h-2.5 w-1/2" />
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
   if (items.length === 0) return <EmptyState icon={Library} title="No playlists" />;
   return (
     // F9 — bottom fade mask on the scrollable list
@@ -942,7 +946,7 @@ function SearchPane({
                       className="h-7 w-7 rounded object-cover shrink-0"
                     />
                   ) : (
-                    <div className="h-7 w-7 rounded bg-neutral-800 shrink-0" />
+                    <div className="h-7 w-7 rounded bg-foreground/10 shrink-0" />
                   )}
                   <div className="min-w-0 flex-1">
                     <p className="truncate">{t.title}</p>
@@ -971,7 +975,18 @@ function QueuePane({
   onPlay: (uri: string) => void;
 }) {
   if (!webOk) return <EmptyState icon={ListMusic} title="Connect Spotify" hint="to see upcoming tracks" />;
-  if (!items) return <p className="px-2 py-3 text-[11px] text-muted-foreground/60">Loading…</p>;
+  if (!items) return (
+    <ul className="space-y-1 px-1 py-1" aria-hidden>
+      {[0, 1, 2, 3, 4].map((i) => (
+        <li key={i} className="flex items-center gap-2 px-2 py-1">
+          <Skeleton className="h-3 w-4" />
+          <Skeleton className="h-6 w-6 rounded" />
+          <Skeleton className="h-3 flex-1" />
+          <Skeleton className="h-3 w-16" />
+        </li>
+      ))}
+    </ul>
+  );
   if (items.length === 0)
     return <EmptyState icon={ListMusic} title="Queue is empty" hint="Play something to fill it" />;
   return (
@@ -1003,7 +1018,7 @@ function QueuePane({
                   className="h-6 w-6 rounded object-cover shrink-0"
                 />
               ) : (
-                <div className="h-6 w-6 rounded bg-neutral-800 shrink-0" />
+                <div className="h-6 w-6 rounded bg-foreground/10 shrink-0" />
               )}
               <span className="truncate flex-1">{t.title}</span>
               <span className="text-muted-foreground/60 truncate text-[10px]">
@@ -1089,12 +1104,14 @@ function AlbumArt({ src, size }: { src?: string | null; size: string }) {
       <img
         src={src}
         alt="album"
-        className={`${size} shrink-0 rounded-lg object-cover shadow-lg`}
+        className={`${size} shrink-0 rounded-lg object-cover`}
+        style={{ boxShadow: "var(--shadow-card-hover)" }}
       />
     );
   return (
     <div
-      className={`${size} shrink-0 rounded-lg bg-gradient-to-br from-emerald-900 via-emerald-800 to-teal-700 shadow-lg`}
+      className={`${size} shrink-0 rounded-lg bg-gradient-to-br from-emerald-900 via-emerald-800 to-teal-700`}
+      style={{ boxShadow: "var(--shadow-card-hover)" }}
     />
   );
 }

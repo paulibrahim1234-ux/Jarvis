@@ -9,7 +9,15 @@ Token stored at ~/.jarvis/spotify_token (auto-refreshed).
 
 import logging
 import os
+import threading as _threading
+import time as _time
 from pathlib import Path
+
+# spotipy is heavy and only needed for type hints / actual API calls.
+# Imported lazily at the call sites that need it; the module-level
+# typing annotation `_SP_INSTANCE: "spotipy.Spotify | None"` is a
+# string literal so it does not require the import at module level.
+import spotipy  # noqa: F401  -- needed for the quoted annotation below
 
 _logger = logging.getLogger("jarvis.spotify")
 
@@ -147,9 +155,6 @@ def _reset_sp_instance() -> None:
 # distinguish "rate-limited" from "empty result" and surface a clear UI
 # message ("Spotify rate-limited — retrying at HH:MM").
 
-import threading as _threading
-import time as _time
-
 _RATE_LIMIT_LOCK = _threading.Lock()
 
 # Serializes the token expiry-check + potential refresh across threads.
@@ -214,7 +219,7 @@ def _maybe_trip_breaker(exc: Exception) -> bool:
     # Prefer Retry-After from the exception headers (spotipy exposes these on
     # SpotifyException as e.headers when retries=0 bypasses the retry machinery).
     # Fall back to parsing the seconds from the exception message string.
-    retry_after = 600.0
+    retry_after = 60.0
     try:
         headers = getattr(exc, "headers", None) or {}
         ra = headers.get("Retry-After") or headers.get("retry-after")
@@ -222,7 +227,7 @@ def _maybe_trip_breaker(exc: Exception) -> bool:
             retry_after = float(ra)
     except Exception:
         pass
-    if retry_after == 600.0:
+    if retry_after == 60.0:
         m = _re.search(r"after:\s*(\d+)", msg)
         if m:
             retry_after = float(m.group(1))

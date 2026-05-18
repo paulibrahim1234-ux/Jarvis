@@ -9,6 +9,8 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import Skeleton from "@/components/ui/skeleton";
+import { ErrorState } from "./error-state";
 import { fetchCalendar } from "@/lib/api";
 import { openInApp } from "@/lib/open-apps";
 
@@ -397,7 +399,7 @@ export function CalendarWidget() {
           Upcoming
           {isLive ? (
             <>
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" title="Live" />
+              <span className="h-1.5 w-1.5 rounded-full inline-block" style={{ background: "var(--status-live)" }} title="Live" />
               <span className="sr-only">live</span>
               <span className="text-[10px] normal-case font-normal text-muted-foreground/60">
                 · {events.length} events · next 30 days
@@ -446,7 +448,8 @@ export function CalendarWidget() {
           ) : (
             <>
               <span
-                className="h-1.5 w-1.5 rounded-full bg-amber-400 inline-block"
+                className="h-1.5 w-1.5 rounded-full inline-block"
+                style={{ background: "var(--status-warn)" }}
                 title={errorMsg}
               />
               <span className="sr-only">error</span>
@@ -456,16 +459,34 @@ export function CalendarWidget() {
       </CardHeader>
       <CardContent ref={contentRef} className="flex-1 min-h-0 p-5 pt-0">
         {status === "loading" && (
-          <div className="h-full flex flex-col items-center justify-center text-xs text-muted-foreground/50 gap-1">
-            <div>Loading calendar...</div>
-            <div className="text-[10px] font-mono">{errorMsg}</div>
+          <div className="space-y-3 pt-1" aria-hidden>
+            {[0, 1, 2].map((g) => (
+              <div key={g} className="space-y-1.5">
+                <Skeleton className="h-3 w-20" />
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="flex gap-2 px-2 py-1.5">
+                    <Skeleton className="h-3 w-12 shrink-0" />
+                    <Skeleton className="h-3 flex-1" />
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         )}
         {status === "error" && (
-          <div className="h-full flex flex-col justify-center gap-2 text-xs text-muted-foreground">
-            <p className="text-amber-400/90 text-sm font-medium">Calendar unavailable</p>
-            <p>{errorMsg}</p>
-          </div>
+          <ErrorState
+            message={
+              errorMsg.toLowerCase().includes("timeout")
+                ? "Calendar fetch timed out"
+                : errorMsg.toLowerCase().includes("network") || errorMsg.toLowerCase().includes("offline")
+                ? "Backend unreachable"
+                : errorMsg || "Calendar unavailable"
+            }
+            onRetry={() => {
+              setStatus("loading");
+              setErrorMsg("");
+            }}
+          />
         )}
         {isLive && events.length === 0 && (
           <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
@@ -519,13 +540,15 @@ export function CalendarWidget() {
       {/* Cmd+click / Shift+click inline event detail modal */}
       {expandedEvent && (
         <div
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center"
-          onClick={() => setExpandedEvent(null)}
-          onKeyDown={(e) => { if (e.key === "Escape") setExpandedEvent(null); }}
-          tabIndex={-1}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Event: ${expandedEvent.title}`}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center animate-in fade-in duration-150"
+          onClick={(e) => { if (e.target === e.currentTarget) setExpandedEvent(null); }}
         >
           <div
-            className="bg-card border border-foreground/10 rounded-xl p-5 w-80 max-w-[90vw] space-y-2 shadow-xl"
+            className="bg-card border border-foreground/10 rounded-xl p-5 w-80 max-w-[90vw] space-y-2 animate-in fade-in zoom-in-95 duration-200 ease-out"
+            style={{ boxShadow: "var(--shadow-card-hover)" }}
             onClick={(e) => e.stopPropagation()}
           >
             <p className="font-semibold text-sm text-foreground leading-snug">{expandedEvent.title}</p>
@@ -662,7 +685,7 @@ function WeekEventChip({
       role="button"
       tabIndex={0}
       onClick={handleClick}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onExpand?.(event); } }}
       className={`cursor-pointer rounded px-1.5 py-1 text-[10px] leading-snug hover:bg-foreground/10 transition-colors ${typeCls} bg-transparent`}
     >
       <div className="font-medium truncate">{event.title}</div>
@@ -717,7 +740,7 @@ function EventRow({
         role="button"
         tabIndex={0}
         onClick={handleClick}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onExpand?.(event); } }}
         className="cursor-pointer rounded-lg border border-foreground/5 bg-foreground/[0.02] p-3 hover:bg-foreground/10 transition-colors"
       >
         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
@@ -751,7 +774,7 @@ function EventRow({
       role="button"
       tabIndex={0}
       onClick={handleClick}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleClick(e as unknown as React.MouseEvent); } }}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onExpand?.(event); } }}
       className="cursor-pointer flex items-start gap-3 rounded-lg px-3 py-2 hover:bg-foreground/10 transition-colors"
     >
       <div className="min-w-[68px] pt-0.5 font-mono text-xs text-muted-foreground">

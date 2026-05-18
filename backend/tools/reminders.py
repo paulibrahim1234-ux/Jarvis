@@ -6,10 +6,48 @@ dictionary. Keeping the access layer isolated lets the briefing widget treat
 "todos" as a simple list while we sync to/from the system app underneath.
 """
 
+import logging
+import re
 import subprocess
 from typing import Optional
 
+_log = logging.getLogger(__name__)
+
 JARVIS_LIST = "Jarvis"  # Default list name. The first call creates it if missing.
+
+# Tokens stripped from titles before dedup comparison — these vary across Haiku
+# variants of the same task and cause spurious duplicates.
+_NOISE_RE = re.compile(
+    r"\b(before\s+expiration|your|or|via|the|and|for|with|from|this|that)\b",
+    re.IGNORECASE,
+)
+_PUNCT_RE = re.compile(r"[^\w\s]")
+_SPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_title(title: str) -> str:
+    """Return a canonical dedup key for a reminder title.
+
+    Lowercases, strips punctuation, drops common noise tokens ("before
+    expiration", "your", "or", "/" etc.), and collapses whitespace runs.
+    Two titles that differ only in noise tokens produce the same canonical
+    key, so the dedup logic can skip the second push.
+
+    WHY here (not widgets.py): reminders.py is the boundary layer for
+    Reminders.app. Anything that pushes a reminder uses the same normaliser
+    so dedup keys are consistent across call sites.
+
+    >>> _normalize_title("Complete your VSLO application before expiration")
+    'complete vslo application'
+    >>> _normalize_title("Complete VSLO Application!")
+    'complete vslo application'
+    """
+    s = (title or "").strip().lower()
+    s = s.replace("/", " ")          # treat "/" as whitespace (e.g. "yes/no")
+    s = _PUNCT_RE.sub(" ", s)        # strip remaining punctuation
+    s = _NOISE_RE.sub(" ", s)        # drop noise tokens
+    s = _SPACE_RE.sub(" ", s)        # collapse whitespace
+    return s.strip()
 
 
 def _as_str(s: str) -> str:
@@ -135,8 +173,20 @@ end tell
             ["osascript", "-e", script],
             capture_output=True, text=True, timeout=12,
         )
-        return result.stdout.strip() if result.returncode == 0 else None
+        if result.returncode == 0:
+            rid = result.stdout.strip()
+            if rid:
+                return rid
+            # AppleScript returned exit 0 but empty stdout — treat as failure.
+            _log.warning("add_reminder: osascript exit 0 but empty id (stderr=%r)", result.stderr.strip())
+            return None
+        _log.warning(
+            "add_reminder: osascript exit %d for title=%r; stderr=%r",
+            result.returncode, title, result.stderr.strip()
+        )
+        return None
     except subprocess.TimeoutExpired:
+        _log.warning("add_reminder: osascript timed out for title=%r", title)
         return None
 
 
@@ -148,7 +198,7 @@ def complete_reminder(reminder_id: str) -> bool:
     safe_id = _as_str(reminder_id)
     script = f'''
 tell application "Reminders"
-    set r to first reminder whose id is "{safe_id}"
+    set r to first reminder of list "Jarvis" whose id is "{safe_id}"
     set completed of r to true
     return "ok"
 end tell
@@ -168,7 +218,7 @@ def delete_reminder(reminder_id: str) -> bool:
     safe_id = _as_str(reminder_id)
     script = f'''
 tell application "Reminders"
-    set r to first reminder whose id is "{safe_id}"
+    set r to first reminder of list "Jarvis" whose id is "{safe_id}"
     delete r
     return "ok"
 end tell

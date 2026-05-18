@@ -4,6 +4,8 @@ import { useRef, useState, useEffect, useMemo } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import Skeleton from "@/components/ui/skeleton";
+import { ErrorState } from "./error-state";
 import { fetchCalendar, BACKEND } from "@/lib/api";
 import { openInApp } from "@/lib/open-apps";
 import {
@@ -123,7 +125,8 @@ export function WeekWidget() {
           This Week
           {live ? (
             <span
-              className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block"
+              className="h-1.5 w-1.5 rounded-full inline-block"
+              style={{ background: "var(--status-live)" }}
               title="Live from Outlook"
             />
           ) : authUrl ? (
@@ -139,12 +142,55 @@ export function WeekWidget() {
         </CardTitle>
       </CardHeader>
       <CardContent ref={contentRef} className="flex-1 min-h-0 p-5 pt-0">
-        {unavailable ? (
+        {loading ? (
+          <div className="space-y-3 pt-1" aria-hidden>
+            {[0, 1, 2, 3].map((g) => (
+              <div key={g} className="space-y-1.5">
+                <Skeleton className="h-3 w-16" />
+                {[0, 1].map((i) => (
+                  <div key={i} className="flex items-start gap-2 px-3 py-1.5">
+                    <Skeleton className="h-3 w-14 shrink-0" />
+                    <Skeleton className="h-3 flex-1" />
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : unavailable && authUrl ? (
           <div className="flex h-full items-center justify-center text-center">
             <p className="text-xs text-muted-foreground/70">
               Calendar unavailable — {unavailableReason}.
             </p>
           </div>
+        ) : unavailable ? (
+          <ErrorState
+            message={
+              calendarError === "offline"
+                ? "Backend unreachable"
+                : calendarError === "timeout"
+                ? "Calendar fetch timed out"
+                : "Calendar unavailable"
+            }
+            onRetry={() => {
+              setLoading(true);
+              setCalendarError(null);
+              const range = rangeForNextDays(7);
+              fetchCalendar(range)
+                .then((data) => {
+                  if (data.auth_needed) {
+                    setAuthUrl(data.auth_url ?? `${BACKEND}/auth/microsoft`);
+                  } else if (data.available && Array.isArray(data.events)) {
+                    setEvents(data.events as RawCalendarEvent[]);
+                    setCalendarError(null);
+                    setLive(true);
+                  } else if (!data.available) {
+                    setCalendarError("timeout");
+                  }
+                })
+                .catch(() => setCalendarError("offline"))
+                .finally(() => setLoading(false));
+            }}
+          />
         ) : (
           <div className="relative h-full">
             {isWide ? (
@@ -157,7 +203,7 @@ export function WeekWidget() {
                 }}
               >
                 {grouped.map((day) => (
-                  <DayColumn key={day.label} day={day} />
+                  <DayColumn key={day.day.toISOString().slice(0,10)} day={day} />
                 ))}
               </div>
             ) : (
@@ -165,7 +211,7 @@ export function WeekWidget() {
                 <ScrollArea className="h-full">
                   <div className="space-y-4 pr-2">
                     {grouped.map((day) => (
-                      <DayColumn key={day.label} day={day} />
+                      <DayColumn key={day.day.toISOString().slice(0,10)} day={day} />
                     ))}
                   </div>
                 </ScrollArea>

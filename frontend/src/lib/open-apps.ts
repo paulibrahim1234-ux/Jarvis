@@ -21,6 +21,9 @@ export interface OpenInAppOptions {
  */
 export async function openInApp(opts: OpenInAppOptions): Promise<void> {
   try {
+    // TODO(perf): direct call `${process.env.NEXT_PUBLIC_BACKEND}/apps/open`
+    // when BACKEND env var is set, to skip the Next rewrite hop. Left as
+    // a rewrite for now because some setups rely on the proxy in dev mode.
     const r = await fetch("/api/apps/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

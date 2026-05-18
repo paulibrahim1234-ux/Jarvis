@@ -103,6 +103,15 @@ def is_authenticated() -> bool:
         return False
 
 
+def _fmt_time(dt) -> str:
+    """Portable hour formatting. %-I is GNU-only and crashes on systems
+    without GNU strftime — strip leading zero manually instead."""
+    if dt is None:
+        return ""
+    s = dt.strftime("%I:%M %p").lstrip("0")
+    return s or "0:00"
+
+
 def run_outlook_tool(name: str, inp: dict):
     account = _get_account()
     if not account.is_authenticated:
@@ -114,7 +123,7 @@ def run_outlook_tool(name: str, inp: dict):
         return {"emails": [
             {"id": m.object_id, "from": str(m.sender), "subject": m.subject,
              "preview": (m.body_preview or "")[:200],
-             "time": m.received.strftime("%-I:%M %p") if m.received else "", "read": not m.is_read}
+             "time": _fmt_time(m.received), "read": not m.is_read}
             for m in messages
         ]}
 
@@ -123,14 +132,37 @@ def run_outlook_tool(name: str, inp: dict):
                 "note": "Confirm with user before sending."}
 
     if name == "outlook_get_calendar":
-        from datetime import date, datetime, timezone, timedelta
+        from datetime import date, datetime, time, timezone
         d = inp.get("date") or date.today().isoformat()
         try:
             target = date.fromisoformat(d)
         except ValueError:
             target = date.today()
         calendar = account.schedule().get_default_calendar()
-        events = calendar.get_events(limit=20, include_recurring=True)
+        # Filter events to the target day. The previous version parsed
+        # `target` but then fetched ALL events (limit=20) regardless of date,
+        # so the `date` arg in the response was a lie. Use O365.utils.Query
+        # if available; otherwise filter client-side after fetch.
+        day_start = datetime.combine(target, time.min, tzinfo=timezone.utc)
+        day_end = datetime.combine(target, time.max, tzinfo=timezone.utc)
+        try:
+            from O365.utils import Query as _Q
+            q = _Q().chain("and") \
+                .on_attribute("start").greater_equal(day_start) \
+                .chain("and").on_attribute("end").less_equal(day_end)
+            events = calendar.get_events(limit=50, include_recurring=True, query=q)
+        except Exception:
+            # Fallback: client-side filter. O365 returns datetime objects in
+            # UTC; if .start has no tzinfo, assume naive UTC.
+            all_events = calendar.get_events(limit=50, include_recurring=True)
+            def _on_target(e):
+                s = getattr(e, "start", None)
+                if s is None:
+                    return False
+                if s.tzinfo is None:
+                    s = s.replace(tzinfo=timezone.utc)
+                return day_start <= s <= day_end
+            events = [e for e in all_events if _on_target(e)]
         return {"events": [
             {"title": e.subject, "start": str(e.start), "end": str(e.end),
              "location": str(e.location) if e.location else ""}

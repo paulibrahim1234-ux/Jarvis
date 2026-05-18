@@ -6,10 +6,95 @@ Apps just need to be open and logged in.
 Covers: Microsoft Outlook, Spotify, Apple Calendar, Messages
 """
 
-import json
 import os
+import re
 import sqlite3
 import subprocess
+from datetime import datetime as _datetime_cls
+
+# Anchored date-line heuristic for icalBuddy output, e.g. "May 6, 2026" or
+# "May 7, 2026 at 8:00 AM - 10:30 AM". The previous heuristic (", 20" in line
+# or " at " in line) had two false positives:
+#   - addresses containing ", 20..." (e.g. "Yankee Stadium, 2018 Bronx Way")
+#   - notes containing the word "at" anywhere
+# Anchoring on "<Month> <day>, <year>" eliminates both.
+_DATE_LINE_RE = re.compile(r"^[A-Za-z]{3,}\s+\d{1,2},\s+\d{4}\b")
+
+# Bullet prefix emitted by icalBuddy when -b flag is NOT passed ("• Title  (Cal)")
+_BULLET_RE = re.compile(r"^[•*\-]\s+")
+
+# Calendar-name suffix appended when -nc is NOT passed, e.g. "  (Work)"
+_CAL_SUFFIX_RE = re.compile(r"\s+\([^)]+\)\s*$")
+
+# Month name → number for parsing icalBuddy's human-readable date strings.
+_MONTH_MAP = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
+
+
+def _looks_like_date_line(line: str) -> bool:
+    return bool(_DATE_LINE_RE.match(line))
+
+
+def _parse_icalbuddy_datetime(date_line: str) -> str:
+    """Convert icalBuddy's human-readable date string to ISO 8601.
+
+    WHY this is needed: briefing's fetch_events filters with
+    `e["start"].startswith(today_iso)`, so events whose `start` held a
+    human-readable string like "May 9, 2026 at 1:00 PM - 5:00 PM" were
+    silently dropped (the "0 events today" bug even when icalBuddy returned
+    real events). Storing ISO 8601 makes the filter, sort, and
+    `_format_briefing_time` all work correctly.
+
+    Handled formats (icalBuddy with -nrd, no relative dates):
+      "May 9, 2026"                               → "2026-05-09"
+      "May 9, 2026 at 1:00 PM - 5:00 PM"  → "2026-05-09T13:00:00"
+      "May 14, 2026 - May 16, 2026"               → "2026-05-14"
+
+    Returns the original string on parse failure (safe fallback — existing
+    callers that already do `fromisoformat` with an `except` are unaffected).
+    """
+    # Normalise narrow no-break space (U+202F) and en-dash to plain equivalents.
+    s = date_line.strip().replace(" ", " ").replace("–", "-").replace("—", "-")
+
+    # Date-range "Month D, YYYY - Month D, YYYY" → take start date only.
+    range_m = re.match(
+        r"^([A-Za-z]+\s+\d{1,2},\s+\d{4})\s*-\s*[A-Za-z]+\s+\d{1,2},\s+\d{4}$", s
+    )
+    if range_m:
+        s = range_m.group(1)
+
+    # "Month D, YYYY" optionally followed by " at H:MM AM/PM"
+    date_m = re.match(
+        r"^([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})(?:\s+at\s+(\d{1,2}):(\d{2})\s*([AP]M))?",
+        s,
+        re.IGNORECASE,
+    )
+    if not date_m:
+        return date_line
+
+    month = _MONTH_MAP.get(date_m.group(1).lower(), 0)
+    if not month:
+        return date_line
+    day, year = int(date_m.group(2)), int(date_m.group(3))
+
+    if date_m.group(4) is not None:
+        hour, minute = int(date_m.group(4)), int(date_m.group(5))
+        meridiem = date_m.group(6).upper()
+        if meridiem == "PM" and hour != 12:
+            hour += 12
+        elif meridiem == "AM" and hour == 12:
+            hour = 0
+        try:
+            return _datetime_cls(year, month, day, hour, minute).isoformat(timespec="seconds")
+        except ValueError:
+            return date_line
+    try:
+        return _datetime_cls(year, month, day).strftime("%Y-%m-%d")
+    except ValueError:
+        return date_line
 import time
 import urllib.parse
 from typing import Optional
@@ -327,7 +412,7 @@ def run_desktop_tool(name: str, inp: dict):
     if name == "spotify_prev_track":
         return _spotify_cmd("previous track")
     if name == "spotify_set_volume":
-        return _spotify_volume(inp["volume"])
+        return _spotify_volume(inp.get("volume", 50))
     if name == "spotify_play_search":
         return _spotify_search_play(inp["query"])
     if name == "calendar_get_events":
@@ -1476,11 +1561,18 @@ def _spotify_cmd(cmd: str) -> dict:
     return _spotify_now_playing()
 
 
-def _spotify_volume(vol: int) -> dict:
-    result = _osascript(f'tell application "Spotify" to set sound volume to {vol}')
+def _spotify_volume(vol) -> dict:
+    # Sec#12: schema declares integer but Anthropic doesn't enforce. Coerce
+    # and clamp explicitly so a string smuggled through inp['volume'] cannot
+    # break out of the AppleScript line.
+    try:
+        v = max(0, min(100, int(vol)))
+    except (TypeError, ValueError):
+        return {"error": "volume must be int 0..100"}
+    result = _osascript(f'tell application "Spotify" to set sound volume to {v}')
     if "error" in result:
         return result
-    return {"status": f"Volume set to {vol}"}
+    return {"status": f"Volume set to {v}"}
 
 
 def _spotify_search_play(query: str) -> dict:
@@ -1558,6 +1650,19 @@ def _calendar_events_via_icalbuddy(days: int) -> Optional[dict]:
     import shutil
     binary = shutil.which("icalBuddy")
     if not binary:
+        # WHY fallback: launchd daemon processes inherit a minimal PATH that
+        # excludes /opt/homebrew/bin. shutil.which() returns None but the
+        # binary exists at the known Homebrew location. Hardcode it so the
+        # fast icalBuddy path works even when the daemon PATH is stripped.
+        import os as _os
+        for _candidate in (
+            "/opt/homebrew/bin/icalBuddy",
+            "/usr/local/bin/icalBuddy",
+        ):
+            if _os.path.isfile(_candidate):
+                binary = _candidate
+                break
+    if not binary:
         return None
 
     # `-b ""` removes the bullet prefix; `-nrd` returns absolute dates;
@@ -1586,10 +1691,22 @@ def _calendar_events_via_icalbuddy(days: int) -> Optional[dict]:
     if not raw:
         return {"available": True, "events": [], "error": None}
 
-    # Parse: each event begins with a non-indented line (the title); the
-    # following indented lines are properties. Properties we care about:
+    # Parse: each event begins with a non-indented (or bullet-prefixed) title
+    # line; the following indented lines are properties. Properties we care about:
     #   "    location: <text>" (sometimes spans multiple indented lines)
-    #   "    May 7, 2026 at 8:00 AM - 10:30 AM"  ← date line
+    #   "    May 7, 2026 at 8:00 AM - 10:30 AM"  ← date/time line
+    #
+    # WHY bullet handling: icalBuddy emits "• Title  (Calendar)\n    time"
+    # when invoked without -b "" / -nc flags. The parser previously only
+    # recognised non-indented title lines, so bullet-prefixed invocations
+    # (e.g. plain `icalBuddy eventsToday`) produced 0 events. We now strip
+    # the bullet and calendar-name suffix before storing the title so both
+    # invocation styles work.
+    #
+    # WHY ISO 8601 in start: briefing's fetch_events filters with
+    # `e["start"].startswith(today_iso)` — a human-readable date like
+    # "May 9, 2026 at 1:00 PM" never matches "2026-05-09", so all events
+    # were silently dropped. _parse_icalbuddy_datetime converts to ISO.
     events: list = []
     cur_title: Optional[str] = None
     cur_loc: str = ""
@@ -1606,7 +1723,9 @@ def _calendar_events_via_icalbuddy(days: int) -> Optional[dict]:
                 ).lstrip(", ").strip()
             events.append({
                 "title": cur_title.strip(),
-                "start": cur_date.strip(),
+                # Convert human-readable date to ISO 8601 so callers that
+                # filter/sort by date string work correctly.
+                "start": _parse_icalbuddy_datetime(cur_date.strip()) if cur_date.strip() else "",
                 "end": "",  # icalBuddy embeds the end-time in cur_date already
                 "calendar": "",
                 "location": full_loc,
@@ -1618,12 +1737,23 @@ def _calendar_events_via_icalbuddy(days: int) -> Optional[dict]:
         multiline_loc_buf = []
 
     for raw_line in raw.split("\n"):
-        # Non-indented line = new event title; indented = property continuation
-        if raw_line and not raw_line[0].isspace():
+        # Detect title lines: non-indented OR bullet-prefixed (when -b not passed).
+        # A bullet line starts with •, *, or - followed by a space.
+        stripped_line = raw_line.strip()
+        is_bullet = bool(_BULLET_RE.match(stripped_line))
+        is_title_line = (raw_line and not raw_line[0].isspace()) or is_bullet
+
+        if is_title_line:
             _flush()
-            cur_title = raw_line
+            title = stripped_line if is_bullet else raw_line
+            # Strip bullet prefix: "• Nevin's bridal shower  (Work)" → "Nevin's bridal shower  (Work)"
+            title = _BULLET_RE.sub("", title)
+            # Strip calendar-name suffix: "Nevin's bridal shower  (Work)" → "Nevin's bridal shower"
+            title = _CAL_SUFFIX_RE.sub("", title)
+            cur_title = title
             continue
-        line = raw_line.strip()
+
+        line = stripped_line
         if not line:
             continue
         if line.startswith("location:"):
@@ -1632,9 +1762,8 @@ def _calendar_events_via_icalbuddy(days: int) -> Optional[dict]:
             # Skip notes blocks — multi-line content confuses the
             # location-continuation accumulator.
             continue
-        elif (", 20" in line) or (" at " in line):
-            # Date heuristic: e.g. "May 6, 2026" or
-            # "May 7, 2026 at 8:00 AM - 10:30 AM"
+        elif _looks_like_date_line(line):
+            # Date heuristic: "May 6, 2026" or "May 7, 2026 at 8:00 AM - 10:30 AM"
             cur_date = line
         elif cur_loc and not cur_date:
             # Continuation of multi-line location (street addresses)
@@ -1962,29 +2091,31 @@ def _messages_recent(contact: str, limit: int = 20) -> dict:
 
     db_path = os.path.expanduser("~/Library/Messages/chat.db")
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        cur = conn.cursor()
-        # Escape SQLite LIKE wildcards (% and _) in user-supplied input.
-        # Without this, a contact of "%" matches every chat, and contacts
-        # legitimately containing those characters also match too broadly.
-        def _esc_like(s: str) -> str:
-            return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        esc = _esc_like(contact)
-        # Search by handle id (phone) or display name. ESCAPE clause must
-        # match the escape character used by _esc_like.
-        cur.execute("""
-            SELECT m.text, m.is_from_me, m.date / 1000000000 + 978307200 as ts
-            FROM message m
-            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-            JOIN chat c ON cmj.chat_id = c.ROWID
-            WHERE (c.chat_identifier LIKE ? ESCAPE '\\'
-                   OR c.display_name LIKE ? ESCAPE '\\')
-              AND m.text IS NOT NULL
-            ORDER BY m.date DESC
-            LIMIT ?
-        """, (f"%{esc}%", f"%{esc}%", limit))
-        rows = cur.fetchall()
-        conn.close()
+        # Use a context manager so the connection is closed on every exit
+        # path (including exceptions) — the previous version leaked the
+        # connection on any exception between connect() and conn.close().
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            cur = conn.cursor()
+            # Escape SQLite LIKE wildcards (% and _) in user-supplied input.
+            # Without this, a contact of "%" matches every chat, and contacts
+            # legitimately containing those characters also match too broadly.
+            def _esc_like(s: str) -> str:
+                return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            esc = _esc_like(contact)
+            # Search by handle id (phone) or display name. ESCAPE clause must
+            # match the escape character used by _esc_like.
+            cur.execute("""
+                SELECT m.text, m.is_from_me, m.date / 1000000000 + 978307200 as ts
+                FROM message m
+                JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                JOIN chat c ON cmj.chat_id = c.ROWID
+                WHERE (c.chat_identifier LIKE ? ESCAPE '\\'
+                       OR c.display_name LIKE ? ESCAPE '\\')
+                  AND m.text IS NOT NULL
+                ORDER BY m.date DESC
+                LIMIT ?
+            """, (f"%{esc}%", f"%{esc}%", limit))
+            rows = cur.fetchall()
         messages = [
             {
                 "text": row[0],
@@ -2175,11 +2306,11 @@ end tell
         # Fallback: look up the chat GUID in chat.db and open via imessage:// URL
         try:
             db_path = os.path.expanduser("~/Library/Messages/chat.db")
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            row = conn.execute(
-                "SELECT guid FROM chat WHERE ROWID = ?", (int(chat_id),)
-            ).fetchone()
-            conn.close()
+            # Context manager guarantees close() even on exception.
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                row = conn.execute(
+                    "SELECT guid FROM chat WHERE ROWID = ?", (int(chat_id),)
+                ).fetchone()
             if row:
                 guid = row[0]
                 subprocess.run(["open", f"imessage://{guid}"], timeout=10, check=False)
@@ -2269,7 +2400,7 @@ def open_anki() -> dict:
             return {"ok": False, "error": "Timeout opening Anki"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
-    except Exception as e:
+    except Exception:
         # Try fallback
         try:
             subprocess.run(["open", "-a", "Anki"], timeout=10, check=False)

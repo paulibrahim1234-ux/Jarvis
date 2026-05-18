@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jarvis.bugwatcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- WHY absolute paths: launchd daemons inherit a minimal PATH that
+         does not include /opt/homebrew/bin. Using the venv python directly
+         avoids any shebang / PATH resolution issues at daemon boot. -->
+    <string>/Users/paulibrahim/jarvis/backend/.venv/bin/python3</string>
+    <string>/Users/paulibrahim/jarvis/backend/scripts/bug_watcher.py</string>
+  </array>
+
+  <!-- Restart automatically if the watcher crashes. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Wait 5 s before restarting after a crash so we don't spin-loop if
+       the log path is missing at early boot. -->
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <!-- Run at normal (non-elevated) user priority. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <!-- Stream stdout/stderr to the same log dir as the backend itself. -->
+  <key>StandardOutPath</key>
+  <string>/Users/paulibrahim/Library/Logs/jarvis-bugwatcher.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/paulibrahim/Library/Logs/jarvis-bugwatcher.err.log</string>
+
+  <!-- Start when the agent is loaded (i.e. at login). -->
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

@@ -4,10 +4,19 @@ Desktop apps (Outlook, Spotify) work with no OAuth or Azure setup.
 """
 
 import datetime as _datetime
+import json as _json
+import logging
+import secrets
 import threading
 import time
+
+_cache_log = logging.getLogger("jarvis.cache")
+from datetime import datetime, timezone
+from pathlib import Path as _Path
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from storage import CACHE_DIR, read_json, write_json
 from api._security import _require_local_origin
 from tools.anki import _invoke as anki_invoke, _invoke_multi as anki_invoke_multi
 from tools.imessage import get_conversations
@@ -17,7 +26,6 @@ from tools.imessage import get_conversations
 # won't match None/{}/[], so without this it cached at full 60s TTL).
 from tools.spotify import RATE_LIMITED_SENTINEL as _RATE_LIMITED_SENTINEL
 from tools.desktop_apps import (
-    run_desktop_tool,
     _outlook_inbox,
     _outlook_calendar,
     _spotify_now_playing,
@@ -26,7 +34,6 @@ from tools.desktop_apps import (
     _spotify_play_uri,
     _spotify_fetch_artwork_from_url,
     _calendar_events,
-    _mail_inbox,
     _osascript,
 )
 
@@ -48,13 +55,19 @@ _SEM_EMAIL = threading.Semaphore(1)
 _SEM_EMAIL_FOLDERS = threading.Semaphore(1)
 _SEM_STUDY_STREAK = threading.Semaphore(1)
 
-def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = None):
+def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = None, stale_ok: bool = True):
     """Return cached value when fresh; otherwise compute and store.
 
     If *sem* is provided it is acquired before calling compute() so that
     concurrent slow AppleScript calls don't pile up on the threadpool.
     The semaphore is released immediately after compute() returns (or
     raises), not held for the duration of the request.
+
+    Stale-While-Revalidate (OP-07): when *stale_ok* is True (default) and
+    a stale entry exists, return it immediately and refresh in a daemon
+    thread. The next caller within the refresh window also returns stale
+    data; the semaphore (if any) is acquired non-blockingly inside
+    _refresh_cache_async to avoid stacked background refreshes.
 
     Negative results (None, empty dict, empty list) are cached at a short
     TTL (10s) instead of the full TTL. This was the "stuff disappears"
@@ -71,6 +84,16 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
     now = time.time()
     entry = _CACHE.get(key)
     if entry and entry[0] > now:
+        _cache_log.debug("cache HIT  key=%s expires_in=%.1fs", key, entry[0] - now)
+        return entry[1]
+    # SWR: serve stale entry immediately, refresh in background.
+    if entry and stale_ok:
+        _cache_log.debug("cache STALE key=%s (SWR refresh queued)", key)
+        threading.Thread(
+            target=_refresh_cache_async,
+            args=(key, ttl, compute, sem),
+            daemon=True,
+        ).start()
         return entry[1]
     if sem is not None:
         acquired = sem.acquire(blocking=True, timeout=0.05)
@@ -80,6 +103,7 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
                 return entry[1]
             # Cold start, no stale data: do an unguarded compute. We
             # accept the rare duplicate call to avoid handing back None.
+            _cache_log.debug("cache MISS key=%s (cold start, sem busy)", key)
             value = compute()
         else:
             try:
@@ -87,6 +111,7 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
             finally:
                 sem.release()
     else:
+        _cache_log.debug("cache MISS key=%s (cold start, no sem)", key)
         value = compute()
     # Short TTL on negative results so a one-time failure doesn't lock in.
     # RATE_LIMITED_SENTINEL is an opaque object() — it won't match None/{}/ []
@@ -108,6 +133,37 @@ def _cached(key: str, ttl: float, compute, sem: threading.Semaphore | None = Non
         _CACHE[key] = (now + effective_ttl, value)
     return value
 
+
+def _refresh_cache_async(key, ttl, compute, sem):
+    """Background cache refresh — called by SWR path. Best-effort; failures are logged.
+
+    Uses non-blocking semaphore acquire so that if a foreground request is
+    already holding the semaphore (e.g. cold-start compute in flight), this
+    background refresh skips rather than queueing — prevents stacked refreshes.
+    """
+    try:
+        if sem is not None and not sem.acquire(blocking=False):
+            return  # another refresh / compute already in flight
+        try:
+            value = compute()
+            now = time.time()
+            effective_ttl = ttl
+            if value is None or value == {} or value == [] or value is _RATE_LIMITED_SENTINEL:
+                effective_ttl = min(ttl, 10.0)
+            with _CACHE_LOCK:
+                if len(_CACHE) >= _CACHE_MAX and key not in _CACHE:
+                    try:
+                        oldest_key = min(_CACHE, key=lambda k: _CACHE[k][0])
+                        del _CACHE[oldest_key]
+                    except (ValueError, KeyError):
+                        pass
+                _CACHE[key] = (now + effective_ttl, value)
+        finally:
+            if sem is not None:
+                sem.release()
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger("jarvis.cache").debug("SWR refresh failed for %s: %s", key, e)
 
 
 def build_snapshot_from_cache() -> dict:
@@ -244,7 +300,6 @@ def _compute_streak() -> int:
     except Exception:
         return 0
     # Build set of dates with at least one review.
-    import time as _time
     reviewed_dates: set[str] = set()
     for r in reviews:
         if not isinstance(r, (list, tuple)) or len(r) < 1:
@@ -341,9 +396,6 @@ def study_streak_widget():
 # STUB: real UWorld scraper doesn't exist yet. Source list lives at
 # backend/storage/uworld_stub.json — populate with scraped UWorld incorrects
 # when the scraper ships.
-
-from pathlib import Path as _Path
-import json as _json
 
 _UWORLD_STUB_PATH = _Path(__file__).resolve().parent.parent / "storage" / "uworld_stub.json"
 _UWORLD_HISTORY_PATH = _Path(__file__).resolve().parent.parent / "storage" / "uworld_history.json"
@@ -651,7 +703,15 @@ def anki_suggestions(
     qid_filter: optional comma-separated list of UWorld QIDs to restrict results
     to a specific session (e.g. "2679,17121,12027"). When provided, only cards
     matching those exact QIDs are returned — used by the QBank expand panel.
+
+    OP-02: cached for 60s. The compute is pure dict-read + sort over a few
+    thousand qids; first call ~20ms, subsequent <1ms while index unchanged.
     """
+    cache_key = f"anki_sugg::{limit}::{qid_filter[:200]}"
+    return _cached(cache_key, 60, lambda: _anki_suggestions_compute(limit, qid_filter))
+
+
+def _anki_suggestions_compute(limit: int, qid_filter: str):
     incorrects, source = _load_uworld_incorrect()
     if not incorrects:
         return {"suggestions": [], "available": True, "source": "stub_empty", "qid_count": 0}
@@ -779,7 +839,7 @@ def anki_build_index_start(request: Request, response: Response):
             "total": 0,
             # Use module-level _datetime import — __import__ adds per-call
             # import machinery overhead; utcnow() is called on every index build.
-            "started_at": _datetime.datetime.utcnow().isoformat(),
+            "started_at": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
             "error": None,
         })
     # Lock released here — state is fully consistent before the thread starts.
@@ -801,7 +861,7 @@ def anki_build_index_start(request: Request, response: Response):
         def _persist():
             import tempfile as _tempfile, os as _os
             snapshot = dict(index)
-            snapshot["__built_at__"] = _datetime.datetime.utcnow().isoformat()
+            snapshot["__built_at__"] = _datetime.datetime.now(_datetime.timezone.utc).isoformat()
             _ANKI_QID_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
             # Write to a temp file then atomically replace the target. A direct
             # open("w") + json.dump leaves a window where a crash produces a
@@ -1241,7 +1301,11 @@ def _compute_calendar():
         if outlook_authed():
             data = _outlook_api("outlook_get_calendar", {})
             return {"events": data.get("events", []), "available": True, "source": "graph_api"}
-    except Exception:
+    except Exception as _e:
+        import logging as _logging
+        _logging.getLogger("jarvis.briefing").debug(
+            "calendar Graph fallback failed: %s", _e
+        )
         pass
     # Calendar sources responded but found no events in the window.
     # Return available:True with empty list — "no upcoming events" is valid.
@@ -1314,31 +1378,145 @@ def calendar_widget(response: Response, start: str = "", end: str = ""):
 
 # ── Triage (chief-of-staff: email + iMessage classification) ─────────────────
 
+def _compute_email_for_triage(
+    inbox_limit: int = 40,
+    per_folder_limit: int = 8,
+    max_folders: int = 6,
+) -> dict:
+    """Richer email payload for triage — pulls Inbox + every subfolder with
+    unread mail across every Outlook account, tags each email with its folder,
+    dedupes by entry_id, returns merged list.
+
+    WHY this exists separately from `_compute_email()`:
+      - The dashboard email widget only ever shows ONE folder/account at a
+        time, so its 25-email Inbox-only fetch is right for that surface.
+      - Triage is the single place where the user wants cross-folder context
+        ("are there asks in my class folder I haven't read?"). Pulling all of
+        that on every email-widget render would be wasteful and slow.
+
+    Caching: this is wrapped by triage's own `_cached("triage", 300, ...)`
+    layer, so we can call AppleScript fresh here without a separate cache.
+    """
+    from tools.desktop_apps import _outlook_inbox, _outlook_folders
+
+    # Always include Inbox first (top of triage attention).
+    inbox_data = _compute_email(folder="", account="")
+    all_emails: list[dict] = list(inbox_data.get("emails", []))
+
+    # Discover folders with unread mail — these are where actual asks tend to
+    # live (class folders, project folders, named exchanges) vs. the firehose
+    # Inbox where automated stuff dominates.
+    folders_seen: list[str] = []
+    try:
+        folders_data = _outlook_folders()
+        # Flatten across accounts; rank by unread count desc so we pull from
+        # folders that are most likely to contain pending asks.
+        ranked: list[tuple[int, str]] = []
+        for acct in folders_data.get("accounts", []):
+            for f in acct.get("folders", []):
+                name = (f.get("name") or "").strip()
+                if not name or name.lower() == "inbox":
+                    continue
+                unread = int(f.get("unread") or 0)
+                if unread > 0:
+                    ranked.append((unread, name))
+        ranked.sort(reverse=True)
+        # Cap to keep AppleScript budget bounded (each folder = 1 AppleScript
+        # call ~250ms; max_folders=6 → ~1.5s worst-case overhead vs. the
+        # Anthropic call already taking 2-4s anyway).
+        for _, fname in ranked[:max_folders]:
+            try:
+                f_data = _outlook_inbox(limit=per_folder_limit, folder=fname)
+                f_emails = f_data.get("emails", [])
+                if f_emails:
+                    all_emails.extend(f_emails)
+                    folders_seen.append(fname)
+            except Exception:
+                # One folder failing must not break triage; continue.
+                continue
+    except Exception:
+        # Folder enumeration failure → fall back to Inbox-only payload.
+        pass
+
+    # Dedupe by entry_id (preserve order: Inbox items win first occurrence,
+    # subfolder duplicates dropped). Critical because the same email can
+    # appear in multiple folders if Outlook categorizes/labels it.
+    seen_ids: set[str] = set()
+    deduped: list[dict] = []
+    for em in all_emails:
+        eid = em.get("entry_id") or em.get("id") or ""
+        if eid and eid in seen_ids:
+            continue
+        if eid:
+            seen_ids.add(eid)
+        deduped.append(em)
+
+    # Cap total to keep Haiku prompt bounded. Sort by received desc so the
+    # most recent stuff (where action items typically live) wins the cap.
+    deduped.sort(key=lambda e: str(e.get("received", "")), reverse=True)
+    deduped = deduped[: inbox_limit + (per_folder_limit * max_folders)]
+
+    return {
+        "emails": deduped,
+        "available": bool(deduped) or inbox_data.get("available", False),
+        "source": inbox_data.get("source", "outlook_desktop"),
+        "folders_polled": ["Inbox", *folders_seen],
+        "count": len(deduped),
+    }
+
+
 @router.get("/widgets/triage")
-def triage_widget(response: Response):
+def triage_widget(response: Response, source: str = Query("all")):
     """Chief-of-staff 4-tier triage of unread email + iMessage. 5-min cache.
+
+    source: "all" (default) | "email" | "imessage"
+      - "email"    → only email payload; iMessage conversations=[].
+      - "imessage" → only iMessage payload; email emails=[].
+      - "all"      → both, with reduced email limits to fit max_tokens budget.
 
     WHY read-only GET with no CSRF guard: this endpoint only reads data and
     calls the Anthropic API — it never mutates local state. _require_local_origin
     is only needed on mutating endpoints (POST/PUT/DELETE).
     """
+    # Clamp unknown source values to "all" so callers can't break the cache key.
+    if source not in ("email", "imessage"):
+        source = "all"
+
     # Cache-Control: triage calls Anthropic (expensive); 5-min browser cache
     # matches the server-side TTL and prevents redundant Opus calls on tab focus.
     response.headers["Cache-Control"] = "max-age=300, stale-while-revalidate=600"
+
     def _compute():
-        # Fetch payloads using the same functions the existing email/iMessage
-        # endpoints use so we reuse any warm cache entries and avoid duplicate
-        # AppleScript calls running concurrently.
-        email_data = _compute_email()
-        try:
-            from tools.imessage import get_conversations as _get_convos
-            imessage_data = {
-                "conversations": _get_convos(
-                    limit=25, messages_per_thread=10, include_groups=True
-                )
-            }
-        except Exception as e:
-            imessage_data = {"conversations": [], "error": str(e)[:200]}
+        # ── Build email payload ───────────────────────────────────────────────
+        if source == "imessage":
+            # iMessage-only mode: pass empty email payload so Haiku focuses on
+            # conversations. Skip the multi-folder AppleScript call entirely.
+            email_data: dict = {"emails": []}
+        elif source == "all":
+            # "all" mode: reduce email limits so the combined email+iMessage
+            # payload fits comfortably within max_tokens=6000.
+            # inbox_limit=20, per_folder_limit=4, max_folders=4 → ~36 emails max.
+            email_data = _compute_email_for_triage(
+                inbox_limit=20, per_folder_limit=4, max_folders=4
+            )
+        else:
+            # "email" only: full multi-folder payload; no iMessage overhead.
+            email_data = _compute_email_for_triage()
+
+        # ── Build iMessage payload ────────────────────────────────────────────
+        if source == "email":
+            # Email-only mode: skip the iMessage AppleScript call entirely.
+            imessage_data: dict = {"conversations": []}
+        else:
+            try:
+                from tools.imessage import get_conversations as _get_convos
+                imessage_data = {
+                    "conversations": _get_convos(
+                        limit=25, messages_per_thread=10, include_groups=True
+                    )
+                }
+            except Exception as e:
+                imessage_data = {"conversations": [], "error": str(e)[:200]}
 
         # WHY local import: avoids a circular-import risk at module load time.
         # agent.triage imports agent.jarvis which imports tools — keeping the
@@ -1360,9 +1538,9 @@ def triage_widget(response: Response):
                 "stale": [],
             }
 
-    # 300s = 5 minutes. Opus calls are expensive (~$0.015/call); caching keeps
-    # cost manageable while keeping the widget reasonably fresh for an MS3's pace.
-    return _cached("triage", 300, _compute)
+    # 300s = 5 minutes. Cache key is per-source so "email" and "imessage" tabs
+    # never collide with the "all" cache (or each other).
+    return _cached(f"triage:{source}", 300, _compute)
 
 
 # ── On-demand warmup ──────────────────────────────────────────────────────────
@@ -1566,7 +1744,10 @@ def spotify_widget(request: Request, response: Response):
     _rl_remaining = _check_rate_limited()
     rate_limit_message: str | None = None
     if _rl_remaining > 0:
-        retry_at = (_dt.datetime.now() + _dt.timedelta(seconds=int(_rl_remaining))).strftime("%-I:%M %p").lstrip("0").lstrip(" ")
+        # Portable hour formatting: %-I is GNU-only (crashes on systems
+        # without GNU strftime). Use lstrip("0") on %I for "01:23" → "1:23".
+        _retry_dt = _dt.datetime.now() + _dt.timedelta(seconds=int(_rl_remaining))
+        retry_at = _retry_dt.strftime("%I:%M %p").lstrip("0") or "0:00 AM"
         rate_limit_message = f"Spotify rate-limited — retrying at {retry_at}"
 
     return {
@@ -1755,14 +1936,6 @@ def apple_calendar_widget():
 # Ported from agent-lab: briefing aggregator + NBME tracker
 # ─────────────────────────────────────────────────────────────────────────────
 
-import secrets
-from datetime import datetime, timezone
-from typing import Optional
-from fastapi import HTTPException, Query
-from pydantic import BaseModel, Field
-
-from storage import CACHE_DIR, read_json, write_json
-
 
 class NBMEScoreIn(BaseModel):
     exam_name: str = Field(..., min_length=1, max_length=80)
@@ -1777,6 +1950,10 @@ class NBMEScore(NBMEScoreIn):
 
 
 NBME_STORE = CACHE_DIR / "nbme_scores.json"
+
+# Tombstone store for auto-extracted todos the user has dismissed.
+# Shape: list of {auto_id, source_email_id, title, dismissed_at_iso}, capped at 200.
+DISMISSED_AUTO_TODOS_STORE = CACHE_DIR / "dismissed_auto_todos.json"
 
 
 def _format_briefing_time(iso: str) -> str:
@@ -1819,6 +1996,10 @@ _BRIEFING_HIDDEN: frozenset[str] = frozenset({
 
 # ── Morning briefing ──────────────────────────────────────────────────────────
 
+_BRIEFING_FULL_KEY = "briefing_full_v1"
+_BRIEFING_FULL_TTL = 45.0
+
+
 @router.get("/widgets/briefing")
 def briefing_widget(response: Response):
     """
@@ -1828,10 +2009,37 @@ def briefing_widget(response: Response):
 
     Each fetcher runs in a ThreadPoolExecutor with a per-task 3s timeout so
     one slow integration can't block the whole briefing.
+
+    TOP-LEVEL CACHE: briefing assembles 8 parallel fetches (~3-5s cold boot),
+    so without server-side caching every dashboard mount pays the full cost.
+    45s TTL + stale-while-revalidate served from `_CACHE`. Internal sub-caches
+    (`briefing_now_playing`, `briefing_auto_todos::*`) remain.
     """
-    # Cache-Control: briefing is the most expensive endpoint (parallel Anthropic
-    # calls); 60s browser cache prevents redundant fetches from tab focus events.
     response.headers["Cache-Control"] = "max-age=60, stale-while-revalidate=120"
+    # Fast-path: cache hit
+    _now_ts = time.time()
+    _entry = _CACHE.get(_BRIEFING_FULL_KEY)
+    if _entry and _entry[0] > _now_ts:
+        return _entry[1]
+    if _entry:
+        # SWR: serve stale immediately, refresh in background. The closure
+        # below recurses by setting a sentinel that makes the next call
+        # bypass the cache, builds the fresh briefing, and writes it back.
+        def _swr_refresh():
+            try:
+                # Recompute by re-entering this function with cache cleared.
+                # Simpler than extracting the body: pop the entry, call once,
+                # the resulting fresh value is stored by the bottom of the fn.
+                _CACHE.pop(_BRIEFING_FULL_KEY, None)
+                briefing_widget(response)
+            except Exception as _e:
+                import logging as _logging
+                _logging.getLogger("jarvis.briefing").debug(
+                    "briefing SWR refresh failed: %s", _e,
+                )
+        threading.Thread(target=_swr_refresh, daemon=True).start()
+        return _entry[1]
+
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
     now = datetime.now()
@@ -1890,7 +2098,6 @@ def briefing_widget(response: Response):
                     # with local `now` is correct. Without this, UTC events
                     # were compared against local time causing off-by-offset.
                     if dt.tzinfo is not None:
-                        from datetime import timezone as _tz
                         dt = dt.astimezone().replace(tzinfo=None)
                 except Exception:
                     continue
@@ -2239,6 +2446,7 @@ end tell
 
             def _compute_auto_todos() -> list[dict]:
                 """Call Haiku to extract concrete action items from top emails."""
+                now = datetime.now()
                 raw_key: str = (
                     _os.getenv("ANTHROPIC_API_KEY")
                     or _os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
@@ -2308,17 +2516,39 @@ end tell
                 raw_text: str = (resp.content[0].text if resp.content else "").strip()
                 # Strip optional markdown fences some model versions emit.
                 raw_text = _re.sub(r"```[a-z]*", "", raw_text).strip()
-                parsed: dict = _json_auto.loads(raw_text)
+                # Haiku sometimes appends a trailing explanation/comment after
+                # the JSON object ("Extra data: line N col 1"). Use raw_decode
+                # to parse only the first complete JSON value and discard the
+                # trailing text instead of failing the whole auto-todos pipeline.
+                try:
+                    parsed: dict = _json_auto.loads(raw_text)
+                except _json_auto.JSONDecodeError:
+                    _decoder = _json_auto.JSONDecoder()
+                    # Skip leading whitespace; raw_decode returns (obj, end_index)
+                    _stripped = raw_text.lstrip()
+                    parsed, _ = _decoder.raw_decode(_stripped)
+                if not isinstance(parsed, dict):
+                    parsed = {}
                 tasks: list[dict] = parsed.get("tasks") or []
 
                 extracted: list[dict] = []
-                for task in tasks:
+                for _idx, task in enumerate(tasks):
                     title: str = str(task.get("title") or "").strip()
                     if not title:
                         continue
+                    # Build a UNIQUE id: source_email_id is the natural key, but
+                    # is sometimes empty when Haiku omits it. In that case fall
+                    # back to a content hash so multiple auto-todos within the
+                    # same briefing don't collide on id "auto_" — that collision
+                    # was producing 'duplicate React key "auto_"' warnings in
+                    # the dashboard for every briefing render.
+                    src_id = str(task.get("source_email_id") or "").strip()
+                    if not src_id:
+                        import hashlib as _hashlib
+                        src_id = _hashlib.md5(title.encode("utf-8")).hexdigest()[:10]
                     extracted.append(
                         {
-                            "id": f"auto_{task.get('source_email_id', '')}",
+                            "id": f"auto_{src_id}",
                             "text": title,
                             "done": False,
                             "due": task.get("due_hint") or None,
@@ -2379,19 +2609,45 @@ end tell
                             return True
                     return False
 
+                from tools.reminders import _normalize_title as _norm_title
+
                 for _task in extracted:
                     _eid = _task.get("source_email_id") or ""
                     _subj_key = _eid_to_subject.get(_eid, "")
 
-                    # Determine dedupe key: prefer stable subject; fall back to email_id.
+                    # Determine dedupe key.
+                    # Primary  = source_email_id (UUID — most stable, ties task
+                    #            to the exact email that generated it).
+                    # Fallback = normalized title (catches rephrased variants of
+                    #            the same task when source_email_id is missing).
+                    #
+                    # WHY email_id first: the old subject-based key caused two
+                    # emails with the same subject (reply chains) to share a key,
+                    # silently skipping the second even when it was a distinct ask.
+                    # Prefixing with "eid:" / "norm:" avoids accidental collisions
+                    # with old bare-subject keys written before this change.
+                    _norm_key = _norm_title(_task.get("text") or "")
                     _state_key = (
-                        _subj_key
-                        or _eid
-                        or f"_title:{(_task.get('text') or '').strip().lower()}"
+                        f"eid:{_eid}"
+                        if _eid
+                        else (
+                            f"norm:{_norm_key}"
+                            if _norm_key
+                            else f"subj:{_subj_key}"
+                        )
+                    )
+
+                    # Back-compat: also accept old-format keys so existing
+                    # synced.json entries are not re-pushed after this upgrade.
+                    _already_synced = (
+                        _state_key in _sync_state
+                        or (_eid and f"eid:{_eid}" in _sync_state)
+                        or (_norm_key and f"norm:{_norm_key}" in _sync_state)
+                        or (_subj_key and _subj_key in _sync_state)  # legacy bare-subject key
                     )
 
                     # Already in persisted state?
-                    if _state_key and _state_key in _sync_state:
+                    if _already_synced:
                         continue
 
                     # Already exists as a live reminder? (substring/token match)
@@ -2433,9 +2689,48 @@ end tell
                         with _os2.fdopen(_fd, "w") as _wf:
                             _json_auto.dump(_sync_state, _wf)
                         _os2.replace(_tmp, str(_SYNC_PATH))
-                    except Exception:
+                    except Exception as _e:
                         # Accept re-push on next refresh; live-dedupe catches it.
+                        import logging as _logging
+                        _logging.getLogger("jarvis.briefing").warning(
+                            "failed to write _sync_state: %s", _e, exc_info=False
+                        )
                         pass
+
+                # ── Apply dismissal tombstones ──────────────────────────────
+                # Filter out any task the user has already dismissed so it
+                # doesn't resurface after a cache bust.
+                try:
+                    _dismissed: list[dict] = read_json(DISMISSED_AUTO_TODOS_STORE) or []
+                    if not isinstance(_dismissed, list):
+                        _dismissed = []
+                except Exception:
+                    _dismissed = []
+
+                if _dismissed:
+                    _dismissed_auto_ids: set[str] = {
+                        d.get("auto_id", "") for d in _dismissed if d.get("auto_id")
+                    }
+                    _dismissed_email_ids: set[str] = {
+                        d.get("source_email_id", "") for d in _dismissed if d.get("source_email_id")
+                    }
+                    import hashlib as _hashlib_filter
+                    _dismissed_title_hashes: set[str] = {
+                        "auto_" + _hashlib_filter.md5((d.get("title") or "").encode()).hexdigest()[:10]
+                        for d in _dismissed if d.get("title")
+                    }
+
+                    def _is_dismissed(task: dict) -> bool:
+                        tid = task.get("id", "")
+                        eid = task.get("source_email_id", "")
+                        # Match by explicit auto_id, source_email_id, or content-hash fallback id.
+                        return (
+                            tid in _dismissed_auto_ids
+                            or (eid and eid in _dismissed_email_ids)
+                            or tid in _dismissed_title_hashes
+                        )
+
+                    _remaining = [t for t in _remaining if not _is_dismissed(t)]
 
                 return _remaining
 
@@ -2453,14 +2748,8 @@ end tell
     # 10s caps the overhead at ~30% while keeping the UI responsive to external edits.
     reminders_todos: list[dict] = []
     try:
-        reminders_cached = _CACHE.get("reminders_todos")
-        if reminders_cached and reminders_cached[0] > time.time():
-            reminders_todos = reminders_cached[1]
-        else:
-            from tools.reminders import list_reminders as _list_reminders
-            reminders_todos = _list_reminders()
-            with _CACHE_LOCK:
-                _CACHE["reminders_todos"] = (time.time() + 10, reminders_todos)
+        from tools.reminders import list_reminders as _list_reminders
+        reminders_todos = _cached("reminders_todos", 10, _list_reminders) or []
     except Exception as _rem_err:
         errors.append(f"reminders: {str(_rem_err)[:60]}")
 
@@ -2477,7 +2766,7 @@ end tell
         events_today = events_payload
         next_event = None
 
-    return {
+    _result = {
         "greeting": greeting,
         "now": now.isoformat(timespec="seconds"),
         # New focused fields — used by the rewritten briefing widget. These
@@ -2497,6 +2786,20 @@ end tell
         "nbme": results.get("nbme"),
         "errors": errors,
     }
+    # Top-level cache: only store if there were no fatal errors (empty errors
+    # list OR errors that don't include all integrations). A briefing with
+    # ALL integrations failing should NOT be cached for 45s — the next caller
+    # might catch a recovered state. Heuristic: cache unless every primary
+    # field is None.
+    _all_failed = (
+        _result.get("anki") is None
+        and not _result.get("events_today")
+        and _result.get("unread_mail") is None
+        and not _result.get("todos")
+    )
+    if not _all_failed:
+        _CACHE[_BRIEFING_FULL_KEY] = (time.time() + _BRIEFING_FULL_TTL, _result)
+    return _result
 
 
 # ── NBME tracker ──────────────────────────────────────────────────────────────
@@ -2640,6 +2943,59 @@ import anthropic as _anthropic
 import os as _os
 
 HONEYDO_STORE = CACHE_DIR / "honeydo.json"
+
+
+# ── Dashboard layout backend mirror ───────────────────────────────────────────
+# Mirrors the frontend's localStorage["jarvis-layout-v4"] to disk so the user's
+# customized layout survives browser-storage events that have repeatedly
+# destroyed it (compaction, devtools clears, accidental reset). The frontend
+# saves to BOTH localStorage AND this endpoint on every explicit Save click,
+# and falls back to GET /widgets/layout if localStorage is empty on mount.
+
+LAYOUT_STORE = CACHE_DIR / "dashboard_layout.json"
+LAYOUT_HISTORY_STORE = CACHE_DIR / "dashboard_layout_history.json"
+
+
+@router.get("/widgets/layout")
+def get_layout():
+    """Return the most recently server-mirrored layout, or empty if none."""
+    data = read_json(LAYOUT_STORE, default=None)
+    if not isinstance(data, dict):
+        return {"layout": None, "saved_at": None}
+    return data
+
+
+@router.post("/widgets/layout")
+async def save_layout(request: Request):
+    """Mirror the user's layout to disk. Body: `{layout: {lg: [...], md?: [...]}}`.
+
+    Also appends a timestamped snapshot to a rolling history (last 50). Even
+    if a future bug overwrites the active mirror, history is recoverable.
+    """
+    body = await request.json()
+    layout = body.get("layout") if isinstance(body, dict) else None
+    if not isinstance(layout, dict) or not isinstance(layout.get("lg"), list):
+        return {"ok": False, "error": "expected {layout: {lg: [...]}}"}
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    write_json(LAYOUT_STORE, {"layout": layout, "saved_at": now_iso})
+    history = read_json(LAYOUT_HISTORY_STORE, default=[])
+    if not isinstance(history, list):
+        history = []
+    history.append({"saved_at": now_iso, "layout": layout})
+    if len(history) > 50:
+        history = history[-50:]
+    write_json(LAYOUT_HISTORY_STORE, history)
+    return {"ok": True, "saved_at": now_iso, "history_count": len(history)}
+
+
+@router.get("/widgets/layout/history")
+def get_layout_history():
+    """Return up to 50 historical layout snapshots (newest last)."""
+    history = read_json(LAYOUT_HISTORY_STORE, default=[])
+    if not isinstance(history, list):
+        return {"history": []}
+    return {"history": history}
+
 
 # Canonical scoring rules — ported from frontend/src/lib/inbox-rules.ts so the
 # briefing's "important unread emails" section matches what the inbox widget
@@ -2821,6 +3177,13 @@ def todos_delete(todo_id: str, request: Request):
         # Frontend `if (!r.ok)` relies on a non-2xx status to show error state.
         raise HTTPException(status_code=404, detail="todo not found")
     _save_todos(new_items)
+    # Bust briefing + per-email auto-todo caches so a deleted manual todo doesn't
+    # resurface from a stale SWR entry on the next briefing poll.
+    _CACHE.pop("briefing", None)
+    with _CACHE_LOCK:
+        stale_keys = [k for k in _CACHE if k.startswith("briefing_auto_todos::")]
+        for k in stale_keys:
+            _CACHE.pop(k, None)
     return {"ok": True}
 
 
@@ -2845,11 +3208,71 @@ def todos_add(payload: dict, request: Request, response: Response):
         raise HTTPException(status_code=400, detail="title required")
     from tools.reminders import add_reminder as _add_reminder
     rid = _add_reminder(title, due_hint)
+    if rid is None:
+        # AppleScript failed — return a concrete error so the frontend can show it.
+        # WHY HTTP 200 + ok:false instead of 500: the client checks the ok flag;
+        # a 500 would also surface (api.ts checks r.ok), but a structured body
+        # lets the optimistic rollback branch cleanly without exception handling.
+        return {"ok": False, "id": None, "error": "Reminders.app write failed — check backend logs for osascript stderr"}
     # Bust both the briefing cache and the reminders sub-cache so the next
     # briefing refresh picks up the new item without a 30s wait.
     _CACHE.pop("briefing", None)
     _CACHE.pop("reminders_todos", None)
-    return {"ok": rid is not None, "id": rid}
+    return {"ok": True, "id": rid}
+
+
+@router.post("/widgets/todos/dismiss-auto")
+def todos_dismiss_auto(payload: dict, request: Request, response: Response):
+    """Tombstone an auto-extracted todo so it never re-surfaces after cache bust.
+
+    WHY a flat list with cap: auto-todos are ephemeral by nature; the set of
+    emails in scope shifts daily. Capping at 200 entries prevents unbounded disk
+    growth while comfortably outlasting any realistic email churn window.
+
+    The filter in _compute_auto_todos checks both auto_id and source_email_id so
+    a tombstone written here survives Haiku producing a different title for the
+    same source email on the next call.
+    """
+    _require_local_origin(request)
+    response.headers["Cache-Control"] = "no-store"
+    auto_id = ((payload or {}).get("auto_id") or "").strip()
+    if not auto_id:
+        raise HTTPException(status_code=400, detail="auto_id required")
+    source_email_id = ((payload or {}).get("source_email_id") or "").strip()
+    title = ((payload or {}).get("title") or "").strip()
+
+    # Load existing tombstones (tolerates missing file).
+    try:
+        existing: list[dict] = read_json(DISMISSED_AUTO_TODOS_STORE) or []
+        if not isinstance(existing, list):
+            existing = []
+    except Exception:
+        existing = []
+
+    # De-duplicate: skip if this auto_id is already tombstoned.
+    known_ids = {e.get("auto_id") for e in existing}
+    if auto_id not in known_ids:
+        existing.append({
+            "auto_id": auto_id,
+            "source_email_id": source_email_id,
+            "title": title,
+            "dismissed_at_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        # Cap at 200, keeping newest entries (drop oldest from front).
+        if len(existing) > 200:
+            existing = existing[-200:]
+        write_json(DISMISSED_AUTO_TODOS_STORE, existing)
+
+    # Bust the auto-todos cache key(s) and the full briefing cache so the next
+    # poll returns a response that omits this item.
+    # WHY pop all briefing_auto_todos:: keys: the exact key includes a hash of
+    # current email ids — we can't reconstruct it here, so we evict all of them.
+    with _CACHE_LOCK:
+        stale_keys = [k for k in _CACHE if k == "briefing" or k.startswith("briefing_auto_todos::")]
+        for k in stale_keys:
+            _CACHE.pop(k, None)
+
+    return {"ok": True}
 
 
 @router.post("/widgets/todos/complete")
@@ -2864,6 +3287,12 @@ def todos_complete(payload: dict, request: Request, response: Response):
     ok = _complete_reminder(rid)
     _CACHE.pop("briefing", None)
     _CACHE.pop("reminders_todos", None)
+    # Also evict per-email auto-todo caches so a completed reminder doesn't
+    # resurface from a stale 300s SWR entry on the next briefing poll.
+    with _CACHE_LOCK:
+        stale_keys = [k for k in _CACHE if k.startswith("briefing_auto_todos::")]
+        for k in stale_keys:
+            _CACHE.pop(k, None)
     return {"ok": ok}
 
 
@@ -2938,3 +3367,6 @@ def todos_dedupe(request: Request, response: Response) -> dict:
             _CACHE.pop(k, None)
 
     return {"ok": True, "deleted": deleted_count, "kept": kept_titles}
+
+
+

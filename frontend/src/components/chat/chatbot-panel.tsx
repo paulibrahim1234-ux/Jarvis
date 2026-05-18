@@ -615,7 +615,7 @@ export function ChatbotPanel({ embedded = false }: ChatbotPanelProps) {
         {/* Input */}
         <div className="p-3">
           <div
-            className="chat-input-glow flex items-center gap-2 rounded-xl border px-3 py-1.5 transition-all"
+            className="chat-input-glow flex items-center gap-2 rounded-xl border px-3 py-1.5 transition-[background-color,border-color,box-shadow] duration-150 ease-out"
             style={{
               borderColor: "var(--border-default)",
               background: "var(--surface-2)",

@@ -13,7 +13,6 @@ import logging
 import re
 import sqlite3
 import threading
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,6 +137,12 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_messages_conv
                 ON messages(conversation_id, id);
+            CREATE INDEX IF NOT EXISTS idx_messages_real
+                ON messages(conversation_id, id DESC)
+                WHERE NOT (role = 'assistant' AND content LIKE '[tool] %');
+            CREATE INDEX IF NOT EXISTS idx_messages_tools
+                ON messages(conversation_id, id DESC)
+                WHERE role = 'assistant' AND content LIKE '[tool] %';
 
             CREATE TABLE IF NOT EXISTS facts (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,6 +154,8 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_facts_last_used
                 ON facts(last_used_at DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_topic_fact
+                ON facts(topic, fact);
             """
         )
         init_conn.commit()

@@ -250,7 +250,7 @@ export function PomodoroWidget() {
               strokeLinecap="round"
               strokeDasharray={circumference}
               strokeDashoffset={dashOffset}
-              className="transition-all duration-1000"
+              className="transition-[stroke-dashoffset,stroke] duration-1000 ease-out"
             />
           </svg>
           <div className="absolute flex flex-col items-center">
