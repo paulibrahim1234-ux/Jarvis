@@ -32,6 +32,10 @@
     <string>Jarvis can read reminders to sync your to-do list.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Jarvis may need to send Apple events for certain app integrations.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Jarvis listens for voice commands when you trigger it.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Jarvis transcribes your voice commands on-device.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

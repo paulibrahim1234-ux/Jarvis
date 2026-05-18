@@ -2,6 +2,8 @@
 Auth endpoints for Outlook (Microsoft device flow) and Spotify (OAuth callback).
 """
 
+import time as _t
+import threading as _threading
 from html import escape as _h
 
 from fastapi import APIRouter, Request
@@ -90,8 +92,6 @@ def spotify_status():
 # don't burn a request per check. 5 min strikes the right balance: long
 # enough to be cheap, short enough that an expired token surfaces quickly.
 
-import time as _t
-import threading as _threading
 _CLAUDE_PROBE_CACHE: dict = {"checked_at": 0.0, "ok": None, "error": None}
 _CLAUDE_PROBE_TTL = 300.0  # seconds
 _PROBE_CACHE_LOCK = _threading.Lock()
@@ -162,7 +162,11 @@ def _probe_claude(force: bool = False, allow_refresh: bool = True) -> dict:
                 return {"ok": True, "error": "rate_limited", "checked_at": now, "cached": False}
             else:
                 code = "unknown"
-            result = {"ok": False, "error": code, "error_detail": msg[:200], "checked_at": now}
+            import logging as _logging
+            _logging.getLogger("jarvis.auth").error(
+                "claude probe error (%s): %s", code, msg[:500]
+            )
+            result = {"ok": False, "error": code, "checked_at": now}
     with _PROBE_CACHE_LOCK:
         _CLAUDE_PROBE_CACHE.update(checked_at=now, ok=result["ok"], error=result.get("error"))
     return {**result, "cached": False}

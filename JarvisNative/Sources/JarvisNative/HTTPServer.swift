@@ -17,7 +17,10 @@ final class HTTPServer {
                     "/health",
                     "/calendar/events?days=N",
                     "/messages/conversations?limit=N",
-                    "/contacts/search?q=..."
+                    "/contacts/search?q=...",
+                    "/voice/listen/start",
+                    "/voice/listen/stop",
+                    "/voice/speak"
                 ]
             ]
             return Self.jsonResponse(body)
@@ -47,6 +50,47 @@ final class HTTPServer {
             return Self.jsonResponse(["results": results])
         }
 
+        // POST /voice/listen/start
+        // Kicks off speech recognition; does NOT block on the transcription.
+        // Streaming-to-HTTP can come later; for now we just confirm we started.
+        await s.appendRoute("POST /voice/listen/start") { _ in
+            do {
+                // Fire-and-forget the stream — VoiceService keeps `lastPartial` updated.
+                let stream = try await VoiceService.shared.startListening()
+                Task.detached {
+                    for await _ in stream { /* drain; lastPartial is what /stop reads */ }
+                }
+                return Self.jsonResponse(["ok": true, "status": "listening"])
+            } catch {
+                return Self.jsonResponse(
+                    ["ok": false, "error": "\(error)"],
+                    status: .internalServerError
+                )
+            }
+        }
+
+        // POST /voice/listen/stop
+        await s.appendRoute("POST /voice/listen/stop") { _ in
+            await VoiceService.shared.stopListening()
+            let final = await VoiceService.shared.lastPartial
+            return Self.jsonResponse(["ok": true, "final": final])
+        }
+
+        // POST /voice/speak  body: {"text": "...", "voice": "..."}
+        await s.appendRoute("POST /voice/speak") { request in
+            let payload = (try? await Self.decodeJSONBody(request)) ?? [:]
+            let text = (payload["text"] as? String) ?? ""
+            let voice = payload["voice"] as? String
+            guard !text.isEmpty else {
+                return Self.jsonResponse(
+                    ["ok": false, "error": "missing text"],
+                    status: .badRequest
+                )
+            }
+            await VoiceService.shared.speak(text, voice: voice)
+            return Self.jsonResponse(["ok": true])
+        }
+
         NSLog("HTTP server listening on port \(port)")
         try await s.run()
     }
@@ -65,6 +109,14 @@ final class HTTPServer {
             return q.value
         }
         return nil
+    }
+
+    /// Reads the request body and decodes it as a JSON object.
+    private static func decodeJSONBody(_ req: FlyingFox.HTTPRequest) async throws -> [String: Any] {
+        let data = try await req.bodyData
+        guard !data.isEmpty else { return [:] }
+        let obj = try JSONSerialization.jsonObject(with: data)
+        return (obj as? [String: Any]) ?? [:]
     }
 
     static func jsonResponse(_ body: Any, status: FlyingFox.HTTPStatusCode = .ok) -> FlyingFox.HTTPResponse {

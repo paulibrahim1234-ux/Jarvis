@@ -686,7 +686,7 @@ function EmailPreviewModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-in fade-in duration-150"
       style={{ backgroundColor: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
       onClick={onClose}
     >
@@ -696,7 +696,7 @@ function EmailPreviewModal({
         aria-modal="true"
         aria-labelledby="email-preview-subject"
         tabIndex={-1}
-        className="w-full max-w-md rounded-xl border border-foreground/10 bg-card shadow-2xl flex flex-col max-h-[80vh] outline-none focus-visible:ring-2 focus-visible:ring-foreground/20"
+        className="w-full max-w-md rounded-xl border border-foreground/10 bg-card shadow-2xl flex flex-col max-h-[80vh] outline-none focus-visible:ring-2 focus-visible:ring-foreground/20 animate-in fade-in zoom-in-95 duration-200 ease-out"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

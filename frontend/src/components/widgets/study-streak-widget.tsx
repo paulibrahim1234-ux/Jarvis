@@ -250,19 +250,32 @@ function HelpPopover() {
 }
 
 export function StudyStreakWidget() {
-  const [studyData, setStudyData] = useState<DayRecord[]>(() => {
-    // Generate empty 364-day array for the past year (null = no data)
-    const days: DayRecord[] = [];
-    const today = new Date();
-    for (let i = 363; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const dateStr = d.toISOString().split("T")[0];
-      days.push({ date: dateStr, minutes: null });
-    }
-    return days;
-  });
+  // Start empty so server-rendered HTML matches the client's first render.
+  // Calling `new Date()` in a useState initializer runs at render time and
+  // (for SSR) reads the server's clock; the client then re-renders with
+  // ITS clock, producing a hydration mismatch warning. Generate the 364-day
+  // skeleton in a useEffect after mount instead.
+  const [studyData, setStudyData] = useState<DayRecord[]>([]);
   const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    // Only generate the skeleton if studyData is still empty — otherwise
+    // we'd clobber data already loaded from the backend.
+    setStudyData((prev) => {
+      if (prev.length > 0) return prev;
+      const days: DayRecord[] = [];
+      const today = new Date();
+      for (let i = 363; i >= 0; i--) {
+        const d = new Date(today);
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toISOString().split("T")[0];
+        days.push({ date: dateStr, minutes: null });
+      }
+      return days;
+    });
+    // Empty deps — runs once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [dataSource, setDataSource] = useState<"mock" | "anki" | "manual">("mock");
 
   const [editingDay, setEditingDay] = useState<{

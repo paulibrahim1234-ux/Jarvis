@@ -478,8 +478,8 @@ function WeakTopicsSection({ topics }: { topics: UWorldWeakTopic[] }) {
           </div>
           <div className={`relative h-1.5 w-full overflow-hidden rounded-full ${scoreTrackColor(t.score)}`}>
             <div
-              className={`h-full rounded-full ${scoreColor(t.score)} transition-all duration-500`}
-              style={{ width: `${t.score}%` }}
+              className={`h-full rounded-full ${scoreColor(t.score)} transition-transform duration-500 ease-out origin-left`}
+              style={{ transform: `scaleX(${t.score / 100})`, width: '100%' }}
             />
           </div>
         </div>

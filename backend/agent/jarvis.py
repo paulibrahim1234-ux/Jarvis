@@ -22,6 +22,13 @@ from agent import memory
 # inside functions).
 _agent_log = logging.getLogger("jarvis.agent")
 
+# Holds strong refs to fire-and-forget background tasks so the event loop
+# does not garbage-collect a still-running task. Without this, a task
+# created via `asyncio.create_task(...)` and never awaited can be cancelled
+# mid-flight if the loop sweeps weak refs (Python 3.10+ behaviour).
+# Pattern: _BG_TASKS.add(t); t.add_done_callback(_BG_TASKS.discard)
+_BG_TASKS: "set[asyncio.Task]" = set()
+
 
 def _parse_retry_after(exc: Exception, default: int = 10) -> int:
     """Parse the Retry-After header from a 429 response. Default 10s on parse failure.
@@ -109,6 +116,8 @@ EXAMPLES OF PROPER TOOL ROUTING (these patterns ALWAYS require a tool call):
 - "Did Rish text me back?" → messages_get_recent with contact="Rish"
 - "Did anyone text me?" → messages_get_recent (check recent contacts)
 - "Any unread from school?" → outlook_search_inbox with query="rowan.edu"
+- "What did school send me yesterday?" → outlook_search_inbox with query="rowan", natural_query="school emails received yesterday — use received_iso to rank most recent first from the prior day"
+- "Any emails this morning?" → outlook_search_inbox with query="", natural_query="emails received this morning — use received_iso to filter to today's AM hours"
 - "How many Anki cards do I have due?" → anki_get_stats
 - "Any cards tagged cardiology?" → anki_find_cards with query="tag:UWorld::Cardiology"
 
@@ -491,7 +500,10 @@ async def chat_async(
                 except (asyncio.TimeoutError, Exception):
                     # Best-effort; never break the chat reply over fact extraction.
                     pass
-            asyncio.create_task(_timed_extract())
+            # Hold a strong ref so the loop doesn't GC the task mid-flight.
+            _t = asyncio.create_task(_timed_extract())
+            _BG_TASKS.add(_t)
+            _t.add_done_callback(_BG_TASKS.discard)
     except Exception:
         pass
 

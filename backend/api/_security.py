@@ -46,10 +46,12 @@ def _require_local_origin(request: Request) -> None:
 
     # "::1" (not "[::1]") because _bare_host strips the brackets before comparison.
     LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+    has_any_origin_header = False
     for header in ("origin", "referer"):
         val = request.headers.get(header)
         if not val:
             continue
+        has_any_origin_header = True
         host = _host(val)
         # Unified bare-host extraction replaces the old prefix-conditional branch.
         # _bare_host handles IPv4, IPv6 (brackets stripped), and plain hostnames.
@@ -59,3 +61,11 @@ def _require_local_origin(request: Request) -> None:
                 status_code=403,
                 detail=f"cross-site write rejected (origin host: {bare})",
             )
+    if not has_any_origin_header:
+        # Sec#13: missing both Origin and Referer is suspicious — modern browsers
+        # always send at least Origin on POST. Local CLI scripts must add
+        # `--header 'Origin: http://localhost'` explicitly.
+        raise HTTPException(
+            status_code=403,
+            detail="missing Origin and Referer headers (set 'Origin: http://localhost' for CLI callers)",
+        )

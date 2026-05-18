@@ -24,6 +24,10 @@ load_dotenv()
 # Dedicated executor for slow AppleScript warmup tasks so they never compete
 # with FastAPI's default threadpool during startup.
 _WARMUP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jarvis-warmup")
+# Strong reference to the warmup future so it isn't discarded; also lets us
+# log unexpected failures (the previous code dropped the future on the
+# floor, so any AppleScript regression silently swallowed its traceback).
+_WARMUP_FUTURE = None
 
 
 def _run_warmup():
@@ -49,7 +53,23 @@ def _run_warmup():
         import concurrent.futures
 
         tasks = [
-            ("calendar",      600,  _compute_calendar,         _SEM_CALENDAR),
+            # WHY 60 (not 600): the /widgets/calendar endpoint calls
+            # _cached("calendar", 60, ...).  A mismatched startup TTL meant a
+            # stale empty result (e.g. from an icalBuddy race at startup) would
+            # survive for 10 minutes instead of expiring in 60 s when the
+            # endpoint next recomputes it, causing "0 events today" all morning.
+            #
+            # WHY sem=None for calendar: _SEM_CALENDAR is designed to prevent
+            # N concurrent HTTP requests from stacking up AppleScript calls.
+            # The warmup runs exactly once at startup — no concurrent pressure.
+            # Passing _SEM_CALENDAR here caused _compute_calendar (which spawns
+            # its own internal ThreadPoolExecutor for Outlook + AppleScript) to
+            # hold the semaphore for up to 18 s.  During that window every SWR
+            # background refresh attempt saw the sem locked (blocking=False →
+            # skip) and gave up, leaving the stale empty cache entry forever.
+            # Using None lets warmup compute freely while the endpoint's own
+            # _cached calls still use _SEM_CALENDAR normally.
+            ("calendar",      60,   _compute_calendar,         None),
             ("email::::",     60,   lambda: _compute_email(),  _SEM_EMAIL),
             ("email_folders", 300,  _compute_email_folders,    _SEM_EMAIL_FOLDERS),
             ("study_streak",  1800, _compute_study_streak_days, _SEM_STUDY_STREAK),
@@ -62,16 +82,47 @@ def _run_warmup():
                 for key, ttl, fn, sem in tasks
             ]
             concurrent.futures.wait(futs, timeout=60)
+
+        # Warm /widgets/briefing — this is the most expensive endpoint
+        # (parallel Anthropic calls + multiple AppleScript fetches, ~3-5s
+        # cold). Calling the route handler directly populates its top-level
+        # `_CACHE["briefing_full_v1"]` so the user's first dashboard mount
+        # serves from cache. The Response stub is throwaway — handler only
+        # uses it to set Cache-Control which is irrelevant during warmup.
+        try:
+            from api.widgets import briefing_widget as _briefing_widget
+            from fastapi import Response as _Response
+            _briefing_widget(_Response())
+        except Exception:
+            pass
     except Exception:
         # Warmup is best-effort; never crash the server.
         pass
 
 
+def _on_warmup_done(fut):
+    """Surface warmup failures so silent regressions are visible in logs."""
+    try:
+        exc = fut.exception()
+    except Exception:
+        return
+    if exc is not None:
+        try:
+            import logging
+            logging.getLogger("jarvis.startup").warning(
+                "Warmup future failed: %r", exc
+            )
+        except Exception:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Kick off cache warmup without blocking server startup.
+    global _WARMUP_FUTURE
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(_WARMUP_EXECUTOR, _run_warmup)
+    _WARMUP_FUTURE = loop.run_in_executor(_WARMUP_EXECUTOR, _run_warmup)
+    _WARMUP_FUTURE.add_done_callback(_on_warmup_done)
 
     # Start the Claude OAuth auto-refresher. This:
     #   1. Eagerly refreshes the access token RIGHT NOW if it's expired
@@ -110,12 +161,14 @@ from api.widgets import router as widgets_router
 from api.auth import router as auth_router
 from api.setup import router as setup_router
 from api.apps import router as apps_router
+from api.voice import router as voice_router
 
 app.include_router(chat_router)
 app.include_router(widgets_router)
 app.include_router(auth_router)
 app.include_router(setup_router)
 app.include_router(apps_router)
+app.include_router(voice_router)
 
 
 @app.get("/health")
@@ -128,7 +181,6 @@ async def health():
     - No AppleScript is ever invoked here.
     """
     import httpx
-    import concurrent.futures
 
     anki_ok = False
     try:

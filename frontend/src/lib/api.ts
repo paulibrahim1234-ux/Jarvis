@@ -470,6 +470,27 @@ export async function addTodoReminder(
   return r.json();
 }
 
+/** Tombstone a dismissed auto-extracted todo so it never resurfaces after a cache bust.
+ * Fire-and-forget safe: callers should not await this if they don't want to block the UI.
+ * The backend busts the auto-todos cache so the next briefing poll omits this item. */
+export async function dismissAutoTodo(
+  auto_id: string,
+  source_email_id?: string,
+  title?: string,
+): Promise<{ ok: boolean }> {
+  try {
+    const r = await fetch(`${BACKEND}/widgets/todos/dismiss-auto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_id, source_email_id, title }),
+    });
+    if (!r.ok) return { ok: false };
+    return r.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
 /** Mark a Reminders.app item complete via the backend bridge.
  * Callers should optimistically remove the item from the local list
  * and only show an error if the response comes back ok: false. */
@@ -678,17 +699,23 @@ export interface TriageData {
 }
 
 /**
- * Fetch the chief-of-staff triage result. Backend caches 5 min (Opus is expensive).
+ * Fetch the chief-of-staff triage result. Backend caches 5 min (Haiku is expensive).
  * Pass `bust: true` to append a cache-busting query param so the backend's
  * _cached() sees a new key and forces a fresh Anthropic call.
+ * Pass `source` to filter by channel: "all" (default) | "email" | "imessage".
  */
-export async function fetchTriage(opts: { bust?: boolean } = {}): Promise<TriageData> {
-  // WHY 60s timeout: the Opus API call inside the backend can take 10-30s on
+export async function fetchTriage(
+  opts: { bust?: boolean; source?: "all" | "email" | "imessage" } = {}
+): Promise<TriageData> {
+  // WHY 60s timeout: the Haiku API call inside the backend can take 10-30s on
   // a cache miss. A short timeout would surface false "fetch failed" errors.
-  const url = opts.bust
-    ? `${BACKEND}/widgets/triage?bust=${Date.now()}`
-    : `${BACKEND}/widgets/triage`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+  const params = new URLSearchParams();
+  if (opts.source && opts.source !== "all") params.set("source", opts.source);
+  if (opts.bust) params.set("bust", String(Date.now()));
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  const r = await fetch(`${BACKEND}/widgets/triage${qs}`, {
+    signal: AbortSignal.timeout(60_000),
+  });
   if (!r.ok) {
     throw new Error(`triage fetch ${r.status}`);
   }

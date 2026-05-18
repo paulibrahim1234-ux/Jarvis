@@ -54,6 +54,13 @@ const BREAKPOINT_COLS: Record<string, number> = { lg: 12, md: 8, sm: 4 };
 
 const ALL_KEYS = DEFAULT_LAYOUT.map((l) => l.i);
 
+// react-grid-layout requires its direct children to be plain DOM elements
+// so it can React.cloneElement them with style+className for positioning.
+// A memoized custom-component wrapper silently drops those injected props,
+// rendering every widget at h-full stacked vertically (the "saved layout
+// doesn't reload" symptom). To memoize, memo the widget COMPONENTS
+// themselves (e.g. const CalendarWidget = memo(CalendarWidget)).
+
 // WHY module scope: these helpers have no closure over component state, so
 // recreating them as inline arrows on every render wastes identity and
 // defeats memoisation in callbacks that reference them (useCallback deps
@@ -82,7 +89,13 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
   const [hiddenWidgets, setHiddenWidgets] = useState<Set<string>>(new Set());
   const [showPanel, setShowPanel] = useState(false);
   const [saveConfirm, setSaveConfirm] = useState(false);
+  const [recoverOpen, setRecoverOpen] = useState(false);
+  const [recoverList, setRecoverList] = useState<
+    Array<{ key: string; layout: ReactGridLayout.Layouts; summary: string; ts: number }>
+  >([]);
   const saveConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Holds "HH:MM" of the last save — shown in the button label while saveConfirm is true.
+  const [saveTime, setSaveTime] = useState("");
 
   // E4: Clear the save-confirm timer on unmount to prevent setState calls
   // on an already-unmounted component (React 18 shows a warning for this).
@@ -92,9 +105,30 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     };
   }, []);
 
-  // Load saved state on mount
+  // Load saved state on mount.
+  // BACKEND FALLBACK: if localStorage is empty (compacted, devtools-cleared,
+  // private window, etc.) we fetch the last layout the backend mirror saw and
+  // hydrate localStorage from it. This guards against the loss class that
+  // destroyed the user's hand-crafted layout previously.
   useEffect(() => {
     const savedLayout = localStorage.getItem(LAYOUT_KEY);
+    if (!savedLayout) {
+      // Fire backend fallback (best-effort). The grid will start with
+      // DEFAULT_LAYOUT in the meantime; once backend responds with a real
+      // saved layout, we reset state + populate localStorage.
+      const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+      fetch(`${backend}/widgets/layout`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const lay = d && d.layout;
+          if (lay && Array.isArray(lay.lg)) {
+            safeSet(LAYOUT_KEY, JSON.stringify(lay));
+            setLayouts(lay);
+            console.info("[layout] hydrated from backend mirror saved at", d.saved_at);
+          }
+        })
+        .catch(() => { /* offline or endpoint missing — fall through to default */ });
+    }
     if (savedLayout) {
       try {
         const parsed: ReactGridLayout.Layouts = JSON.parse(savedLayout);
@@ -177,14 +211,37 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [showPanel]);
 
+  // Track edit mode in a ref so onLayoutChange (stable identity) can read
+  // the live value without subscribing to it as a dep.
+  const editModeRef = useRef(editMode);
+  useEffect(() => { editModeRef.current = editMode; }, [editMode]);
+
   const onLayoutChange = useCallback(
-    // WHY proper RGL types: ReactGridLayout.Layout[] for the current
-    // breakpoint snapshot and ReactGridLayout.Layouts for the full map.
-    // Using `any` here suppressed real type errors and broke exhaustive
-    // checking on the allLayouts object downstream.
     (_current: ReactGridLayout.Layout[], allLayouts: ReactGridLayout.Layouts) => {
+      // CRITICAL: only persist when the user is actively editing. Otherwise
+      // react-grid-layout's spurious onLayoutChange firings (initial mount,
+      // breakpoint regeneration, post-render reflows) overwrite the user's
+      // saved positions with whatever transient state RGL just produced —
+      // which is exactly what destroyed the user's hand-crafted layout
+      // last time (the GridChild memo ate positioning props, RGL rebuilt
+      // the layout from scratch on every render, and this handler dutifully
+      // saved the corrupted result over the real one).
       setLayouts(allLayouts);
+      if (!editModeRef.current) return;
       safeSet(LAYOUT_KEY, JSON.stringify(allLayouts));
+      // Rolling timestamped backup so future regressions are recoverable
+      // without grepping the browser's leveldb files.
+      try {
+        const ts = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
+        safeSet(`jarvis-layout-backup-${ts}`, JSON.stringify(allLayouts));
+        const backups = Object.keys(localStorage)
+          .filter((k) => k.startsWith("jarvis-layout-backup-"))
+          .sort();
+        while (backups.length > 10) {
+          const old = backups.shift();
+          if (old) safeRemove(old);
+        }
+      } catch { /* quota errors are tolerated by safeSet */ }
     },
     []
   );
@@ -207,10 +264,30 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
   }, []);
 
   const saveLayout = useCallback(() => {
+    // 1) localStorage — primary read path on next mount.
     safeSet(LAYOUT_KEY, JSON.stringify(layouts));
+    // 2) Permanent named snapshot — `jarvis-layout-saved-*` keys are NOT
+    //    matched by the rolling-backup cleanup (which only prunes the
+    //    `jarvis-layout-backup-*` prefix). Every Save click leaves a
+    //    timestamped permanent record the user can always recover.
+    const ts = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
+    safeSet(`jarvis-layout-saved-${ts}`, JSON.stringify(layouts));
+    // 3) Backend disk mirror — survives localStorage loss (compaction,
+    //    devtools clear, profile reset). Fire-and-forget; failure here
+    //    doesn't affect the local save which already succeeded.
+    const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+    fetch(`${backend}/widgets/layout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ layout: layouts }),
+    }).catch((e) => {
+      console.warn("Layout backend mirror failed (local save still succeeded):", e);
+    });
+    const now = new Date();
+    setSaveTime(`${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`);
     setSaveConfirm(true);
     if (saveConfirmTimerRef.current) clearTimeout(saveConfirmTimerRef.current);
-    saveConfirmTimerRef.current = setTimeout(() => setSaveConfirm(false), 2000);
+    saveConfirmTimerRef.current = setTimeout(() => setSaveConfirm(false), 2500);
   }, [layouts]);
 
   // Explicit "load saved" — re-reads localStorage and replaces current layout
@@ -223,6 +300,76 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
       const parsed: ReactGridLayout.Layouts = JSON.parse(raw);
       if (parsed && typeof parsed === "object") setLayouts(parsed);
     } catch { /* keep current */ }
+  }, []);
+
+  // ── RECOVERY UI ────────────────────────────────────────────────────────
+  // Scans localStorage for every saved layout snapshot (rolling backups,
+  // explicit recovery snapshots, and current-state checkpoints) and lets
+  // the user preview + apply any of them. Built because a layout-overwrite
+  // bug (GridChild memo, OF-12) destroyed a user's hand-crafted layout
+  // and there was no way to surface the surviving leveldb history without
+  // manual forensics. Going forward this is the always-available escape
+  // hatch.
+  const openRecoverPanel = useCallback(() => {
+    const found: typeof recoverList = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      const isCandidate =
+        k.startsWith("jarvis-layout-backup-") ||
+        k.startsWith("jarvis-layout-saved-") ||   // WHY: saveLayout() writes this prefix; was missing here
+        k.startsWith("jarvis-layout-recovery-") ||
+        k.startsWith("jarvis-layout-snapshot-");
+      if (!isCandidate) continue;
+      const raw = localStorage.getItem(k);
+      if (!raw) continue;
+      let layout: ReactGridLayout.Layouts;
+      try { layout = JSON.parse(raw); } catch { continue; }
+      const lg = layout.lg;
+      if (!Array.isArray(lg) || lg.length === 0) continue;
+      // Build a 1-line distinctive summary using briefing + pomodoro positions
+      // (those are the ones users tend to move; helps differentiate).
+      const briefing = lg.find((l) => l.i === "briefing");
+      const pomodoro = lg.find((l) => l.i === "pomodoro");
+      const calendar = lg.find((l) => l.i === "calendar");
+      const summary = [
+        briefing && `briefing(${briefing.x},${briefing.y},${briefing.w}×${briefing.h})`,
+        pomodoro && `pomodoro(${pomodoro.x},${pomodoro.y},${pomodoro.w}×${pomodoro.h})`,
+        calendar && `calendar(${calendar.x},${calendar.y})`,
+        `${lg.length} widgets`,
+      ].filter(Boolean).join(" · ");
+      // Parse a millisecond ts from the key for sorting (newest first).
+      let ts = 0;
+      const m = k.match(/(\d{14})$/);
+      if (m) {
+        const s = m[1]; // YYYYMMDDHHMMSS
+        ts = Date.parse(
+          `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}T${s.slice(8,10)}:${s.slice(10,12)}:${s.slice(12,14)}`
+        ) || 0;
+      }
+      found.push({ key: k, layout, summary, ts });
+    }
+    found.sort((a, b) => b.ts - a.ts);
+    setRecoverList(found);
+    setRecoverOpen(true);
+  }, []);
+
+  const applyRecovery = useCallback((entry: { key: string; layout: ReactGridLayout.Layouts }) => {
+    // Snapshot current state into a timestamped pre-recovery key first so
+    // the user can undo this if the choice was wrong.
+    const cur = localStorage.getItem(LAYOUT_KEY);
+    if (cur) {
+      const ts = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
+      safeSet(`jarvis-layout-pre-recovery-${ts}`, cur);
+    }
+    safeSet(LAYOUT_KEY, JSON.stringify(entry.layout));
+    setLayouts(entry.layout);
+    setRecoverOpen(false);
+  }, []);
+
+  const deleteRecoveryEntry = useCallback((key: string) => {
+    safeRemove(key);
+    setRecoverList((prev) => prev.filter((e) => e.key !== key));
   }, []);
 
   // Listen for Deep Focus modal close (Reviewer-B emits jarvis-deep-focus-change
@@ -345,7 +492,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
               <path strokeLinecap="round" strokeLinejoin="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
             </svg>
           )}
-          {saveConfirm ? "Saved" : "Save"}
+          {saveConfirm ? `Saved ${saveTime}` : "Save"}
         </button>
         <div
           aria-hidden
@@ -365,6 +512,25 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
             <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h5M4 9a8 8 0 1 1 0 6" />
           </svg>
           Load
+        </button>
+        <div
+          aria-hidden
+          style={{ width: 1, height: 16, backgroundColor: "var(--border-default)" }}
+        />
+        <button
+          onClick={openRecoverPanel}
+          className="flex items-center gap-1.5 px-3 h-8 transition-colors hover:text-foreground hover:bg-[var(--surface-raised)]"
+          style={{
+            fontSize: "12px",
+            fontWeight: 600,
+            color: "var(--accent)",
+          }}
+          title="Browse and restore any saved layout backup"
+        >
+          <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-7 3.3L3 8m0-5v5h5m4-1v5l3.5 2" />
+          </svg>
+          Recover
         </button>
       </div>
 
@@ -394,7 +560,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
                 <button
                   key={key}
                   onClick={() => toggleWidget(key)}
-                  className="flex items-center gap-1.5 transition-all"
+                  className="flex items-center gap-1.5 transition-[background-color,border-color,color,text-decoration-color] duration-150 ease-out"
                   style={{
                     fontSize: "12px",
                     fontWeight: 500,
@@ -421,6 +587,119 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
                 </button>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Recovery panel — modal-overlay so it floats over the grid */}
+      {recoverOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Recover saved layout"
+          className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-start justify-center p-6 animate-in fade-in duration-150"
+          onClick={(e) => { if (e.target === e.currentTarget) setRecoverOpen(false); }}
+        >
+          <div
+            className="w-full max-w-2xl mt-12 animate-in fade-in zoom-in-95 duration-200 ease-out"
+            style={{
+              borderRadius: "var(--radius-card)",
+              border: "1px solid var(--border-default)",
+              backgroundColor: "var(--surface-1)",
+              boxShadow: "var(--shadow-card-hover)",
+              maxHeight: "calc(100vh - 120px)",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div className="flex items-center justify-between p-4 border-b" style={{borderColor:"var(--border-default)"}}>
+              <div>
+                <p className="jv-section-title">Recover saved layout</p>
+                <p style={{fontSize:"11px",color:"var(--ink-muted)",marginTop:"2px"}}>
+                  {recoverList.length === 0
+                    ? "No saved snapshots yet — backups will appear here as you edit."
+                    : `${recoverList.length} snapshot${recoverList.length === 1 ? "" : "s"} found · newest first`}
+                </p>
+              </div>
+              <button
+                onClick={() => setRecoverOpen(false)}
+                className="px-2 h-7 rounded hover:bg-[var(--surface-raised)]"
+                style={{fontSize:"11px",color:"var(--ink-tertiary)"}}
+                aria-label="Close"
+              >
+                Close
+              </button>
+            </div>
+            <div style={{overflowY:"auto",padding:"8px"}}>
+              {recoverList.length === 0 ? (
+                <div className="text-center py-8" style={{fontSize:"12px",color:"var(--ink-muted)"}}>
+                  Your layout edits are now auto-backed-up. Drag a widget in edit mode and re-open this panel.
+                </div>
+              ) : (
+                recoverList.map((entry) => {
+                  const labelDate = entry.ts
+                    ? new Date(entry.ts).toLocaleString(undefined, {
+                        month: "short", day: "numeric",
+                        hour: "numeric", minute: "2-digit",
+                      })
+                    : entry.key;
+                  const kind = entry.key.startsWith("jarvis-layout-recovery-")
+                    ? "Recovered"
+                    : entry.key.startsWith("jarvis-layout-pre-recovery-")
+                      ? "Before-recover"
+                      : entry.key.startsWith("jarvis-layout-snapshot-")
+                        ? "Snapshot"
+                        : "Auto-backup";
+                  return (
+                    <div
+                      key={entry.key}
+                      className="flex items-start gap-3 p-3 mb-1 rounded"
+                      style={{
+                        borderRadius: "var(--radius-chip)",
+                        backgroundColor: "var(--surface-2)",
+                      }}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span style={{fontSize:"10px",fontWeight:600,padding:"1px 6px",borderRadius:"3px",backgroundColor:"var(--surface-raised)",color:"var(--ink-tertiary)"}}>
+                            {kind}
+                          </span>
+                          <span style={{fontSize:"12px",fontWeight:500,color:"var(--ink-primary)"}}>
+                            {labelDate}
+                          </span>
+                        </div>
+                        <p style={{fontSize:"11px",color:"var(--ink-muted)",marginTop:"4px",fontFamily:"var(--font-mono)"}}>
+                          {entry.summary}
+                        </p>
+                        <p style={{fontSize:"10px",color:"var(--ink-muted)",marginTop:"2px"}}>
+                          {entry.key}
+                        </p>
+                      </div>
+                      <div className="flex flex-col gap-1 shrink-0">
+                        <button
+                          onClick={() => applyRecovery(entry)}
+                          className="px-3 h-7 rounded transition-colors hover:bg-[var(--surface-raised)]"
+                          style={{fontSize:"11px",fontWeight:500,backgroundColor:"var(--accent-soft)",color:"var(--accent)",border:"1px solid var(--accent)"}}
+                        >
+                          Apply
+                        </button>
+                        {!entry.key.startsWith("jarvis-layout-recovery-") && (
+                          <button
+                            onClick={() => deleteRecoveryEntry(entry.key)}
+                            className="px-2 h-6 rounded transition-colors hover:bg-[var(--surface-raised)]"
+                            style={{fontSize:"10px",color:"var(--ink-muted)"}}
+                            title="Delete this snapshot"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -470,9 +749,7 @@ export function DashboardGrid({ widgets }: DashboardGridProps) {
           margin={[12, 12]}
         >
           {visibleKeys.map((key) => (
-            <div key={key} className="h-full w-full">
-              {widgets[key]}
-            </div>
+            <div key={key} className="h-full w-full">{widgets[key]}</div>
           ))}
         </Responsive>
       )}

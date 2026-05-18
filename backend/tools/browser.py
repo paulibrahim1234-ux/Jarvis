@@ -166,9 +166,17 @@ def _chrome_js(code: str, timeout: int = 10) -> str:
     _logging.getLogger("jarvis.browser").debug(
         "browser_run_js called (len=%d)", len(code or "")
     )
-    # Wrap in try/catch so errors surface clearly
+    # Wrap in try/catch so errors surface clearly. Sandbox dangerous globals
+    # (Sec#11) so injected JS — e.g. from prompt-injected pages chaining
+    # through browser_run_js — cannot exfiltrate cookies/sessionStorage via
+    # outbound network APIs. Shadowed in the IIFE scope so the user-provided
+    # `code` literally references `undefined` instead of the real fetch/etc.
     safe_code = (
         "(function() {"
+        "  var fetch=undefined, XMLHttpRequest=undefined, WebSocket=undefined,"
+        "      EventSource=undefined, navigator={sendBeacon:undefined},"
+        "      Image=function(){throw new Error('blocked');},"
+        "      importScripts=undefined;"
         "  try {"
         f"    return String({code});"
         "  } catch(e) {"
@@ -216,7 +224,15 @@ def _chrome_navigate(url: str):
         raise ValueError(f'invalid URL scheme: {url!r}')
     safe = url.replace('\\', '\\\\').replace('"', '\\"')
     script = f'tell application "{BROWSER_APP}" to open location "{safe}"'
-    subprocess.run(["osascript", "-e", script], timeout=10)
+    # Capture output so callers see osascript failures (browser quit,
+    # Apple Events not authorised, etc.) instead of silently no-op'ing.
+    r = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        err = (r.stderr or "").strip() or "osascript failed (no stderr)"
+        raise RuntimeError(f"navigate via {BROWSER_APP} failed: {err}")
 
 
 def _chrome_get_url() -> str:
@@ -710,7 +726,6 @@ def _uworld_scrape_history() -> dict:
     import os
     import json as _json
     import logging
-    import re as _re
     import tempfile as _tf
     from pathlib import Path as _Path
 

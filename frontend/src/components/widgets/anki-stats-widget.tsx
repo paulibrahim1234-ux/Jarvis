@@ -495,8 +495,8 @@ export function AnkiStatsWidget() {
               <div className="space-y-2">
                 <div className="relative h-3 w-full overflow-hidden rounded-full bg-foreground/5">
                   <div
-                    className={`h-full rounded-full bg-gradient-to-r ${progressGradient(progressPct)} transition-all duration-500`}
-                    style={{ width: `${progressPct}%` }}
+                    className={`h-full rounded-full bg-gradient-to-r ${progressGradient(progressPct)} transition-transform duration-500 ease-out origin-left`}
+                    style={{ transform: `scaleX(${progressPct / 100})`, width: '100%' }}
                   />
                 </div>
                 <div className="flex justify-between text-xs text-muted-foreground">

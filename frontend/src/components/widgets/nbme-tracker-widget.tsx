@@ -350,8 +350,14 @@ export function NBMETrackerWidget() {
 
         <div className="w-full flex-1 min-h-0" style={{ minHeight: 100 }}>
           {loading ? (
-            <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
-              Loading...
+            <div className="h-full w-full flex flex-col gap-2 px-2 py-3" aria-hidden>
+              <div className="jv-skeleton h-3 w-24 rounded" />
+              <div className="flex-1 min-h-0 jv-skeleton rounded" />
+              <div className="flex gap-2">
+                <div className="jv-skeleton h-3 w-16 rounded" />
+                <div className="jv-skeleton h-3 w-12 rounded" />
+                <div className="jv-skeleton h-3 w-20 rounded" />
+              </div>
             </div>
           ) : chartData.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center gap-4 border border-dashed border-foreground/10 rounded-lg px-4 text-center">

@@ -2,7 +2,7 @@
 Open-in-app endpoints — launch native macOS apps to specific items.
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from typing import Optional
 

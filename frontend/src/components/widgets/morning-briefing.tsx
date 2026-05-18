@@ -8,7 +8,7 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { CheckCircle2, ListTodo, CalendarDays, Mail, Bell, AlertTriangle } from "lucide-react";
-import { fetchBriefing, BACKEND, addTodoReminder, completeTodoReminder, type BriefingTodo } from "@/lib/api";
+import { fetchBriefing, BACKEND, addTodoReminder, completeTodoReminder, dismissAutoTodo, type BriefingTodo } from "@/lib/api";
 import { jarvisConfig } from "@/lib/jarvis-config";
 import { WidgetWrapper, type WidgetStatus } from "@/components/layout/widget-wrapper";
 import Skeleton from "@/components/ui/skeleton";
@@ -53,6 +53,7 @@ export function MorningBriefing() {
   const [todos, setTodos] = useState<BriefingTodo[]>([]);
   const [newTodoText, setNewTodoText] = useState("");
   const [todoSubmitting, setTodoSubmitting] = useState(false);
+  const [todoError, setTodoError] = useState<string | null>(null);
 
   // Density state for compact gap reduction (F10)
   const [density, setDensityState] = useState<Density>("comfortable");
@@ -141,25 +142,39 @@ export function MorningBriefing() {
     setNewTodoText("");
 
     try {
-      await addTodoReminder(text);
-      // Refresh after 1 s so the Reminders.app-assigned id replaces the
-      // temp id and bidirectional sync state is accurate.
-      setTimeout(() => load(), 1000);
+      const result = await addTodoReminder(text);
+      if (!result.ok) {
+        // Backend returned ok:false — rollback the optimistic item and show error.
+        setTodos((prev) => prev.filter((t) => t.id !== tempId));
+        setTodoError("Couldn't save todo — Reminders.app may be unavailable. Try again.");
+        // Auto-clear the error after 4 s so it doesn't linger.
+        setTimeout(() => setTodoError(null), 4000);
+      } else {
+        setTodoError(null);
+        // Refresh after 1 s so the Reminders.app-assigned id replaces the
+        // temp id and bidirectional sync state is accurate.
+        setTimeout(() => load(), 1000);
+      }
     } catch {
-      // Rollback the optimistic item on failure.
+      // Rollback the optimistic item on network failure.
       setTodos((prev) => prev.filter((t) => t.id !== tempId));
+      setTodoError("Network error — todo not saved.");
+      setTimeout(() => setTodoError(null), 4000);
     } finally {
       setTodoSubmitting(false);
     }
   }, [newTodoText, todoSubmitting, load]);
 
   const toggleTodo = useCallback(async (todo: BriefingTodo) => {
-    // Auto-extracted todos are ephemeral — no server-side storage to PATCH.
-    // Optimistic local toggle is enough for the session.
+    // Auto-extracted todos: dismiss server-side so they don't repopulate after
+    // cache bust. Fire-and-forget (don't await) to keep the UI instant, then
+    // reload after 1.5 s so the next briefing poll reflects the tombstone.
     if (todo.id.startsWith("auto_")) {
-      setTodos((prev) =>
-        prev.map((t) => (t.id === todo.id ? { ...t, done: !t.done } : t)),
-      );
+      setTodos((prev) => prev.filter((t) => t.id !== todo.id));
+      // WHY fire-and-forget: dismissal is best-effort; the local filter above
+      // gives instant feedback. The reload confirms the tombstone took effect.
+      void dismissAutoTodo(todo.id, todo.source_email_id, todo.text);
+      setTimeout(() => load(), 1500);
       return;
     }
 
@@ -421,7 +436,7 @@ export function MorningBriefing() {
                 <li key={t.id} className="flex items-start gap-2 text-xs group">
                   <button
                     onClick={() => toggleTodo(t)}
-                    className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 rounded border border-foreground/20 hover:border-emerald-400 transition-colors"
+                    className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 rounded border border-foreground/20 hover:border-[var(--status-live)] transition-colors"
                     aria-label={`Mark "${t.text}" done`}
                   />
                   <div className="flex-1 min-w-0">
@@ -492,6 +507,9 @@ export function MorningBriefing() {
               Add
             </button>
           </form>
+          {todoError && (
+            <p className="mt-1 text-[11px] text-red-400/90">{todoError}</p>
+          )}
         </section>
 
         {/* Section 3 — Today's calendar */}

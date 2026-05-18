@@ -259,6 +259,19 @@ def run_applescript(script: str) -> dict:
         "system events",    # blocks UI scripting that bypasses other guards
     )
     script_lower = script.lower()
+    # Sec#11: substring blocklists are bypassable via `run script` evaluating
+    # a runtime-built string ("do " & "shell " & "script"), `load script`,
+    # or raw four-char-code «event ascrcmnd». Block the EVALUATORS and the
+    # raw-event syntax so the blocklist below is reachable.
+    _EVAL_BLOCKED = (
+        "run script",
+        "load script",
+        "store script",
+        "«event",      # four-char-code raw events (literal U+00AB «)
+    )
+    for pattern in _EVAL_BLOCKED:
+        if pattern in script_lower:
+            return {"error": f"blocked: AppleScript dynamic-eval forbidden ({pattern!r})"}
     for pattern in _APPLESCRIPT_BLOCKED:
         if pattern.lower() in script_lower:
             return {"error": f"blocked: AppleScript contains disallowed pattern: {pattern!r}"}

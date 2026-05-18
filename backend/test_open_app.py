@@ -7,7 +7,7 @@ Run with: cd backend && source .venv/bin/activate && python test_open_app.py
 
 import subprocess
 import sys
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 from tools.desktop_apps import (
     open_outlook_email,
     open_messages_chat,
@@ -72,7 +72,13 @@ def test_open_outlook_email_timeout():
 def test_open_messages_with_phone():
     """Test opening Messages with phone number."""
     with patch("tools.desktop_apps.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock()
+        # Production checks `proc.returncode == 0` to short-circuit on success.
+        # Without an explicit returncode the MagicMock compares falsey, falls
+        # through to the AppleScript fallback path, and causes 3 subprocess
+        # calls instead of 1.
+        proc_mock = MagicMock()
+        proc_mock.returncode = 0
+        mock_run.return_value = proc_mock
         result = open_messages_chat("+16185551234")
         assert result["ok"] is True
         mock_run.assert_called_once()
@@ -129,7 +135,7 @@ def test_open_outlook_calendar_fallback():
 
 
 def test_open_uworld():
-    """Test opening UWorld login page."""
+    """Test opening UWorld home page (no ref)."""
     with patch("tools.desktop_apps.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock()
         result = open_uworld()
@@ -137,7 +143,10 @@ def test_open_uworld():
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
         assert "open" in call_args
-        assert "https://www.uworld.com/login" in call_args
+        # Production opens the UWorld root when no ref/dashboard ref is given
+        # (the per-course dashboard URL is a separate code path under
+        # ref="dashboard"). The login subpath isn't part of the prod flow.
+        assert "https://www.uworld.com/" in call_args
         print("✓ test_open_uworld")
 
 
@@ -258,8 +267,20 @@ def _make_run_result(stdout="", stderr="", returncode=0):
     return r
 
 
+def _reset_outlook_cache():
+    """Reset _OUTLOOK_CONFIRMED_UNTIL between tests.
+
+    The module stamps a 30s "confirmed running" cache after a successful probe.
+    Without resetting, subsequent tests in this file hit the cache fast-path and
+    bypass the subprocess.run mocks entirely (call_count stays at 0).
+    """
+    import tools.desktop_apps as _da
+    _da._OUTLOOK_CONFIRMED_UNTIL = 0.0
+
+
 def test_ensure_outlook_running_already_up():
     """If Outlook is already running, no launch command is issued."""
+    _reset_outlook_cache()
     # First call → System Events check returns "true" (already running).
     # Second call → New Outlook probe returns a plain integer (Classic mode).
     with patch("tools.desktop_apps.subprocess.run") as mock_run:
@@ -276,6 +297,7 @@ def test_ensure_outlook_running_already_up():
 
 def test_ensure_outlook_running_not_running_then_launches():
     """When Outlook is not running, open -a is called and polling succeeds."""
+    _reset_outlook_cache()
     call_counter = {"n": 0}
 
     def side_effect(cmd, **kwargs):
@@ -306,6 +328,7 @@ def test_ensure_outlook_running_not_running_then_launches():
 
 def test_ensure_outlook_running_launch_timeout():
     """If Outlook never appears after launch, OutlookNotRunningError is raised."""
+    _reset_outlook_cache()
     with patch("tools.desktop_apps.subprocess.run") as mock_run, \
          patch("tools.desktop_apps.time.sleep"), \
          patch("tools.desktop_apps.time.time") as mock_time:
@@ -323,6 +346,7 @@ def test_ensure_outlook_running_launch_timeout():
 
 def test_ensure_outlook_new_outlook_detected():
     """If New Outlook probe returns 'can't get exchange accounts', NewOutlookModeError is raised."""
+    _reset_outlook_cache()
     with patch("tools.desktop_apps.subprocess.run") as mock_run:
         mock_run.side_effect = [
             _make_run_result(stdout="true"),  # _is_running — Outlook up

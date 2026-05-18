@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { Pencil, Check, Rows3 } from "lucide-react";
 import { BACKEND, fetchAuthStatus, type AuthStatus } from "@/lib/api";
 import { type Theme, getInitialTheme, applyTheme, persistTheme } from "@/lib/theme";
@@ -18,8 +18,95 @@ const DEEP_FOCUS_EVENT = "jarvis-deep-focus-change";
 
 type ServiceStatus = "up" | "down" | "unknown";
 
-export function Topbar() {
+// Clock — extracted + memoized so the 1Hz tick does not re-render the entire
+// Topbar (which carries auth/health/density/theme state). Memo() means React
+// skips Clock re-renders unless its props change (none), and the parent's
+// per-second tick is contained to this small subtree.
+const Clock = memo(function Clock() {
   const [now, setNow] = useState<Date | null>(null);
+  useEffect(() => {
+    setNow(new Date());
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const timeStr = now
+    ? now.toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      })
+    : "";
+
+  // Extract seconds directly — toLocaleTimeString with only `second` is
+  // inconsistent across browsers (Safari may return "HH:MM:SS" instead of "SS").
+  const secondsStr = now ? String(now.getSeconds()).padStart(2, "0") : "";
+
+  const weekdayStr = now
+    ? now.toLocaleDateString("en-US", { weekday: "long" })
+    : "";
+
+  const dateStr = now
+    ? now.toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+      })
+    : "";
+
+  return (
+    <div className="relative flex items-center gap-4">
+      <div className="hidden md:flex flex-col items-end leading-tight">
+        <span
+          style={{
+            fontSize: "13px",
+            color: "var(--ink-secondary)",
+            fontWeight: 500,
+          }}
+        >
+          {weekdayStr}
+        </span>
+        <span
+          style={{
+            fontSize: "11px",
+            color: "var(--ink-tertiary)",
+          }}
+        >
+          {dateStr}
+        </span>
+      </div>
+      {/* F11: rounded-full matches the icon buttons' radius (28px pill) */}
+      <div
+        className="flex items-baseline gap-1 rounded-full px-2.5 py-1"
+        style={{
+          backgroundColor: "var(--surface-2)",
+          border: "1px solid var(--border-subtle)",
+        }}
+      >
+        <span
+          className="font-mono tabular-nums"
+          style={{
+            fontSize: "14px",
+            color: "var(--ink-primary)",
+            fontWeight: 500,
+          }}
+        >
+          {timeStr}
+        </span>
+        <span
+          className="font-mono tabular-nums"
+          style={{
+            fontSize: "11px",
+            color: "var(--ink-muted)",
+          }}
+        >
+          :{secondsStr}
+        </span>
+      </div>
+    </div>
+  );
+});
+
+export function Topbar() {
   const [backend, setBackend] = useState<ServiceStatus>("unknown");
   const [theme, setTheme] = useState<Theme>("dark");
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
@@ -56,25 +143,32 @@ export function Topbar() {
     return subscribeDensityChange((d) => setDensityState(d));
   }, []);
 
-  function toggleDensity() {
+  const toggleDensity = useCallback(() => {
+    // Side effects (DOM class, persist, broadcast event) MUST live outside the
+    // setState updater. React invokes updater fns during render in strict mode,
+    // so calling setDensity() here would dispatch a custom event mid-render
+    // and trigger setState in subscribed components (e.g. MorningBriefing) →
+    // "Cannot update a component while rendering a different component" warning.
     const next: Density = density === "compact" ? "comfortable" : "compact";
     setDensityState(next);
     setDensity(next); // applies body class + persists + dispatches
-  }
+  }, [density]);
 
-  function toggleDeepFocus() {
-    const next = !deepFocus;
-    setDeepFocus(next);
-    try {
-      if (next) localStorage.setItem(DEEP_FOCUS_KEY, "1");
-      else localStorage.removeItem(DEEP_FOCUS_KEY);
-    } catch {
-      /* ignore */
-    }
-    window.dispatchEvent(
-      new CustomEvent(DEEP_FOCUS_EVENT, { detail: { enabled: next } }),
-    );
-  }
+  const toggleDeepFocus = useCallback(() => {
+    setDeepFocus((prev) => {
+      const next = !prev;
+      try {
+        if (next) localStorage.setItem(DEEP_FOCUS_KEY, "1");
+        else localStorage.removeItem(DEEP_FOCUS_KEY);
+      } catch {
+        /* ignore */
+      }
+      window.dispatchEvent(
+        new CustomEvent(DEEP_FOCUS_EVENT, { detail: { enabled: next } }),
+      );
+      return next;
+    });
+  }, []);
 
   // Credential health — refreshes every 2 min on the client. The backend
   // caches the live Anthropic probe for 5 min, so this hits real Anthropic
@@ -98,12 +192,6 @@ export function Topbar() {
     };
   }, []);
 
-  useEffect(() => {
-    setNow(new Date());
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
   // Initialize theme from localStorage on mount
   useEffect(() => {
     const initial = getInitialTheme();
@@ -111,12 +199,14 @@ export function Topbar() {
     applyTheme(initial);
   }, []);
 
-  function toggleTheme() {
-    const next: Theme = theme === "dark" ? "light" : "dark";
-    setTheme(next);
-    applyTheme(next);
-    persistTheme(next);
-  }
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next: Theme = prev === "dark" ? "light" : "dark";
+      applyTheme(next);
+      persistTheme(next);
+      return next;
+    });
+  }, []);
 
   // Backend health probe — light, once every 30s
   useEffect(() => {
@@ -144,29 +234,6 @@ export function Topbar() {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
-
-  const timeStr = now
-    ? now.toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      })
-    : "";
-
-  // Extract seconds directly — toLocaleTimeString with only `second` is
-  // inconsistent across browsers (Safari may return "HH:MM:SS" instead of "SS").
-  const secondsStr = now ? String(now.getSeconds()).padStart(2, "0") : "";
-
-  const weekdayStr = now
-    ? now.toLocaleDateString("en-US", { weekday: "long" })
-    : "";
-
-  const dateStr = now
-    ? now.toLocaleDateString("en-US", {
-        month: "long",
-        day: "numeric",
-      })
-    : "";
 
   const statusLabel = backend === "up" ? "Live" : backend === "down" ? "Offline" : "Connecting";
   const statusState: "live" | "warn" | "error" | "loading" =
@@ -383,59 +450,9 @@ export function Topbar() {
         </button>
       </div>
 
-      {/* Date + time */}
-      <div className="relative flex items-center gap-4">
-        <div className="hidden md:flex flex-col items-end leading-tight">
-          <span
-            style={{
-              fontSize: "13px",
-              color: "var(--ink-secondary)",
-              fontWeight: 500,
-            }}
-          >
-            {weekdayStr}
-          </span>
-          <span
-            style={{
-              fontSize: "11px",
-              color: "var(--ink-tertiary)",
-            }}
-          >
-            {dateStr}
-          </span>
-        </div>
-        {/* F11: rounded-full matches the icon buttons' radius (28px pill) —
-              using rounded-md (6px) here created two different radii at the
-              same visual weight in the same header row, which read as a
-              design inconsistency. Pill is the topbar convention. */}
-        <div
-          className="flex items-baseline gap-1 rounded-full px-2.5 py-1"
-          style={{
-            backgroundColor: "var(--surface-2)",
-            border: "1px solid var(--border-subtle)",
-          }}
-        >
-          <span
-            className="font-mono tabular-nums"
-            style={{
-              fontSize: "14px",
-              color: "var(--ink-primary)",
-              fontWeight: 500,
-            }}
-          >
-            {timeStr}
-          </span>
-          <span
-            className="font-mono tabular-nums"
-            style={{
-              fontSize: "11px",
-              color: "var(--ink-muted)",
-            }}
-          >
-            :{secondsStr}
-          </span>
-        </div>
-      </div>
+      {/* Date + time — extracted to memoized <Clock /> so the per-second
+          tick re-renders only this subtree, not the entire Topbar. */}
+      <Clock />
     </header>
   );
 }

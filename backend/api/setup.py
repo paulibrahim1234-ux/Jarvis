@@ -10,15 +10,15 @@ import re
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from api._security import _require_local_origin
+from tools.computer import _write_env as _write_env_unsafe
+
 # Sec#9: validate Anthropic token format before writing to .env / Keychain.
 # Accepts both API keys (sk-ant-api...) and OAuth tokens (sk-ant-oat...).
 # Rejects obviously invalid strings early — catches copy-paste mistakes and
 # prompt-injection attempts that try to smuggle env-breaking chars into the
 # value (newlines, equals signs, etc. are excluded by the character class).
 _TOKEN_RE = re.compile(r"^sk-ant-(api|oat)\d+-[A-Za-z0-9_-]{20,}$")
-
-from api._security import _require_local_origin
-from tools.computer import _write_env as _write_env_unsafe
 
 router = APIRouter()
 
